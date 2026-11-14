@@ -1,192 +1,196 @@
-# Decisioni non coperte dal piano
+# Decisions not covered by the plan
 
-Scelte fatte durante l'implementazione su punti che il piano di progetto non
-fissa. Regola del piano: l'opzione più semplice e reversibile, annotata qui.
-Le decisioni che cambiano la semantica di un tipo del modello dati vanno
-invece in un ADR (`docs/adr/`).
+Choices made during implementation on points the project plan does not
+settle. The plan's rule: the simplest and most reversible option, recorded
+here. Decisions that change the semantics of a data model type go in an ADR
+(`docs/adr/`) instead.
 
-## Fase 0
+## Phase 0
 
-### D-001 · Codifica binaria: CBOR
-I record su disco e l'input degli hash di contenuto sono in CBOR (RFC 8949,
-crate `ciborium`). È autodescrittivo: le struct sono mappe con i nomi dei
-campi. Il piano dice che al modello dati si possono aggiungere campi; con CBOR
-un campo opzionale nuovo, omesso quando è assente, non rompe la lettura dei
-record vecchi e non cambia gli hash già calcolati. Un formato posizionale
-(postcard, bincode) sarebbe più compatto e veloce ma renderebbe ogni campo
-aggiunto una migrazione. Un'op tipica occupa circa 300 byte.
-*Reversibile:* la codifica è isolata in `kito_core::codec`; l'header di ogni
-file di log porta un numero di versione del formato.
+### D-001 · Binary encoding: CBOR
+On-disk records and the input of content hashes are in CBOR (RFC 8949,
+`ciborium` crate). It is self-describing: structs are maps with the field
+names. The plan says fields can be added to the data model; with CBOR a new
+optional field, omitted when absent, does not break the reading of old
+records and does not change the hashes already computed. A positional format
+(postcard, bincode) would be more compact and faster but would turn every
+added field into a migration. A typical op takes about 300 bytes.
+*Reversible:* the encoding is isolated in `kito_core::codec`; the header of
+every log file carries a format version number.
 
-### D-002 · `OpId` copre solo (parents, kind, author)
-Come da piano: "hash di (parents, kind, payload, author)". `lane`, `at` e
-`intent` restano fuori: sono metadati, e la stessa modifica dello stesso autore
-sugli stessi genitori è la stessa op. Gli hash strutturati usano BLAKE3 in
-modalità `derive_key` con un contesto per tipo, così un `OpId` non può
-collidere con un `BlobId`. I blob usano BLAKE3 semplice (coincide con `b3sum`).
+### D-002 · `OpId` covers only (parents, kind, author)
+As per the plan: "hash of (parents, kind, payload, author)". `lane`, `at` and
+`intent` stay out: they are metadata, and the same change by the same author
+on the same parents is the same op. Structured hashes use BLAKE3 in
+`derive_key` mode with one context per type, so an `OpId` cannot collide with
+a `BlobId`. Blobs use plain BLAKE3 (it matches `b3sum`).
 
-### D-003 · Tipi che il piano nomina senza definire
-`LaneId(u64)` (0 = linea principale), `CheckpointId(u64)` e `ConflictId(u64)`
-sono contatori locali al repository; `Author { kind: Agent | Human, name }`;
-`Hlc { wall_ms, logical }`; `Location { file, line, start, end }` con offset in
-byte; `TextEdit { start, end, text }` con intervalli riferiti al testo di
-partenza; `Verification { commands, passed, duration_ms }`;
-`Fingerprint { sketch: Vec<u32> }`, uno sketch MinHash la cui somiglianza è la
-frazione di posizioni uguali (l'algoritmo che lo calcola arriva con la fase 2).
+### D-003 · Types the plan names without defining
+`LaneId(u64)` (0 = main lane), `CheckpointId(u64)` and `ConflictId(u64)` are
+counters local to the repository; `Author { kind: Agent | Human, name }`;
+`Hlc { wall_ms, logical }`; `Location { file, line, start, end }` with byte
+offsets; `TextEdit { start, end, text }` with ranges that refer to the
+original text; `Verification { commands, passed, duration_ms }`;
+`Fingerprint { sketch: Vec<u32> }`, a MinHash sketch whose similarity is the
+fraction of equal positions (the algorithm that computes it arrives with
+phase 2).
 
-### D-004 · Percorsi UTF-8
-I `PathBuf` del modello dati sono relativi alla radice del repository e devono
-essere UTF-8 validi: un percorso che non lo è non si serializza. I file con
-nomi non UTF-8 verranno saltati con un avviso dalla cattura (fase 1).
+### D-004 · UTF-8 paths
+The `PathBuf`s of the data model are relative to the repository root and must
+be valid UTF-8: a path that is not cannot be serialized. Files with non-UTF-8
+names will be skipped with a warning by capture (phase 1).
 
-### D-005 · Un solo oplog globale, non uno per lane
-`oplog/` è un unico log a segmenti; l'indice `lane → op` dà la vista per lane.
-È il layout del piano e rende banale l'ordine totale di registrazione.
+### D-005 · A single global oplog, not one per lane
+`oplog/` is a single segmented log; the `lane → op` index gives the per-lane
+view. It is the plan's layout and makes the total recording order trivial.
 
-### D-006 · Cosa significa "confermata"
-Le scritture si accodano in memoria; `Store::commit` le rende durevoli. Un'op è
-confermata quando il `commit` che la segue restituisce `Ok`. L'ordine dentro
-`commit` è obbligato: fsync dei pack, poi scrittura e fsync dell'oplog, poi
-indice. Il buffer dell'oplog non tocca il file prima che i pack siano durevoli,
-quindi un'op presente su disco non cita mai un blob assente, nemmeno dopo una
-perdita di corrente.
+### D-006 · What "confirmed" means
+Writes are queued in memory; `Store::commit` makes them durable. An op is
+confirmed when the `commit` that follows it returns `Ok`. The order inside
+`commit` is mandatory: fsync of the packs, then write and fsync of the oplog,
+then the index. The oplog buffer does not touch the file before the packs are
+durable, so an op present on disk never references a missing blob, not even
+after a power loss.
 
-### D-007 · Coda troncata e dati confermati danneggiati sono casi diversi
-All'apertura il file attivo di ogni log viene riletto per intero. Il primo
-record non valido e tutto ciò che lo segue vengono scartati (dopo averne
-salvato una copia in `lost+found/`): è il "record finale troncato" del piano.
-Ma l'indice registra fin dove i log erano già confermati, e sotto quella soglia
-il recupero non scarta nulla: restituisce `StoreError::Corrupt`. Per accettare
-la perdita serve aprire con `StoreOptions::repair`. I segmenti sigillati non
-vengono mai troncati: un loro record danneggiato è un errore alla lettura e in
-`Store::verify`. Senza questa distinzione un bit rovinato a metà del segmento
-attivo farebbe sparire in silenzio tutte le op confermate successive.
-*Limite noto:* tra una sincronizzazione dell'indice e l'altra (1 secondo di
-default) la soglia è indietro, e un danno in quella finestra viene trattato
-come coda troncata.
+### D-007 · A torn tail and damaged confirmed data are different cases
+On open, the active file of every log is reread in full. The first invalid
+record and everything that follows it are discarded (after saving a copy in
+`lost+found/`): this is the plan's "truncated final record". But the index
+records how far the logs were already confirmed, and below that threshold
+recovery discards nothing: it returns `StoreError::Corrupt`. Accepting the
+loss requires opening with `StoreOptions::repair`. Sealed segments are never
+truncated: a damaged record in one of them is an error on read and in
+`Store::verify`. Without this distinction a single damaged bit in the middle
+of the active segment would silently make all the later confirmed ops
+disappear.
+*Known limitation:* between one index sync and the next (1 second by
+default) the threshold lags behind, and damage in that window is treated as a
+torn tail.
 
-### D-008 · Errore di scrittura = store avvelenato
-Dopo un errore di I/O in scrittura (disco pieno, fsync fallito) lo stato dei
-file è incerto: lo store rifiuta ogni altra scrittura con `Poisoned` e va
-riaperto. Le letture restano possibili. È più semplice che tentare un rollback
-in memoria, e il recupero all'apertura è già il percorso collaudato.
+### D-008 · Write error = poisoned store
+After a write I/O error (disk full, failed fsync) the state of the files is
+uncertain: the store rejects every further write with `Poisoned` and must be
+reopened. Reads remain possible. This is simpler than attempting an in-memory
+rollback, and recovery on open is already the well-tested path.
 
-### D-009 · Indice redb con commit non durevoli
-L'indice si aggiorna a ogni commit ma fa fsync solo ogni
-`index_sync_interval` (1 s) e alla chiusura. Dopo un crash può essere indietro
-rispetto ai log: l'apertura rilegge la coda dei log e lo riporta in pari. Se
-manca, è illeggibile, è più avanti dei log o non corrisponde a essi (si
-confronta il CRC dell'ultima op indicizzata), viene ricostruito da zero.
+### D-009 · redb index with non-durable commits
+The index is updated on every commit but fsyncs only every
+`index_sync_interval` (1 s) and on close. After a crash it may lag behind the
+logs: opening rereads the tail of the logs and catches it up. If it is
+missing, unreadable, ahead of the logs or does not match them (the CRC of the
+last indexed op is compared), it is rebuilt from scratch.
 
-### D-010 · Limiti di dimensione
-Un record porta al massimo 2 GiB − 1 di payload, quindi un blob non può
-superare quella dimensione (i file binari grandi sono fuori scope per la v1).
-Un blob più grande di un pack ottiene un pack tutto suo.
+### D-010 · Size limits
+A record carries at most 2 GiB − 1 of payload, so a blob cannot exceed that
+size (large binary files are out of scope for v1). A blob larger than a pack
+gets a pack of its own.
 
-### D-011 · Lettori in altri processi: rimandati
-Le letture passano da `mmap` dentro il processo che possiede lo store. Un
-lettore in un altro processo (la CLI che legge i file senza passare dal
-daemon) non è previsto in questa fase: l'architettura fa passare CLI e MCP
-dal daemon. Se servirà, andrà aggiunto un lock condiviso che escluda il
-troncamento del recupero.
+### D-011 · Readers in other processes: deferred
+Reads go through `mmap` inside the process that owns the store. A reader in
+another process (the CLI reading the files without going through the daemon)
+is not provided for in this phase: the architecture routes CLI and MCP
+through the daemon. If it becomes necessary, a shared lock that excludes
+recovery's truncation will have to be added.
 
-### D-012 · I crate nascono con la loro fase
-Il workspace arriverà a 12 crate; ognuno viene creato quando comincia la fase
-che lo riempie, invece di tenere crate vuoti.
+### D-012 · Crates are created with their phase
+The workspace will reach 12 crates; each one is created when the phase that
+fills it begins, instead of keeping empty crates around.
 
-## Fase 1
+## Phase 1
 
-### D-013 · Tipo dei file (`FileMode`)
-`FileAdd` ha un campo opzionale `mode` (normale, eseguibile, link simbolico),
-assente dalla codifica quando è "normale". Senza, l'export su git perderebbe
-il bit di esecuzione e la CI smetterebbe di funzionare. È un campo aggiunto,
-non un cambio di semantica: gli hash dei `FileAdd` esistenti non cambiano. Il
-modello non ha un'op per il solo cambio di tipo, quindi un `chmod +x` è un
-`FileRemove` seguito da un `FileAdd`.
+### D-013 · File type (`FileMode`)
+`FileAdd` has an optional `mode` field (regular, executable, symbolic link),
+absent from the encoding when it is "regular". Without it, the git export
+would lose the executable bit and CI would stop working. It is an added
+field, not a change of semantics: the hashes of the existing `FileAdd`s do
+not change. The model has no op for a type change alone, so a `chmod +x` is a
+`FileRemove` followed by a `FileAdd`.
 
-### D-014 · L'albero si ricostruisce solo dalle op
-`Tree` (percorso → blob) si ottiene riapplicando le op, senza mai rieseguire
-un parser: la stessa storia dà lo stesso albero anche con versioni future
-delle grammatiche. Conseguenza per la fase 2: le op simboliche dovranno
-portare con sé anche l'effetto sul file (blob prima e dopo), oppure essere
-accompagnate da un'op che lo fa.
+### D-014 · The tree is rebuilt from the ops alone
+`Tree` (path → blob) is obtained by replaying the ops, without ever re-running
+a parser: the same history gives the same tree even with future versions of
+the grammars. Consequence for phase 2: symbolic ops will have to carry their
+effect on the file as well (blob before and after), or be accompanied by an
+op that does.
 
-### D-015 · Edit in linea solo se piccoli
-`TextEdit.edits` contiene gli edit esatti (diff per righe) quando il file è
-testo e la modifica pesa meno di 32 KiB; altrimenti è vuoto, e la modifica
-resta descritta dai due blob. Evita di scrivere due volte i contenuti grandi.
+### D-015 · Inline edits only when small
+`TextEdit.edits` contains the exact edits (line diff) when the file is text
+and the change weighs less than 32 KiB; otherwise it is empty, and the change
+remains described by the two blobs. This avoids writing large contents twice.
 
-### D-016 · Rename solo esatti
-Un file sparito e uno comparso nello stesso gruppo, con contenuto identico
-(non vuoto) e stesso tipo, sono un `FileRename`. Nessuna euristica di
-somiglianza: un falso rename inquina la storia. Rename con modifica nello
-stesso salvataggio diventano rimozione più aggiunta.
+### D-016 · Exact renames only
+A file that disappeared and one that appeared in the same group, with
+identical (non-empty) content and the same type, are a `FileRename`. No
+similarity heuristics: a false rename pollutes the history. A rename with a
+modification in the same save becomes a removal plus an addition.
 
-### D-017 · Export su git
-- I commit sono deterministici: autore dal checkpoint, data dall'ultima op,
-  messaggio = etichetta più `Kito-Checkpoint: ckpt#N`. Indirizzo email
-  `<autore>@kito.invalid`, configurabile.
-- Il primo export in un repository git che ha già commit li prende come
-  genitori: la storia continua.
-- Il ramo avanza solo in fast-forward. Se punta a un commit che Kito non
-  conosce, l'export si ferma (`Diverged`). Se era rimasto indietro per un
-  export interrotto, viene riallineato.
-- Dopo l'export l'indice di git viene riscritto dall'ultimo albero.
+### D-017 · Git export
+- Commits are deterministic: author from the checkpoint, date from the last
+  op, message = label plus `Kito-Checkpoint: ckpt#N`. Email address
+  `<author>@kito.invalid`, configurable.
+- The first export into a git repository that already has commits takes them
+  as parents: the history continues.
+- The branch advances only by fast-forward. If it points to a commit Kito
+  does not know, the export stops (`Diverged`). If it had fallen behind
+  because of an interrupted export, it is realigned.
+- After the export, git's index is rewritten from the latest tree.
 
-### D-018 · Import da git
-Si importa la catena dei primi genitori di HEAD: ogni commit diventa le op
-che portano dall'albero del genitore al suo, più un checkpoint che ricorda il
-commit (e quindi non viene riesportato). I submodule e i percorsi non UTF-8
-si saltano, elencandoli. `kito import` crea `.kito/` se manca.
+### D-018 · Git import
+The first-parent chain of HEAD is imported: every commit becomes the ops that
+lead from its parent's tree to its own, plus a checkpoint that remembers the
+commit (which is therefore not re-exported). Submodules and non-UTF-8 paths
+are skipped and listed. `kito import` creates `.kito/` if it is missing.
 
-### D-019 · Protocollo tra daemon e client
-JSON-RPC 2.0, un messaggio per riga, su socket Unix in `.kito/kitod.sock`
-(in `/tmp` se il percorso supera il limite dei socket). È il default indicato
-tra le questioni aperte del piano; un protocollo binario resta possibile
-perché il trasporto è isolato in `kitod::rpc` e `kitod::client`.
+### D-019 · Protocol between daemon and client
+JSON-RPC 2.0, one message per line, over a Unix socket at `.kito/kitod.sock`
+(in `/tmp` if the path exceeds the socket length limit). It is the default
+indicated among the plan's open questions; a binary protocol remains possible
+because the transport is isolated in `kitod::rpc` and `kitod::client`.
 
-### D-020 · `sync` è una scansione completa
-La barriera non si fida degli eventi: confronta tutta la cartella di lavoro
-con l'albero (con la cache degli stat costa uno `stat` per file). Quando
-ritorna, ciò che era su disco è nel log, anche se il watcher ha perso eventi.
+### D-020 · `sync` is a full scan
+The barrier does not trust events: it compares the whole working directory
+with the tree (with the stat cache it costs one `stat` per file). When it
+returns, whatever was on disk is in the log, even if the watcher missed
+events.
 
-### D-021 · Un file tracciato resta tracciato
-Come in git, una regola di ignore aggiunta dopo non fa sparire dal log un
-file già tracciato; vale per i file nuovi.
+### D-021 · A tracked file stays tracked
+As in git, an ignore rule added later does not make an already tracked file
+disappear from the log; it applies to new files.
 
-### D-022 · `kito init` avvia il daemon e non scavalca git
-La cattura è continua solo se il daemon gira: `init` e `import` lo avviano.
-In una cartella che è già un repository git `init` si rifiuta e indica
-`kito import` (che ne porta dentro la storia) o `init --fresh`.
+### D-022 · `kito init` starts the daemon and does not override git
+Capture is continuous only if the daemon is running: `init` and `import`
+start it. In a directory that is already a git repository `init` refuses and
+points to `kito import` (which brings its history in) or `init --fresh`.
 
-### D-023 · Comandi in più rispetto al piano
-`kito sync` (la barriera, che il piano prevede solo come tool MCP),
-`kito status` e `kito daemon start|stop`.
+### D-023 · Commands beyond the plan
+`kito sync` (the barrier, which the plan provides only as an MCP tool),
+`kito status` and `kito daemon start|stop`.
 
-### D-024 · Stato salvato della linea principale
-`.kito/lanes/main/state` contiene l'albero e la cache degli stat per
-ripartire in fretta. È un derivato: se manca, è illeggibile o non corrisponde
-al log, si riapplicano le op.
+### D-024 · Saved state of the main lane
+`.kito/lanes/main/state` contains the tree and the stat cache, to restart
+quickly. It is derived data: if it is missing, unreadable or does not match
+the log, the ops are replayed.
 
-### D-025 · Quando gli eventi dei file non arrivano
-Su alcuni file system il sistema operativo non segnala tutte le modifiche:
-il caso tipico è `/mnt/c` sotto WSL, dove ciò che cambia un programma Windows
-non genera eventi in Linux, ma vale anche per le cartelle di rete. Tre misure:
+### D-025 · When file events do not arrive
+On some file systems the operating system does not report every change: the
+typical case is `/mnt/c` under WSL, where what a Windows program changes
+generates no events in Linux, but the same holds for network shares. Three
+measures:
 
-- `kito log` e `kito status` eseguono la barriera (`sync`) prima di
-  rispondere: ciò che mostrano riflette sempre il disco, a prescindere dal
-  watcher.
-- Se una scansione trova modifiche mentre il watcher tace da più di un
-  secondo, il daemon conclude che lì gli eventi non bastano e passa alla
-  scansione frequente: al più una al secondo, e spendendo in scansioni non
-  più di un ventesimo del tempo. Parte direttamente così sui file system noti
-  per questo problema (9p, drvfs, cifs, nfs…) e con `capture.watch = false`.
-- `kito daemon status` dice quale intervallo è in uso e perché; `init` e
-  `import` avvisano subito.
+- `kito log` and `kito status` run the barrier (`sync`) before answering:
+  what they show always reflects the disk, regardless of the watcher.
+- If a scan finds changes while the watcher has been silent for more than a
+  second, the daemon concludes that events are not enough there and switches
+  to frequent scanning: at most one scan per second, and spending no more
+  than a twentieth of the time on scans. It starts out this way directly on
+  the file systems known for this problem (9p, drvfs, cifs, nfs…) and with
+  `capture.watch = false`.
+- `kito daemon status` says which interval is in use and why; `init` and
+  `import` warn right away.
 
-Con la scansione al posto degli eventi la cattura resta completa ma meno
-fine: i salvataggi tra una scansione e l'altra si fondono in una sola op, e
-l'ora registrata è quella della scansione.
+With scanning in place of events, capture stays complete but less
+fine-grained: the saves between one scan and the next merge into a single op,
+and the recorded time is that of the scan.
 
 ### D-026 · Identity
 Who signs captured changes is resolved, in order, from: the repository

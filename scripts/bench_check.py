@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Fallisce se un benchmark criterion è peggiorato oltre la soglia.
+"""Fails if a criterion benchmark has regressed beyond the threshold.
 
-Legge i confronti che criterion scrive in target/criterion/**/change/estimates.json
-dopo un `cargo bench -- --baseline <nome>`. Un benchmark conta come regressione
-solo se anche l'estremo inferiore dell'intervallo di confidenza supera la
-soglia: così il rumore di una macchina condivisa non fa fallire la CI.
+Reads the comparisons that criterion writes to target/criterion/**/change/estimates.json
+after a `cargo bench -- --baseline <name>`. A benchmark counts as a regression
+only if the lower bound of the confidence interval also exceeds the
+threshold: that way the noise of a shared machine does not make CI fail.
 """
 
 import argparse
@@ -22,7 +22,7 @@ def main() -> int:
     root = pathlib.Path(args.dir)
     files = sorted(root.glob("**/change/estimates.json"))
     if not files:
-        print(f"nessun confronto trovato in {root}: lancia prima `cargo bench -- --baseline <nome>`")
+        print(f"no comparison found in {root}: run `cargo bench -- --baseline <name>` first")
         return 2
 
     regressions = []
@@ -34,13 +34,13 @@ def main() -> int:
         flag = ""
         if lower > args.threshold:
             regressions.append(name)
-            flag = "  <-- REGRESSIONE"
-        print(f"{name:55} {change:+8.1%} (minimo {lower:+.1%}){flag}")
+            flag = "  <-- REGRESSION"
+        print(f"{name:55} {change:+8.1%} (min {lower:+.1%}){flag}")
 
     if regressions:
-        print(f"\n{len(regressions)} benchmark peggiorati di oltre il {args.threshold:.0%}: {', '.join(regressions)}")
+        print(f"\n{len(regressions)} benchmark(s) regressed by more than {args.threshold:.0%}: {', '.join(regressions)}")
         return 1
-    print(f"\nnessuna regressione oltre il {args.threshold:.0%}")
+    print(f"\nno regression beyond {args.threshold:.0%}")
     return 0
 
 
