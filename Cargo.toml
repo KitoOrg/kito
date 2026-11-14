@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/kito-core", "crates/kito-store"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+kito-core = { path = "crates/kito-core" }
+kito-store = { path = "crates/kito-store" }
+
+blake3 = "1"
+ciborium = "0.2"
+crc32c = "0.6"
+memmap2 = "0.9"
+redb = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = { version = "1", features = ["serde", "union"] }
+thiserror = "2"
+zstd = "0.13"
+
+# test / bench
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+debug = 1
+
+[profile.bench]
+debug = 1
