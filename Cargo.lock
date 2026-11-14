@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "kito-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "kito-core",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "kito-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake3",
  "ciborium",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "kito-diff"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "kito-core",
  "kito-parse",
@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "kito-git"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gix",
  "kito-core",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "kito-parse"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "kito-core",
  "proptest",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "kito-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crc32c",
  "criterion",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "kitod"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ignore",
  "kito-core",

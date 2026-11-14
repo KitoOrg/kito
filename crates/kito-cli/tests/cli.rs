@@ -207,7 +207,7 @@ fn log_is_up_to_date_even_when_file_events_are_missing() {
     assert!(log.lines().next().unwrap().contains("TextEdit"), "kito log must show it right away:\n{log}");
     let status = ok(root, &["daemon", "status"]);
     assert!(status.contains("the operating system did not report 1 change"), "{status}");
-    assert!(status.contains("full scan every 1 s"), "{status}");
+    assert!(status.contains("full scan every") && !status.contains("full scan every 60 s"), "{status}");
     ok(root, &["daemon", "stop"]);
 }
 

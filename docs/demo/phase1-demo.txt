@@ -1,0 +1,58 @@
+
+$ kito init
+Kito repository created in /tmp/kito-demo/.kito
+The daemon is running: every save is recorded from now on.
+
+# saving src/auth.ts
+
+# saving README.md
+
+# saving src/auth.ts
+
+$ kito log
+  2f52a9c6  2026-11-14 14:37:10  francesco  TextEdit   src/auth.ts  +1 −1
+  11b13103  2026-11-14 14:37:10  francesco  FileAdd    README.md
+  453a46d1  2026-11-14 14:37:10  francesco  FileAdd    src/auth.ts
+  4566a7b0  2026-11-14 14:37:10  francesco  FileAdd    .gitignore
+
+$ kito checkpoint -m auth with cache
+ckpt#1 created and exported as git commit 5a3653a6c4
+
+# renaming README.md to GUIDE.md and adding a file
+
+# saving src/billing.ts
+
+$ kito checkpoint -m billing
+ckpt#2 created and exported as git commit 69bc374ad1
+
+$ kito log
+◆ ckpt#2  billing  (git 69bc374ad1)
+  19cbd399  2026-11-14 14:37:11  francesco  FileAdd    src/billing.ts
+  ff200032  2026-11-14 14:37:11  francesco  FileRename GUIDE.md  (from README.md)
+◆ ckpt#1  auth with cache  (git 5a3653a6c4)
+  2f52a9c6  2026-11-14 14:37:10  francesco  TextEdit   src/auth.ts  +1 −1
+  11b13103  2026-11-14 14:37:10  francesco  FileAdd    README.md
+  453a46d1  2026-11-14 14:37:10  francesco  FileAdd    src/auth.ts
+  4566a7b0  2026-11-14 14:37:10  francesco  FileAdd    .gitignore
+
+$ git log --format=%h  %an  %s
+69bc374  francesco  billing
+5a3653a  francesco  auth with cache
+
+$ git status --short
+
+$ git fsck --strict --no-dangling
+
+$ kito daemon status
+Repository ........ /tmp/kito-demo
+Author ............ francesco
+Tracked files ..... 4
+Operations ........ 6 (0 since the last checkpoint)
+Checkpoints ....... 2 (last ckpt#2, all exported to git)
+Daemon ............ pid 4242, up for 1 s, version 0.1.2
+Socket ............ /tmp/kito-demo/.kito/kitod.sock
+Watcher ........... 14 events, 5 batches, 2 full scans
+Capture ........... p50 1.5 ms, p95 1.9 ms (after the 50 ms debounce)
+Save → op ......... p50 53.7 ms, p95 55.7 ms (debounce included)
+Reconciliation .... full scan every 60 s
+Language servers .. none (coming in phase 4)

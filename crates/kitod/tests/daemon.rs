@@ -232,7 +232,9 @@ fn changes_the_watcher_cannot_see_are_found_by_scanning() {
     assert_eq!(found["ops"], 1);
     let after = status(&mut client).watcher;
     assert!(after.events_unreliable && after.missed_by_watcher == 1, "{after:?}");
-    assert_eq!(after.rescan_interval_ms, 1000);
+    // At least once a second, and far more often than the normal minute
+    // (the exact value follows how long a scan takes on this machine).
+    assert!((1000..10_000).contains(&after.rescan_interval_ms), "{after:?}");
 
     // Later changes arrive by themselves, without events and without sync.
     std::thread::sleep(Duration::from_millis(1200));
@@ -252,7 +254,7 @@ fn without_a_watcher_the_daemon_polls() {
     fs::write(root.join(".kito/config.toml"), "[capture]\nwatch = false\n").unwrap();
     let mut client = start(root);
     let w = status(&mut client).watcher;
-    assert!(!w.watching && w.events_unreliable && w.rescan_interval_ms == 1000, "{w:?}");
+    assert!(!w.watching && w.events_unreliable && (1000..10_000).contains(&w.rescan_interval_ms), "{w:?}");
 
     fs::write(root.join("a.txt"), "one\n").unwrap();
     wait_until("the capture by scanning", || status(&mut client).repo.ops == 1);

@@ -1,0 +1,30 @@
+crash demo: 1000000 ops in /tmp/kito-demo, seed 20261114
+round   1: kill after commit + 165 ms | confirmed     8617 | present     9282 | discarded       0 B | index CaughtUp { ops: 9282, blobs: 6188 }
+round   2: kill at startup   +  58 ms | confirmed     8617 | present     9282 | discarded       0 B | index CaughtUp { ops: 0, blobs: 2435 }
+round   3: kill after commit + 329 ms | confirmed    24537 | present    26866 | discarded       0 B | index CaughtUp { ops: 17584, blobs: 9288 }
+[…]
+round 220: kill mid-write    + 382 ms | confirmed   973666 | present   974206 | discarded     129 B | index CaughtUp { ops: 3467, blobs: 2863 }
+round 221: kill mid-write    + 222 ms | confirmed   977770 | present   977770 | discarded     184 B | index CaughtUp { ops: 3564, blobs: 637 }
+round 222: kill mid-write    + 114 ms | confirmed   977770 | present   980219 | discarded     299 B | index CaughtUp { ops: 2449, blobs: 2301 }
+round 223: kill at startup   + 122 ms | confirmed   982247 | verification deferred
+round 224: kill after commit + 376 ms | confirmed   983181 | present   983181 | discarded       0 B | index CaughtUp { ops: 934, blobs: 624 }
+round 225: kill at startup   + 135 ms | confirmed   983181 | present   983181 | discarded       0 B | index UpToDate
+round 226: kill after commit + 359 ms | confirmed   988540 | present   991551 | discarded       0 B | index CaughtUp { ops: 8370, blobs: 5580 }
+round 227: kill mid-write    + 367 ms | confirmed   996468 | present   997151 | discarded     240 B | index CaughtUp { ops: 5600, blobs: 4940 }
+round 228: kill mid-write    +  87 ms | confirmed   996468 | present   998315 | discarded     193 B | index CaughtUp { ops: 1164, blobs: 692 }
+round 229: finished                   | confirmed  1000000 | present  1000000 | discarded       0 B | index UpToDate
+
+ops written and verified ....... 1000000
+blobs .......................... 666667
+oplog segments / packs ......... 5 / 3
+rounds ......................... 229
+kill -9 ........................ 228
+  after a commit ............... 99
+  at startup (even mid-recovery) 43
+  in the middle of a write ..... 86
+  before the first commit ...... 60
+verifications after a kill ..... 134
+torn tails discarded ........... 43 (124880 bytes, never confirmed)
+index caught up / rebuilt ...... 125 / 0
+write time with the kills ...... 130.4 s
+confirmed ops lost ............. 0

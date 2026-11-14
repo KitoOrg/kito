@@ -41,14 +41,14 @@ Result of the run of 14 November 2026 (seed 20261114, output in
 | | |
 | --- | --- |
 | Ops written and verified one by one | 1,000,000 |
-| `kill -9` | 211 |
-| …after a commit | 95 |
-| …at startup, including during recovery | 40 |
-| …in the middle of a write | 76 |
-| Torn tails discarded | 33 (29,768 bytes, never confirmed) |
-| Index caught up after a kill | 113 times |
+| `kill -9` | 228 |
+| …after a commit | 99 |
+| …at startup, including during recovery | 43 |
+| …in the middle of a write | 86 |
+| Torn tails discarded | 43 (124,880 bytes, never confirmed) |
+| Index caught up after a kill | 125 times |
 | Confirmed ops lost | 0 |
-| Duration | 2 min 38 s |
+| Writing time, kills included | 130 s |
 
 At the end the demo rereads all the ops and blobs, runs `verify` and rebuilds
 the index from scratch, checking that it answers like the incremental one.
