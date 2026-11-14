@@ -56,7 +56,8 @@ timeout_secs = 600
 # Language servers say who uses a symbol: with one, a rename made in a lane
 # reaches by itself the uses another lane added meanwhile. A server that is
 # not installed is skipped: Kito then reads the syntax only, and asks before
-# it touches a use it is not sure of. These two are also the defaults.
+# it touches a use it is not sure of. These are also the defaults, and the
+# servers Kito is tested with.
 [semantic.servers.typescript]
 command = ["typescript-language-server", "--stdio"]
 languages = ["typescript", "javascript"]
@@ -64,6 +65,31 @@ languages = ["typescript", "javascript"]
 [semantic.servers.go]
 command = ["gopls"]
 languages = ["go"]
+
+[semantic.servers.python]
+command = ["pyright-langserver", "--stdio"]
+languages = ["python"]
+
+[semantic.servers.rust]
+command = ["rust-analyzer"]
+languages = ["rust"]
+
+[semantic.servers.php]
+command = ["intelephense", "--stdio"]
+languages = ["php"]
+
+# clangd needs a compile_commands.json to know the files of the project.
+[semantic.servers.clangd]
+command = ["clangd"]
+languages = ["c", "cpp"]
+
+# Not tried yet: any server that speaks the protocol can be named here.
+# [semantic.servers.java]
+# command = ["jdtls"]
+# languages = ["java"]
+# [semantic.servers.csharp]
+# command = ["csharp-ls"]
+# languages = ["csharp"]
 "#;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +144,10 @@ impl Default for SemanticConfig {
                     server(&["typescript-language-server", "--stdio"], &["typescript", "javascript"]),
                 ),
                 ("go".to_owned(), server(&["gopls"], &["go"])),
+                ("python".to_owned(), server(&["pyright-langserver", "--stdio"], &["python"])),
+                ("rust".to_owned(), server(&["rust-analyzer"], &["rust"])),
+                ("php".to_owned(), server(&["intelephense", "--stdio"], &["php"])),
+                ("clangd".to_owned(), server(&["clangd"], &["c", "cpp"])),
             ]
             .into_iter()
             .collect(),

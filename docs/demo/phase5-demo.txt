@@ -1,0 +1,108 @@
+
+
+# 1. From a save to its op: under 30 ms at the 95th percentile, file of 2,000 lines
+
+file of 2002 lines, 143 functions (58410 bytes), 300 saves, debounce 50 ms
+
+| Measurement | p50 | p95 | max |
+| --- | --- | --- | --- |
+| Save → confirmed op, as seen by the client | 14.9 ms | 22.5 ms | 137.0 ms |
+| First event → confirmed op, as measured by the daemon | 13.9 ms | 21.7 ms | |
+| Processing only, after the debounce | 11.3 ms | 18.8 ms | |
+
+
+# 2 and 3. Creating a lane and integrating one, on 50000 files
+
+50000 files (1 kB each) captured for the first time: 250000 ops in 14.6s
+first checkpoint, exported to git: 15.4s
+
+| Creating a lane on 50000 files | Time |
+| --- | --- |
+| lane 1 (lane/1) | 2161 ms |
+| lane 2 (lane/2) | 2162 ms |
+| lane 3 (lane/3) | 2180 ms |
+| lane 4 (lane/4) | 2160 ms |
+| lane 5 (lane/5) | 2449 ms |
+| median | 2162 ms |
+| best | 2160 ms |
+
+| Integrating a lane | Ops of the lane | Time |
+| --- | --- | --- |
+| lane 1: 50 files, one function each | 100 | 110 ms (110 ms per 100 ops) |
+| lane 2: 500 files, one function each | 1000 | 602 ms (60 ms per 100 ops) |
+| lane 3: 50 files, one function each | 100 | 144 ms (144 ms per 100 ops) |
+| lane 4: 50 files, one function each | 100 | 166 ms (166 ms per 100 ops) |
+| lane 5: 50 files, one function each | 100 | 149 ms (149 ms per 100 ops) |
+
+store: 252800 ops, verified: true
+
+
+# 4. No confirmed op lost after a crash: 200000 ops, kill -9 at random moments
+
+oplog segments / packs ......... 1 / 1
+rounds ......................... 34
+kill -9 ........................ 33
+  after a commit ............... 13
+  at startup (even mid-recovery) 6
+  in the middle of a write ..... 14
+  before the first commit ...... 4
+verifications after a kill ..... 24
+torn tails discarded ........... 10 (1638 bytes, never confirmed)
+index caught up / rebuilt ...... 23 / 0
+write time with the kills ...... 12.2 s
+confirmed ops lost ............. 0
+
+
+# 5. No fake conflicts: ten agents, four rounds, every integration verified
+
+10 agents, 4 rounds each, on a TypeScript project of 15 files in /tmp/kito-swarm-3448
+Verification before every integration: `tsc --noEmit -p .`
+
+| Measure | Value |
+| --- | --- |
+| Agents, each in its own lane | 10 |
+| Rounds of edits per agent | 4 |
+| Integrations asked | 40 |
+| Integrated | 40 |
+| Fake conflicts (changes to different symbols) | 0 |
+| Symbols changed on both sides and merged by themselves | 0 |
+| Real conflicts staged / found and settled | 3 / 3 |
+| Kinds of the real conflicts | rename_rename, remove_modify, body_body |
+| Verification failures | 0 |
+| Opening a lane | median 3 ms, max 3 ms |
+| One integration, queue and verification included | median 13046 ms, max 14135 ms |
+| Ops recorded on the lanes | 645 |
+| Ops on the main lane | 383 |
+| Checkpoints (one per integration, each a git commit) | 46 |
+| Problems | none |
+
+Wall time: 59.5 s
+
+git log: 46 commits (ada 1, agent-0 5, agent-1 4, agent-2 5, agent-3 5, agent-4 5, agent-5 5, agent-6 4, agent-7 4, agent-8 4, agent-9 4)
+git fsck --strict: ok;  git status: clean
+tsc on the main lane after the swarm: no errors
+store: 1028 ops, 456 blobs, verified
+
+No fake conflicts.
+
+
+# 6. Renames and moves recognized: at least 99% on the corpus
+
+| c | 51 | 881 | 100.0% (119/119) | 100.0% (32/32) | 100.0% (51/51) | 11.9% (5/42) | 100.0% (110/110) | — | 100.0% (45/45) |
+| cpp | 73 | 917 | 100.0% (237/237) | 100.0% (27/27) | 98.6% (208/211) | 9.5% (2/21) | 100.0% (113/113) | 100.0% (69/69) | 100.0% (106/106) |
+| go | 36 | 650 | 100.0% (147/147) | 100.0% (7/7) | 99.3% (136/137) | 0.0% (0/6) | 100.0% (147/147) | — | 100.0% (133/133) |
+| php | 71 | 799 | 100.0% (319/319) | 100.0% (67/67) | 97.3% (251/258) | 88.1% (52/59) | 100.0% (77/77) | 100.0% (2/2) | 98.6% (218/221) |
+| rust | 93 | 2711 | 100.0% (414/414) | 100.0% (46/46) | 98.7% (389/394) | 18.2% (2/11) | 100.0% (209/209) | 100.0% (49/49) | 100.0% (238/238) |
+| **all** | 1183 | 16375 | 100.0% (4023/4023) | 100.0% (810/810) | 98.5% (3198/3248) | 61.9% (359/580) | 100.0% (1510/1510) | 100.0% (480/480) | 99.7% (2806/2814) |
+
+
+# The acceptance criteria
+
+| Criterion | Target | Measured | |
+| --- | --- | --- | --- |
+| Save → op, p95, 2,000-line file | < 30 ms | 22.5 ms | met |
+| Creating a lane, 50000 files (median of 5; best 2160 ms) | < 1 s, with copy-on-write | 2162 ms, files copied | not met here: no copy-on-write on this file system |
+| Integrating without conflicts, verifier excluded, git commit included (worst of 5 lanes; 110 ms for a lane that is up to date) | < 200 ms per 100 ops | 166 ms per 100 ops | met |
+| Confirmed ops lost after a crash (24 kills) | 0 | 0 | met |
+| Fake conflicts (40 integrations by 10 agents) | 0 | 0 | met |
+| Renames / moves kept on the corpus (ten repositories) | >= 99% | 100.0% / 100.0% | met |

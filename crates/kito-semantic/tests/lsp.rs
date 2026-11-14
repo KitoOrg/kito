@@ -335,3 +335,271 @@ async fn the_go_server_follows_a_symbol_into_a_lane() {
     assert_eq!(server.usages(&main.snapshot(), get_user).await.unwrap().len(), 3);
     server.shutdown().await;
 }
+
+/// A real server, a symbol used in another file, and a lane that adds a use
+/// in a file that exists and one in a new file: the uses the server must
+/// find on the main lane, in the lane, and on the main lane again.
+#[allow(clippy::too_many_arguments)]
+async fn follows_into_a_lane(
+    name: &str,
+    command: &[&str],
+    lang: Lang,
+    files: &[(&str, &str)],
+    symbol: (&str, &str),
+    lane: &[(&str, Option<&str>)],
+    on_main: &[&str],
+    in_lane: &[&str],
+    // What the project has that is not tracked: written once it is on disk.
+    setup: &dyn Fn(&Path),
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    // Not the temporary directory itself, whose name starts with a dot.
+    let root = tmp.path().join("project");
+    let main = World::on_disk(&root, files);
+    setup(&root);
+    let config = LspConfig {
+        command: command.iter().map(|part| (*part).to_owned()).collect(),
+        languages: vec![lang],
+        timeout_secs: 180,
+        options: None,
+    };
+    let server = LspProvider::new(name, config, &root);
+    let found = server.usages(&main.snapshot(), main.id(symbol.0, symbol.1)).await.unwrap();
+    assert_eq!(main.show(&found), on_main, "on the main lane");
+    assert!(found
+        .iter()
+        .all(|usage| usage.source == RefSource::Lsp(name.to_owned()) && usage.confidence == 1.0));
+
+    let state = main.with(lane);
+    let found = server.usages(&state.snapshot(), state.id(symbol.0, symbol.1)).await.unwrap();
+    assert_eq!(state.show(&found), in_lane, "in the lane");
+
+    let found = server.usages(&main.snapshot(), main.id(symbol.0, symbol.1)).await.unwrap();
+    assert_eq!(main.show(&found), on_main, "back on the main lane");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_python_server_follows_a_symbol_into_a_lane() {
+    if !installed("pyright-langserver") {
+        skip("pyright-langserver");
+        return;
+    }
+    let views = "from .models import get_user\n\n\ndef show(uid):\n    return get_user(uid)\n";
+    follows_into_a_lane(
+        "pyright",
+        &["pyright-langserver", "--stdio"],
+        Lang::Python,
+        &[
+            ("app/__init__.py", ""),
+            ("app/models.py", "def get_user(uid):\n    return uid\n\n\ndef current():\n    return get_user(0)\n"),
+            ("app/views.py", views),
+            // Same name, another function.
+            ("app/other.py", "def get_user(uid):\n    return None\n\n\ndef twice(uid):\n    return get_user(get_user(uid))\n"),
+        ],
+        ("app/models.py", "get_user"),
+        &[
+            ("app/views.py", Some(&views.replace("return get_user(uid)", "return get_user(uid) or get_user(0)"))),
+            ("app/jobs.py", Some("from app.models import get_user\n\n\ndef run(uid):\n    return get_user(uid)\n")),
+        ],
+        &[
+            "app/models.py:6 `return get_user(0)` 1.0",
+            "app/views.py:1 `from .models import get_user` 1.0",
+            "app/views.py:5 `return get_user(uid)` 1.0",
+        ],
+        &[
+            "app/jobs.py:1 `from app.models import get_user` 1.0",
+            "app/jobs.py:5 `return get_user(uid)` 1.0",
+            "app/models.py:6 `return get_user(0)` 1.0",
+            "app/views.py:1 `from .models import get_user` 1.0",
+            "app/views.py:5 `return get_user(uid) or get_user(0)` 1.0",
+            "app/views.py:5 `return get_user(uid) or get_user(0)` 1.0",
+        ],
+        &|_| {},
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_php_server_follows_a_symbol_into_a_lane() {
+    if !installed("intelephense") {
+        skip("intelephense");
+        return;
+    }
+    let web = "<?php\nrequire_once __DIR__ . '/auth.php';\n\nfunction profile(string $id): string\n{\n    return get_user($id);\n}\n";
+    follows_into_a_lane(
+        "intelephense",
+        &["intelephense", "--stdio"],
+        Lang::Php,
+        &[
+            ("src/auth.php", "<?php\n\nfunction get_user(string $id): string\n{\n    return $id;\n}\n\nfunction current_user(): string\n{\n    return get_user('me');\n}\n"),
+            ("src/web.php", web),
+        ],
+        ("src/auth.php", "get_user"),
+        &[
+            ("src/web.php", Some(&web.replace("return get_user($id);", "return get_user($id) . get_user('twice');"))),
+            ("src/billing.php", Some("<?php\n\nfunction invoice(string $id): string\n{\n    return 'invoice for ' . get_user($id);\n}\n")),
+        ],
+        &["src/auth.php:10 `return get_user('me');` 1.0", "src/web.php:6 `return get_user($id);` 1.0"],
+        &[
+            "src/auth.php:10 `return get_user('me');` 1.0",
+            "src/billing.php:5 `return 'invoice for ' . get_user($id);` 1.0",
+            "src/web.php:6 `return get_user($id) . get_user('twice');` 1.0",
+            "src/web.php:6 `return get_user($id) . get_user('twice');` 1.0",
+        ],
+        &|_| {},
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_c_server_follows_a_symbol_into_a_lane() {
+    if !installed("clangd") {
+        skip("clangd");
+        return;
+    }
+    let web = "#include \"auth.h\"\n\nint profile(int id) {\n  return get_user(id);\n}\n";
+    follows_into_a_lane(
+        "clangd",
+        &["clangd"],
+        Lang::C,
+        &[
+            ("auth.h", "int get_user(int id);\n"),
+            ("auth.c", "#include \"auth.h\"\n\nint get_user(int id) {\n  return id;\n}\n\nint current(void) {\n  return get_user(0);\n}\n"),
+            ("web.c", web),
+        ],
+        ("auth.c", "get_user"),
+        &[("web.c", Some(&web.replace("return get_user(id);", "return get_user(id) + get_user(2);")))],
+        &["auth.c:8 `return get_user(0);` 1.0", "web.c:4 `return get_user(id);` 1.0"],
+        &[
+            "auth.c:8 `return get_user(0);` 1.0",
+            "web.c:4 `return get_user(id) + get_user(2);` 1.0",
+            "web.c:4 `return get_user(id) + get_user(2);` 1.0",
+        ],
+        // The list of what is compiled and how, as a build system writes
+        // it: clangd looks for uses in the files it names.
+        &|root| {
+            let entry = |file: &str| {
+                format!(
+                    "{{ \"directory\": {:?}, \"file\": {file:?}, \"command\": \"cc -I. -c {file}\" }}",
+                    root.display().to_string()
+                )
+            };
+            let commands = format!("[{}, {}]\n", entry("auth.c"), entry("web.c"));
+            std::fs::write(root.join("compile_commands.json"), commands).unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_rust_server_follows_a_symbol_into_a_lane() {
+    if !installed("rust-analyzer") || !installed("cargo") {
+        skip("rust-analyzer (or cargo)");
+        return;
+    }
+    let web = "use crate::auth::get_user;\n\npub fn profile(id: u32) -> u32 {\n    get_user(id)\n}\n";
+    follows_into_a_lane(
+        "rust-analyzer",
+        &["rust-analyzer"],
+        Lang::Rust,
+        &[
+            ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            ("src/lib.rs", "pub mod auth;\npub mod web;\n"),
+            ("src/auth.rs", "pub fn get_user(id: u32) -> u32 {\n    id\n}\n\npub fn current() -> u32 {\n    get_user(0)\n}\n"),
+            ("src/web.rs", web),
+        ],
+        ("src/auth.rs", "get_user"),
+        &[("src/web.rs", Some(&web.replace("    get_user(id)\n", "    get_user(id) + get_user(2)\n")))],
+        &[
+            "src/auth.rs:6 `get_user(0)` 1.0",
+            "src/web.rs:1 `use crate::auth::get_user;` 1.0",
+            "src/web.rs:4 `get_user(id)` 1.0",
+        ],
+        &[
+            "src/auth.rs:6 `get_user(0)` 1.0",
+            "src/web.rs:1 `use crate::auth::get_user;` 1.0",
+            "src/web.rs:4 `get_user(id) + get_user(2)` 1.0",
+            "src/web.rs:4 `get_user(id) + get_user(2)` 1.0",
+        ],
+        &|_| {},
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_typescript_server_also_reads_javascript() {
+    let Some(typescript) = typescript_package().filter(|_| installed("typescript-language-server")) else {
+        skip("typescript-language-server, or a TypeScript with a tsserver for it,");
+        return;
+    };
+    let web =
+        "import { getUser } from \"./auth\";\n\nexport function profile(id) {\n  return getUser(id);\n}\n";
+    follows_into_a_lane(
+        "typescript-language-server",
+        &["typescript-language-server", "--stdio"],
+        Lang::JavaScript,
+        &[
+            ("jsconfig.json", "{ \"compilerOptions\": { \"module\": \"esnext\", \"moduleResolution\": \"bundler\" }, \"include\": [\"src\"] }\n"),
+            ("src/auth.js", "export function getUser(id) {\n  return id;\n}\n"),
+            ("src/web.js", web),
+        ],
+        ("src/auth.js", "getUser"),
+        &[("src/web.js", Some(&web.replace("return getUser(id);", "return getUser(id) + getUser(2);")))],
+        &["src/web.js:1 `import { getUser } from \"./auth\";` 1.0", "src/web.js:4 `return getUser(id);` 1.0"],
+        &[
+            "src/web.js:1 `import { getUser } from \"./auth\";` 1.0",
+            "src/web.js:4 `return getUser(id) + getUser(2);` 1.0",
+            "src/web.js:4 `return getUser(id) + getUser(2);` 1.0",
+        ],
+        &|root| {
+            std::fs::create_dir_all(root.join("node_modules")).unwrap();
+            std::os::unix::fs::symlink(&typescript, root.join("node_modules/typescript")).unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_c_server_also_reads_cpp() {
+    if !installed("clangd") {
+        skip("clangd");
+        return;
+    }
+    let web = "#include \"auth.hpp\"\n\nint profile(int id) {\n  return app::get_user(id);\n}\n";
+    follows_into_a_lane(
+        "clangd",
+        &["clangd"],
+        Lang::Cpp,
+        &[
+            ("auth.hpp", "namespace app {\nint get_user(int id);\n}\n"),
+            (
+                "auth.cpp",
+                "#include \"auth.hpp\"\n\nnamespace app {\nint get_user(int id) {\n  return id;\n}\n\nint current() {\n  return get_user(0);\n}\n}\n",
+            ),
+            ("web.cpp", web),
+        ],
+        ("auth.cpp", "app.get_user"),
+        &[(
+            "web.cpp",
+            Some(&web.replace("return app::get_user(id);", "return app::get_user(id) + app::get_user(2);")),
+        )],
+        &["auth.cpp:9 `return get_user(0);` 1.0", "web.cpp:4 `return app::get_user(id);` 1.0"],
+        &[
+            "auth.cpp:9 `return get_user(0);` 1.0",
+            "web.cpp:4 `return app::get_user(id) + app::get_user(2);` 1.0",
+            "web.cpp:4 `return app::get_user(id) + app::get_user(2);` 1.0",
+        ],
+        &|root| {
+            let entry = |file: &str| {
+                format!(
+                    "{{ \"directory\": {:?}, \"file\": {file:?}, \"command\": \"c++ -I. -c {file}\" }}",
+                    root.display().to_string()
+                )
+            };
+            let commands = format!("[{}, {}]\n", entry("auth.cpp"), entry("web.cpp"));
+            std::fs::write(root.join("compile_commands.json"), commands).unwrap();
+        },
+    )
+    .await;
+}
