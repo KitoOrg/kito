@@ -580,3 +580,20 @@ are installed and say so when they are skipped; with
 first written to skip in silence, and for a while they did nothing: the
 TypeScript on the path had no `tsserver`, and `gopls` was probed with a
 flag it does not have.
+
+## Phase 5
+
+### D-067 · A finished save is not kept waiting
+The debounce exists because an event does not say whether a save is over.
+Some events do: on Linux the system reports a file closed after being
+written, and a rename or a removal are over when they are reported. For
+those the watcher records what the file system says of the file at that
+moment; when every file of a batch has had such an event, the capture
+starts after 2 ms of quiet instead of the debounce (enough for the rename
+that follows a save to a temporary file to arrive with it). A file is then
+taken at once if it is still as it was when the event was made, and goes
+through the usual waiting if it has changed since. Events that say nothing
+of the kind (a file created, written to and not closed, a new directory)
+wait for quiet as before, and so does everything on systems that do not
+report the closing of a file. The plan asks for a debounce of 50 ms and
+for less than 30 ms from a save to its op: this is how both hold.

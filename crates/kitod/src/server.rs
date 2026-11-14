@@ -8,7 +8,7 @@ use kito_core::{ConflictId, LaneId};
 use kito_integrate::{IntegrationResult, JobId, JobState, Queue};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -418,9 +418,20 @@ fn is_internal(rel: &Path) -> bool {
     }
 }
 
+/// See [`WatchMsg::Paths`].
+type Whole = Option<Option<crate::repo::FileStat>>;
+
+/// How long to wait for more events once every file of a batch is known to
+/// be whole: long enough for the rename that follows a save to a temporary
+/// file, not the whole debounce.
+const QUICK: Duration = Duration::from_millis(2);
+
 enum WatchMsg {
-    /// Paths that changed, each relative to the working directory of its lane.
-    Paths(Vec<(LaneId, PathBuf)>),
+    /// Paths that changed, each relative to the working directory of its
+    /// lane. With `Some` for an event that says the file is whole now
+    /// (closed after being written, put in place by a rename, removed):
+    /// what the file system said of it at that moment, `None` if gone.
+    Paths(Vec<(LaneId, PathBuf, Whole)>),
     Rescan(String),
 }
 
@@ -447,24 +458,29 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
     let max_wait = daemon.debounce * MAX_WAIT_FACTOR;
     while let Some(first) = events.recv().await {
         let batch_start = Instant::now();
-        let mut paths: BTreeMap<LaneId, BTreeSet<PathBuf>> = BTreeMap::new();
+        // Per path, what its last event said.
+        let mut paths: BTreeMap<LaneId, BTreeMap<PathBuf, Whole>> = BTreeMap::new();
         let mut rescan: Option<String> = None;
-        let mut absorb = |msg: WatchMsg| match msg {
+        let mut absorb = |msg: WatchMsg, paths: &mut BTreeMap<LaneId, BTreeMap<PathBuf, Whole>>| match msg {
             WatchMsg::Paths(list) => {
-                for (lane, path) in list {
-                    paths.entry(lane).or_default().insert(path);
+                for (lane, path, whole) in list {
+                    paths.entry(lane).or_default().insert(path, whole);
                 }
             }
             WatchMsg::Rescan(why) => rescan = Some(why),
         };
-        absorb(first);
+        absorb(first, &mut paths);
         loop {
             let left = max_wait.saturating_sub(batch_start.elapsed());
             if left.is_zero() {
                 break;
             }
-            match tokio::time::timeout(daemon.debounce.min(left), events.recv()).await {
-                Ok(Some(msg)) => absorb(msg),
+            // Quiet is waited for because a save may not be over. When the
+            // system has said of every file that it is whole, it is over.
+            let all_whole = paths.values().all(|lane| lane.values().all(Option::is_some));
+            let quiet = if all_whole { QUICK } else { daemon.debounce };
+            match tokio::time::timeout(quiet.min(left), events.recv()).await {
+                Ok(Some(msg)) => absorb(msg, &mut paths),
                 Ok(None) | Err(_) => break,
             }
         }
@@ -479,7 +495,7 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
                 }
                 let mut ops = Vec::new();
                 for (lane, paths) in paths {
-                    match repo.capture_events(lane, paths) {
+                    match repo.capture_reported(lane, paths) {
                         Ok(captured) => ops.extend(captured),
                         // Events of a lane that was closed in the meantime.
                         Err(Error::NoSuchLane(_)) => {}
@@ -678,12 +694,28 @@ pub async fn serve(root: &Path) -> Result<()> {
                     return
                 }
                 Ok(event) => {
-                    let paths: Vec<(LaneId, PathBuf)> = event
+                    // Events after which nothing more is to come for the
+                    // file: what the file system says of it right now is
+                    // what a capture must find to take it at once.
+                    use notify::event::ModifyKind;
+                    let whole = closed_after_writing(&event.kind)
+                        || matches!(
+                            event.kind,
+                            notify::EventKind::Remove(_)
+                                | notify::EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Metadata(_))
+                        );
+                    let paths: Vec<(LaneId, PathBuf, Whole)> = event
                         .paths
                         .iter()
-                        .filter_map(|p| p.strip_prefix(&watch_root).ok())
-                        .filter(|rel| !rel.as_os_str().is_empty())
-                        .filter_map(route)
+                        .filter_map(|abs| {
+                            let rel = abs.strip_prefix(&watch_root).ok()?;
+                            let (lane, path) = route(rel).filter(|_| !rel.as_os_str().is_empty())?;
+                            let now = || {
+                                let meta = std::fs::symlink_metadata(abs).ok()?;
+                                meta.is_file().then(|| crate::repo::FileStat::of(&meta))
+                            };
+                            Some((lane, path, (whole && CLOSE_IS_REPORTED).then(now)))
+                        })
                         .collect();
                     if paths.is_empty() {
                         return;

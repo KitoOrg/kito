@@ -81,8 +81,54 @@ fn saves_are_captured_without_asking() {
 
     let s = status(&mut client);
     assert!(s.watcher.events >= 5 && s.watcher.batches >= 5, "{:?}", s.watcher);
-    assert!(s.watcher.latency_p95_ms.unwrap() >= s.debounce_ms as f64, "latency includes the debounce");
+    // The batch that created the directories waited for quiet: nothing
+    // says when a directory is done being filled.
+    assert!(s.watcher.latency_p95_ms.unwrap() >= s.debounce_ms as f64, "{:?}", s.watcher);
     assert!(s.watcher.capture_p95_ms.unwrap() < 1000.0);
+    stop(root, &mut client);
+}
+
+/// Where the system says when a file is closed after being written, a save
+/// is captured then, not after a period of quiet.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_finished_save_is_not_kept_waiting() {
+    let tmp = new_repo();
+    let root = tmp.path();
+    // Quiet would be waited for two seconds.
+    let config = fs::read_to_string(root.join(".kito/config.toml")).unwrap();
+    fs::write(root.join(".kito/config.toml"), config.replace("debounce_ms = 50", "debounce_ms = 2000"))
+        .unwrap();
+    let mut client = start(root);
+    assert_eq!(status(&mut client).debounce_ms, 2000);
+    let within = |what: &str, client: &mut Client, ops: u64| {
+        let started = Instant::now();
+        wait_until(what, || status(client).repo.ops == ops);
+        assert!(started.elapsed() < Duration::from_millis(1000), "{what}: {:?}", started.elapsed());
+    };
+
+    // A file written in place and closed.
+    fs::write(root.join("a.ts"), "export function a(): number {\n  return 1;\n}\n").unwrap();
+    within("a save", &mut client, 2);
+    // A save through a temporary file put in place by a rename, as many
+    // editors do: the file is whole when it gets its name.
+    fs::write(root.join(".a.ts.tmp"), "export function a(): number {\n  return 2;\n}\n").unwrap();
+    fs::rename(root.join(".a.ts.tmp"), root.join("a.ts")).unwrap();
+    wait_until("the save by rename", || {
+        ops(&mut client).iter().any(|(op, path)| op == "TextEdit" && path == "a.ts")
+    });
+    // A file given another name is still one op, and at once.
+    let before = status(&mut client).repo.ops;
+    fs::rename(root.join("a.ts"), root.join("b.ts")).unwrap();
+    within("a rename", &mut client, before + 1);
+    assert_eq!(ops(&mut client)[0], ("FileRename".to_owned(), "b.ts".to_owned()));
+    // And a removal.
+    fs::remove_file(root.join("b.ts")).unwrap();
+    wait_until("a removal", || {
+        ops(&mut client)[0].0 == "RemoveSymbol" || ops(&mut client)[0].0 == "FileRemove"
+    });
+    let s = status(&mut client);
+    assert!(s.watcher.latency_p50_ms.unwrap() < 1000.0, "{:?}", s.watcher);
     stop(root, &mut client);
 }
 

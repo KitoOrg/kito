@@ -106,12 +106,18 @@ fn settle_left(meta: &fs::Metadata) -> Option<Duration> {
 /// and again after the read: a file emptied an instant ago, or changed
 /// while it was being read, is not what its author means to save.
 /// `tracked`: the tree has a file at this path.
+///
+/// `whole`: what the file system said of the file when the system reported
+/// it closed after being written, or put in place by a rename. A file that
+/// is still as it was then is whole, however recent: there is nothing to
+/// wait for.
 fn read_settled(
     abs: &Path,
     tracked: bool,
     max_bytes: u64,
     unsettled: Unsettled,
     writing: &Writing,
+    whole: Option<&Option<FileStat>>,
 ) -> OnDisk {
     // Bounded: a file that never stops changing is, in the end, read as it is.
     const ATTEMPTS: usize = 1200;
@@ -138,7 +144,8 @@ fn read_settled(
                 if meta.len() > max_bytes {
                     return OnDisk::TooLarge;
                 }
-                if let Some(again) = settle_left(&meta).and_then(retry) {
+                let vouched = whole.is_some_and(|then| *then == Some(FileStat::of(&meta)));
+                if let Some(again) = settle_left(&meta).filter(|_| !vouched).and_then(retry) {
                     match again {
                         true => continue,
                         false => return OnDisk::Later,
@@ -175,9 +182,13 @@ fn read_settled(
             Err(_) => {
                 // A tracked file that is not there, in a directory that
                 // changed an instant ago: it may be between the removal and
-                // the creation of a save that replaces it.
+                // the creation of a save that replaces it. Unless the
+                // system said it was removed or renamed away, and nothing
+                // has been said of it since.
+                let said_gone = whole == Some(&None);
                 let directory = abs.parent().and_then(|dir| fs::symlink_metadata(dir).ok());
-                let unsettled_dir = directory.as_ref().and_then(settle_left).filter(|_| tracked);
+                let unsettled_dir =
+                    directory.as_ref().and_then(settle_left).filter(|_| tracked && !said_gone);
                 match unsettled_dir.and_then(retry) {
                     Some(true) => continue,
                     Some(false) => return OnDisk::Later,
@@ -365,6 +376,10 @@ pub(crate) struct Work {
     pub(crate) merge_parent: Option<OpId>,
     /// Files a capture found still being written: the next one looks again.
     pub(crate) deferred: BTreeSet<PathBuf>,
+    /// For the capture in progress: the files the system said were whole
+    /// (closed after being written, put in place by a rename) and what it
+    /// said of them then; `None` for one that was gone.
+    settled: HashMap<PathBuf, Option<FileStat>>,
     /// Symbols removed lately: if one comes back, it gets its ID again.
     pub(crate) gone: Gone,
 }
@@ -421,6 +436,7 @@ impl Work {
             intent: None,
             merge_parent: None,
             deferred: BTreeSet::new(),
+            settled: HashMap::new(),
             gone: Gone::default(),
         }
     }
@@ -813,6 +829,31 @@ impl Repo {
         })
     }
 
+    /// The same, for events that say more: `Some` for a path the system
+    /// reported whole at that moment (closed after being written, put in
+    /// place by a rename, removed), with what the file system said of it
+    /// then, or `None` if it was gone. Such a file is captured at once if
+    /// it has not changed since.
+    pub(crate) fn capture_reported(
+        &mut self,
+        lane: LaneId,
+        paths: impl IntoIterator<Item = (PathBuf, Option<Option<FileStat>>)>,
+    ) -> Result<Vec<Op>> {
+        self.with(lane, |repo, work| {
+            let intent = work.intent;
+            let mut all = Vec::new();
+            for (path, whole) in paths {
+                if let Some(then) = whole {
+                    work.settled.insert(path.clone(), then);
+                }
+                all.push(path);
+            }
+            let captured = repo.capture_work(work, all, intent, &Identities::new(), Unsettled::Defer);
+            work.settled.clear();
+            captured
+        })
+    }
+
     /// `true` if a capture left files for later because they were still
     /// being written.
     pub fn has_deferred(&self) -> bool {
@@ -903,8 +944,9 @@ impl Repo {
             }
             let abs = work.root.join(&rel);
             let limit = self.config.capture.max_file_bytes;
-            let on_disk = match read_settled(&abs, work.tree.contains(&rel), limit, unsettled, &self.writing)
-            {
+            let whole = work.settled.get(&rel);
+            let tracked = work.tree.contains(&rel);
+            let on_disk = match read_settled(&abs, tracked, limit, unsettled, &self.writing, whole) {
                 OnDisk::File(content, mode, meta) => Some((content, mode, *meta)),
                 OnDisk::Missing => None,
                 OnDisk::TooLarge => {
