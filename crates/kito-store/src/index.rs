@@ -1,9 +1,10 @@
-//! Indici ricostruibili (redb): op→posizione e lane, lane→op, simbolo→op,
-//! blob→posizione.
+//! Rebuildable indexes (redb): op→position and lane, lane→op, symbol→op,
+//! blob→position.
 //!
-//! L'indice è sempre derivabile da `objects/` e `oplog/`: registra fino a che
-//! punto dei log è aggiornato (watermark) e all'apertura lo store lo porta in
-//! pari, oppure lo ricostruisce da zero se non è coerente con i log.
+//! The index can always be derived from `objects/` and `oplog/`: it records
+//! how far into the logs it is up to date (watermark) and on open the store
+//! catches it up, or rebuilds it from scratch if it is not consistent with
+//! the logs.
 
 use crate::error::Result;
 use crate::segments::Pos;
@@ -14,15 +15,15 @@ use std::path::{Path, PathBuf};
 
 const SCHEMA: u64 = 1;
 
-/// op → (posizione nell'oplog, lane)
+/// op → (position in the oplog, lane)
 const OPS: TableDefinition<&[u8; 32], (u64, u64)> = TableDefinition::new("ops");
-/// (lane, n-esima op della lane) → posizione nell'oplog
+/// (lane, n-th op of the lane) → position in the oplog
 const LANE_OPS: TableDefinition<(u64, u64), u64> = TableDefinition::new("lane_ops");
-/// lane → (numero di op, ultima op)
+/// lane → (number of ops, last op)
 const LANES: TableDefinition<u64, (u64, &[u8; 32])> = TableDefinition::new("lanes");
-/// (origine del simbolo, contatore, posizione nell'oplog) → ()
+/// (origin of the symbol, counter, position in the oplog) → ()
 const SYM_OPS: TableDefinition<(u64, u64, u64), ()> = TableDefinition::new("sym_ops");
-/// blob → posizione nei pack
+/// blob → position in the packs
 const BLOBS: TableDefinition<&[u8; 32], u64> = TableDefinition::new("blobs");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
@@ -34,19 +35,19 @@ const M_TAIL_CRC: &str = "oplog_tail_crc";
 const M_CKPT_END: &str = "checkpoints_end";
 const M_INTENTS_END: &str = "intents_end";
 
-/// Fin dove l'indice riflette i log.
+/// How far the index reflects the logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Watermark {
-    /// Tutte le op prima di questa posizione sono indicizzate.
+    /// All the ops before this position are indexed.
     pub oplog_end: Pos,
-    /// Tutti i blob prima di questa posizione sono indicizzati.
+    /// All the blobs before this position are indexed.
     pub packs_end: Pos,
-    /// Posizione e CRC dell'ultima op indicizzata: all'apertura si controlla
-    /// che il log contenga ancora proprio quel record.
+    /// Position and CRC of the last indexed op: on open the store checks
+    /// that the log still contains exactly that record.
     pub tail: Option<(Pos, u32)>,
-    /// Lunghezza confermata del log dei checkpoint.
+    /// Confirmed length of the checkpoint log.
     pub checkpoints_end: u64,
-    /// Lunghezza confermata del log degli intent.
+    /// Confirmed length of the intent log.
     pub intents_end: u64,
 }
 
@@ -59,7 +60,7 @@ pub(crate) struct IndexedOp {
 
 #[derive(Default)]
 pub(crate) struct IndexBatch {
-    /// In ordine di log.
+    /// In log order.
     pub ops: Vec<IndexedOp>,
     pub blobs: Vec<(BlobId, Pos)>,
 }
@@ -70,8 +71,9 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    /// Apre l'indice, creandolo se manca. Se il file è illeggibile lo scarta
-    /// e ne crea uno vuoto: verrà ricostruito dai log.
+    /// Opens the index, creating it if it is missing. If the file is
+    /// unreadable, discards it and creates an empty one: it will be rebuilt
+    /// from the logs.
     pub(crate) fn open(path: &Path) -> Result<Index> {
         let db = match Database::create(path) {
             Ok(db) => db,
@@ -85,7 +87,7 @@ impl Index {
         Ok(index)
     }
 
-    /// Scarta l'indice e ne crea uno vuoto.
+    /// Discards the index and creates an empty one.
     pub(crate) fn recreate(self) -> Result<Index> {
         let path = self.path.clone();
         drop(self);
@@ -105,7 +107,7 @@ impl Index {
         Ok(())
     }
 
-    /// Il watermark registrato, o `None` se l'indice è vuoto o di un altro schema.
+    /// The recorded watermark, or `None` if the index is empty or of another schema.
     pub(crate) fn watermark(&self) -> Result<Option<Watermark>> {
         let txn = self.db.begin_read()?;
         let meta = txn.open_table(META)?;
@@ -129,11 +131,11 @@ impl Index {
         }))
     }
 
-    /// Applica un batch e avanza il watermark, in un'unica transazione.
+    /// Applies a batch and advances the watermark, in a single transaction.
     ///
-    /// Con `durable = false` la transazione non fa fsync: dopo un crash
-    /// l'indice può tornare a un watermark precedente, e l'apertura lo
-    /// riporta in pari rileggendo i log.
+    /// With `durable = false` the transaction does not fsync: after a crash
+    /// the index may go back to an earlier watermark, and opening catches it
+    /// up by rereading the logs.
     pub(crate) fn apply(&self, batch: &IndexBatch, watermark: Watermark, durable: bool) -> Result<()> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(if durable { Durability::Immediate } else { Durability::None })?;
@@ -146,8 +148,8 @@ impl Index {
 
             for op in &batch.ops {
                 let (pos, lane) = (op.pos.to_u64(), op.lane.0);
-                // Lo store non scrive mai due volte la stessa op, ma se il log
-                // ne contenesse un duplicato vale la prima occorrenza.
+                // The store never writes the same op twice, but if the log
+                // contained a duplicate of it, the first occurrence wins.
                 if ops.get(op.id.as_bytes())?.is_some() {
                     continue;
                 }
@@ -175,7 +177,7 @@ impl Index {
 
             let mut blobs = txn.open_table(BLOBS)?;
             for (id, pos) in &batch.blobs {
-                // Vale la prima copia: i blob sono immutabili e identici.
+                // The first copy wins: blobs are immutable and identical.
                 if blobs.get(id.as_bytes())?.is_none() {
                     blobs.insert(id.as_bytes(), pos.to_u64())?;
                 }
@@ -202,7 +204,7 @@ impl Index {
         Ok(())
     }
 
-    /// Rende durevole lo stato attuale dell'indice.
+    /// Makes the current state of the index durable.
     pub(crate) fn sync(&self) -> Result<()> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate)?;
@@ -222,7 +224,7 @@ impl Index {
         Ok(table.get(id.as_bytes())?.map(|v| Pos::from_u64(v.value())))
     }
 
-    /// Numero di op e ultima op di una lane.
+    /// Number of ops and last op of a lane.
     pub(crate) fn lane(&self, lane: LaneId) -> Result<Option<(u64, OpId)>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(LANES)?;
@@ -244,7 +246,7 @@ impl Index {
         Ok(out)
     }
 
-    /// Posizioni delle op di una lane dalla `start`-esima, al più `limit`.
+    /// Positions of the ops of a lane from the `start`-th, at most `limit`.
     pub(crate) fn lane_positions(&self, lane: LaneId, start: u64, limit: usize) -> Result<Vec<Pos>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(LANE_OPS)?;
@@ -255,7 +257,7 @@ impl Index {
         Ok(out)
     }
 
-    /// Posizioni, in ordine di log, delle op che toccano un simbolo.
+    /// Positions, in log order, of the ops that touch a symbol.
     pub(crate) fn symbol_positions(&self, sym: SymbolId) -> Result<Vec<Pos>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(SYM_OPS)?;

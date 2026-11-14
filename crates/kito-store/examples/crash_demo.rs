@@ -1,27 +1,27 @@
-//! Demo della fase 0: scrivere N op (default 1 milione), fare `kill -9` in
-//! momenti casuali, riavviare e verificare che nessuna op confermata sia persa.
+//! Phase 0 demo: write N ops (default 1 million), `kill -9` at random
+//! moments, restart and verify that no confirmed op has been lost.
 //!
 //! ```text
 //! cargo run --release -p kito-store --example crash_demo -- driver --dir /tmp/kito-demo --ops 1000000
 //! ```
 //!
-//! Il `driver` lancia questo stesso eseguibile in modalità `writer`, che
-//! scrive op deterministiche (l'op i-esima dipende solo da i e dalle op
-//! precedenti) e stampa `C <n>` ogni volta che un commit ha confermato le
-//! prime n. Il driver lo uccide con SIGKILL in un momento casuale, riapre lo
-//! store e controlla che contenga un prefisso della sequenza lungo almeno
-//! quanto l'ultimo `C <n>` letto. Poi ricomincia, fino a N op.
+//! The `driver` launches this same executable in `writer` mode, which writes
+//! deterministic ops (the i-th op depends only on i and on the preceding
+//! ops) and prints `C <n>` every time a commit has confirmed the first n.
+//! The driver kills it with SIGKILL at a random moment, reopens the store
+//! and checks that it holds a prefix of the sequence at least as long as the
+//! last `C <n>` it read. Then it starts again, up to N ops.
 //!
-//! I kill sono di tre tipi, scelti a caso a ogni round:
+//! The kills are of three kinds, chosen at random on every round:
 //!
-//! * **dopo un commit**: SIGKILL dal driver, un tempo casuale dopo il primo
-//!   commit del round;
-//! * **all'avvio**: SIGKILL dal driver entro 150 ms dall'avvio, cioè anche
-//!   mentre il writer sta ancora facendo il recupero dal kill precedente;
-//! * **a metà scrittura**: il writer riceve SIGKILL dopo aver scritto solo una
-//!   parte di un buffer, a un byte casuale. Un kill dall'esterno cade quasi
-//!   sempre tra una `write` e l'altra; questo è il modo di colpire con
-//!   certezza il caso peggiore, un record scritto a metà.
+//! * **after a commit**: SIGKILL from the driver, a random time after the
+//!   first commit of the round;
+//! * **at startup**: SIGKILL from the driver within 150 ms of startup, that
+//!   is, even while the writer is still recovering from the previous kill;
+//! * **mid-write**: the writer receives SIGKILL after writing only part of a
+//!   buffer, at a random byte. A kill from outside almost always lands
+//!   between one `write` and the next; this is the way to hit with certainty
+//!   the worst case, a half-written record.
 
 use kito_core::*;
 use kito_store::fs::{FileSystem, RawFile, StdFs};
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 const LANES: u64 = 4;
 
-/// Generatore deterministico della sequenza di op.
+/// Deterministic generator of the sequence of ops.
 struct Gen {
     n: u64,
     heads: [Option<OpId>; LANES as usize],
@@ -47,7 +47,7 @@ impl Gen {
         Gen { n: 0, heads: [None; LANES as usize] }
     }
 
-    /// Riparte dallo stato di uno store che contiene le prime `n` op.
+    /// Resumes from the state of a store that holds the first `n` ops.
     fn resume(store: &Store) -> Result<Gen, String> {
         let n = store.op_count().map_err(|e| e.to_string())?;
         let mut heads = [None; LANES as usize];
@@ -56,7 +56,7 @@ impl Gen {
             let found = store.lane_len(LaneId(lane)).map_err(|e| e.to_string())?;
             if found != expected {
                 return Err(format!(
-                    "lane {lane}: {found} op, attese {expected}: lo store non è un prefisso"
+                    "lane {lane}: {found} ops, expected {expected}: the store is not a prefix"
                 ));
             }
             heads[lane as usize] = store.lane_head(LaneId(lane)).map_err(|e| e.to_string())?;
@@ -66,7 +66,7 @@ impl Gen {
 
     fn content(i: u64) -> Vec<u8> {
         if i % 2500 == 7 {
-            // Ogni tanto un blob grande e incomprimibile.
+            // Every now and then a large, incompressible blob.
             let mut x = i | 1;
             return (0..100_000)
                 .map(|_| {
@@ -133,18 +133,18 @@ impl Gen {
         };
         let mut parents: Vec<OpId> = self.heads[lane.0 as usize].into_iter().collect();
         if i > 0 && i.is_multiple_of(97) {
-            // Ogni tanto un'op con due genitori: l'op precedente, di un'altra lane.
+            // Every now and then an op with two parents: the previous op, from another lane.
             parents.extend(self.heads[((i - 1) % LANES) as usize]);
         }
         let author = Author::agent(format!("agent-{}", lane.0));
-        let op = Op::new(parents, lane, author, Hlc::new(1_700_000_000_000 + i, 0), kind, None)
-            .expect("op valida");
+        let op =
+            Op::new(parents, lane, author, Hlc::new(1_700_000_000_000 + i, 0), kind, None).expect("valid op");
         self.heads[lane.0 as usize] = Some(op.id);
         (op, blobs)
     }
 }
 
-/// splitmix64: basta e avanza per scegliere quando uccidere il writer.
+/// splitmix64: more than enough to choose when to kill the writer.
 struct Rng(u64);
 
 impl Rng {
@@ -161,8 +161,8 @@ impl Rng {
     }
 }
 
-/// File system che uccide il processo con SIGKILL a metà di una scrittura,
-/// dopo un certo numero di byte.
+/// File system that kills the process with SIGKILL in the middle of a write,
+/// after a given number of bytes.
 #[derive(Debug, Clone)]
 struct DyingFs {
     bytes_left: Arc<AtomicI64>,
@@ -177,7 +177,7 @@ impl RawFile for DyingFile {
     fn append(&mut self, buf: &[u8]) -> io::Result<()> {
         let left = self.bytes_left.fetch_sub(buf.len() as i64, Ordering::SeqCst);
         if left < buf.len() as i64 {
-            // Arriva su file solo l'inizio del buffer, poi il processo muore.
+            // Only the beginning of the buffer reaches the file, then the process dies.
             self.inner.append(&buf[..left.max(0) as usize])?;
             let _ = Command::new("kill").args(["-9", &std::process::id().to_string()]).status();
             loop {
@@ -216,7 +216,7 @@ fn writer(dir: &Path, target: u64, die_after_bytes: Option<i64>) -> Result<(), S
     if let Some(bytes) = die_after_bytes {
         opts.fs = Arc::new(DyingFs { bytes_left: Arc::new(AtomicI64::new(bytes)) });
     }
-    let mut store = Store::open_with(dir, opts).map_err(|e| format!("apertura: {e}"))?;
+    let mut store = Store::open_with(dir, opts).map_err(|e| format!("open: {e}"))?;
     let mut gen = Gen::resume(&store)?;
     let mut rng = Rng(now_seed());
     let stdout = std::io::stdout();
@@ -230,7 +230,7 @@ fn writer(dir: &Path, target: u64, die_after_bytes: Option<i64>) -> Result<(), S
             store.append_op(&op).map_err(|e| format!("append_op: {e}"))?;
         }
         store.commit().map_err(|e| format!("commit: {e}"))?;
-        // Solo ora le prime `gen.n` op sono confermate.
+        // Only now are the first `gen.n` ops confirmed.
         let mut out = stdout.lock();
         writeln!(out, "C {}", gen.n).and_then(|()| out.flush()).map_err(|e| e.to_string())?;
     }
@@ -253,21 +253,21 @@ struct Totals {
     verifications: u32,
 }
 
-/// Verifica che lo store contenga le op `from..n` attese, blob compresi.
+/// Verifies that the store holds the expected ops `from..n`, blobs included.
 fn verify_range(store: &Store, vgen: &mut Gen, n: u64) -> Result<(), String> {
     while vgen.n < n {
         let i = vgen.n;
         let (expected, blobs) = vgen.next();
         match store.get_op(&expected.id) {
             Ok(Some(found)) if found == expected => {}
-            Ok(Some(_)) => return Err(format!("op {i}: contenuto diverso da quello atteso")),
-            Ok(None) => return Err(format!("op {i} ({}) assente", expected.id)),
+            Ok(Some(_)) => return Err(format!("op {i}: content differs from the expected one")),
+            Ok(None) => return Err(format!("op {i} ({}) missing", expected.id)),
             Err(e) => return Err(format!("op {i}: {e}")),
         }
         for blob in &blobs {
             match store.get_blob(&BlobId::of(blob)) {
                 Ok(Some(found)) if found == *blob => {}
-                Ok(_) => return Err(format!("op {i}: blob assente o diverso")),
+                Ok(_) => return Err(format!("op {i}: blob missing or different")),
                 Err(e) => return Err(format!("op {i}: blob: {e}")),
             }
         }
@@ -278,7 +278,7 @@ fn verify_range(store: &Store, vgen: &mut Gen, n: u64) -> Result<(), String> {
 fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     if dir.exists() {
-        return Err(format!("{} esiste già: scegli una cartella nuova", dir.display()));
+        return Err(format!("{} already exists: choose a new directory", dir.display()));
     }
     drop(Store::init(dir).map_err(|e| e.to_string())?);
 
@@ -287,11 +287,11 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
     let mut confirmed_max = 0u64;
     let mut vgen = Gen::new();
     let started = Instant::now();
-    println!("crash demo: {target} op in {}, seed {seed}", dir.display());
+    println!("crash demo: {target} ops in {}, seed {seed}", dir.display());
 
     loop {
         totals.rounds += 1;
-        // Tipo di kill di questo round.
+        // Kind of kill for this round.
         #[derive(PartialEq)]
         enum Kill {
             AfterCommit(Duration),
@@ -312,7 +312,7 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
         if let Kill::MidWrite(bytes) = kill {
             command.args(["--die-after-bytes", &bytes.to_string()]);
         }
-        let mut child = command.spawn().map_err(|e| format!("avvio del writer: {e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("starting the writer: {e}"))?;
         let confirmed = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -341,7 +341,7 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
             let due = match kill {
                 Kill::AfterCommit(delay) => first_commit.is_some_and(|t| t.elapsed() >= delay),
                 Kill::AtStartup(delay) => spawned.elapsed() >= delay,
-                Kill::MidWrite(_) => false, // il writer muore da solo
+                Kill::MidWrite(_) => false, // the writer dies on its own
             };
             if due {
                 child.kill().map_err(|e| e.to_string())?; // SIGKILL
@@ -350,7 +350,7 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
             std::thread::sleep(Duration::from_micros(200));
         };
         let killed_at = spawned.elapsed();
-        reader.join().map_err(|_| "thread di lettura fallito".to_string())?;
+        reader.join().map_err(|_| "reader thread failed".to_string())?;
         let seen = confirmed.load(Ordering::SeqCst);
         confirmed_max = confirmed_max.max(seen);
 
@@ -365,20 +365,20 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
         } else if status.success() && done.load(Ordering::SeqCst) {
             true
         } else {
-            return Err(format!("il writer è terminato da solo con {status}: guarda il suo stderr"));
+            return Err(format!("the writer exited on its own with {status}: look at its stderr"));
         };
         let how = match (finished, &kill) {
-            (true, _) => "terminato               ".to_string(),
-            (_, Kill::AfterCommit(_)) => format!("kill dopo commit +{:>4} ms", killed_at.as_millis()),
-            (_, Kill::AtStartup(_)) => format!("kill all'avvio  +{:>4} ms", killed_at.as_millis()),
-            (_, Kill::MidWrite(_)) => format!("kill a metà write +{:>4} ms", killed_at.as_millis()),
+            (true, _) => "finished                  ".to_string(),
+            (_, Kill::AfterCommit(_)) => format!("kill after commit +{:>4} ms", killed_at.as_millis()),
+            (_, Kill::AtStartup(_)) => format!("kill at startup   +{:>4} ms", killed_at.as_millis()),
+            (_, Kill::MidWrite(_)) => format!("kill mid-write    +{:>4} ms", killed_at.as_millis()),
         };
 
-        // Non sempre si verifica subito: così a volte è il writer successivo
-        // a fare il recupero, e può essere ucciso mentre lo fa.
+        // The check is not always done right away: that way it is sometimes
+        // the next writer that runs recovery, and it can be killed while doing so.
         if finished || rng.below(10) < 6 {
             totals.verifications += 1;
-            let store = Store::open(dir).map_err(|e| format!("riapertura dopo il kill: {e}"))?;
+            let store = Store::open(dir).map_err(|e| format!("reopening after the kill: {e}"))?;
             let recovery = store.recovery().clone();
             if recovery.discarded_bytes() > 0 {
                 totals.torn_tails += 1;
@@ -391,12 +391,12 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
             }
             let n = store.op_count().map_err(|e| e.to_string())?;
             if n < confirmed_max {
-                return Err(format!("PERSE OP CONFERMATE: confermate {confirmed_max}, presenti {n}"));
+                return Err(format!("CONFIRMED OPS LOST: confirmed {confirmed_max}, present {n}"));
             }
             Gen::resume(&store)?;
             verify_range(&store, &mut vgen, n)?;
             println!(
-                "round {:>3}: {how} | confermate {:>8} | presenti {:>8} | scartati {:>7} B | indice {:?}",
+                "round {:>3}: {how} | confirmed {:>8} | present {:>8} | discarded {:>7} B | index {:?}",
                 totals.rounds,
                 confirmed_max,
                 n,
@@ -405,7 +405,7 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
             );
         } else {
             println!(
-                "round {:>3}: {how} | confermate {confirmed_max:>8} | verifica rimandata",
+                "round {:>3}: {how} | confirmed {confirmed_max:>8} | verification deferred",
                 totals.rounds
             );
         }
@@ -415,50 +415,50 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
     }
     let writing = started.elapsed();
 
-    // Controllo finale: tutte le op attese, fsck completo, indice ricostruito
-    // da zero identico a quello incrementale.
+    // Final check: all the expected ops, full fsck, index rebuilt from
+    // scratch identical to the incremental one.
     let mut store = Store::open(dir).map_err(|e| e.to_string())?;
     let n = store.op_count().map_err(|e| e.to_string())?;
     if n != target {
-        return Err(format!("presenti {n} op, attese {target}"));
+        return Err(format!("{n} ops present, expected {target}"));
     }
     let mut full = Gen::new();
     verify_range(&store, &mut full, n)?;
     let report = store.verify().map_err(|e| e.to_string())?;
     if !report.is_ok() {
         return Err(format!(
-            "verify ha trovato problemi: {:#?}",
+            "verify found problems: {:#?}",
             &report.problems[..report.problems.len().min(10)]
         ));
     }
     let before = (store.lanes().map_err(|e| e.to_string())?, store.stats().map_err(|e| e.to_string())?);
-    store.rebuild_index().map_err(|e| format!("ricostruzione dell'indice: {e}"))?;
+    store.rebuild_index().map_err(|e| format!("rebuilding the index: {e}"))?;
     let after = (store.lanes().map_err(|e| e.to_string())?, store.stats().map_err(|e| e.to_string())?);
     if before != after {
-        return Err("l'indice ricostruito differisce da quello incrementale".into());
+        return Err("the rebuilt index differs from the incremental one".into());
     }
     let mut again = Gen::new();
     verify_range(&store, &mut again, n)?;
 
     println!();
-    println!("op scritte e verificate ........ {n}");
-    println!("blob ........................... {}", report.blobs);
-    println!("segmenti oplog / pack .......... {} / {}", after.1.oplog_segments, after.1.packs);
-    println!("round .......................... {}", totals.rounds);
+    println!("ops written and verified ....... {n}");
+    println!("blobs .......................... {}", report.blobs);
+    println!("oplog segments / packs ......... {} / {}", after.1.oplog_segments, after.1.packs);
+    println!("rounds ......................... {}", totals.rounds);
     let kills = totals.kills_after_commit + totals.kills_at_startup + totals.kills_mid_write;
     println!("kill -9 ........................ {kills}");
-    println!("  dopo un commit ............... {}", totals.kills_after_commit);
-    println!("  all'avvio (anche in recupero)  {}", totals.kills_at_startup);
-    println!("  a metà di una scrittura ...... {}", totals.kills_mid_write);
-    println!("  prima del primo commit ....... {}", totals.kills_before_first_commit);
-    println!("verifiche dopo un kill ......... {}", totals.verifications);
+    println!("  after a commit ............... {}", totals.kills_after_commit);
+    println!("  at startup (even mid-recovery) {}", totals.kills_at_startup);
+    println!("  in the middle of a write ..... {}", totals.kills_mid_write);
+    println!("  before the first commit ...... {}", totals.kills_before_first_commit);
+    println!("verifications after a kill ..... {}", totals.verifications);
     println!(
-        "code troncate scartate ......... {} ({} byte, mai confermati)",
+        "torn tails discarded ........... {} ({} bytes, never confirmed)",
         totals.torn_tails, totals.discarded_bytes
     );
-    println!("indice riallineato / rifatto ... {} / {}", totals.caught_up, totals.rebuilt);
-    println!("tempo di scrittura con i kill .. {:.1} s", writing.as_secs_f64());
-    println!("op confermate perse ............ 0");
+    println!("index caught up / rebuilt ...... {} / {}", totals.caught_up, totals.rebuilt);
+    println!("write time with the kills ...... {:.1} s", writing.as_secs_f64());
+    println!("confirmed ops lost ............. 0");
     Ok(())
 }
 
@@ -476,12 +476,14 @@ fn main() -> ExitCode {
             let max_ms = flag("--max-ms").and_then(|v| v.parse().ok()).unwrap_or(400);
             driver(&dir, ops, seed, max_ms)
         }
-        _ => Err("uso: crash_demo driver|writer --dir <cartella> [--ops N] [--seed S] [--max-ms M]".into()),
+        _ => {
+            Err("usage: crash_demo driver|writer --dir <directory> [--ops N] [--seed S] [--max-ms M]".into())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("crash_demo: ERRORE: {e}");
+            eprintln!("crash_demo: ERROR: {e}");
             ExitCode::FAILURE
         }
     }

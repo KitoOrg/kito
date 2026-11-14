@@ -1,34 +1,34 @@
-//! Accesso in scrittura ai file, dietro un trait: permette di iniettare
-//! guasti (disco pieno, fsync fallito) nei test senza toccare il codice dello
-//! store.
+//! Write access to files, behind a trait: it makes it possible to inject
+//! faults (disk full, failed fsync) in tests without touching the store's
+//! code.
 
 use std::fmt::Debug;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Un file aperto in sola aggiunta.
+/// A file opened in append-only mode.
 pub trait RawFile: Send + Sync {
-    /// Accoda tutti i byte in fondo al file. In caso di errore può averne
-    /// scritto solo una parte.
+    /// Appends all the bytes at the end of the file. On error it may have
+    /// written only part of them.
     fn append(&mut self, buf: &[u8]) -> io::Result<()>;
-    /// Rende durevoli i dati scritti (`fdatasync`).
+    /// Makes the written data durable (`fdatasync`).
     fn sync(&mut self) -> io::Result<()>;
-    /// Tronca il file a `len` byte.
+    /// Truncates the file to `len` bytes.
     fn truncate(&mut self, len: u64) -> io::Result<()>;
 }
 
-/// Le operazioni di scrittura su file system usate dallo store.
+/// The file system write operations used by the store.
 pub trait FileSystem: Send + Sync + Debug {
-    /// Apre un file esistente in sola aggiunta.
+    /// Opens an existing file in append-only mode.
     fn open_append(&self, path: &Path) -> io::Result<Box<dyn RawFile>>;
 
-    /// Crea (o sostituisce) `path` con `content` in modo atomico:
-    /// scrittura su file temporaneo, fsync, rename, fsync della cartella.
+    /// Creates (or replaces) `path` with `content` atomically:
+    /// write to a temporary file, fsync, rename, fsync of the directory.
     fn create_atomic(&self, path: &Path, content: &[u8]) -> io::Result<()>;
 }
 
-/// Il file system reale.
+/// The real file system.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StdFs;
 
@@ -58,11 +58,11 @@ impl FileSystem for StdFs {
     }
 }
 
-/// Suffisso dei file temporanei delle scritture atomiche.
+/// Suffix of the temporary files of atomic writes.
 pub(crate) const TMP_SUFFIX: &str = ".tmp";
 
-/// Scrittura atomica: file temporaneo, fsync, rename, fsync della cartella.
-/// Dopo un crash il file ha il contenuto vecchio oppure quello nuovo, intero.
+/// Atomic write: temporary file, fsync, rename, fsync of the directory.
+/// After a crash the file has either the old content or the new one, whole.
 pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut tmp = path.as_os_str().to_owned();
@@ -82,12 +82,12 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     result
 }
 
-/// Rende durevoli le voci di una cartella (creazioni, rename, rimozioni).
+/// Makes the entries of a directory durable (creations, renames, removals).
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// Rimuove i file temporanei lasciati da scritture atomiche interrotte.
+/// Removes the temporary files left behind by interrupted atomic writes.
 pub(crate) fn remove_stray_tmp(dir: &Path) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -106,9 +106,9 @@ mod tests {
     fn atomic_write_replaces_and_leaves_no_tmp() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("state");
-        atomic_write(&p, b"uno").unwrap();
-        atomic_write(&p, b"due").unwrap();
-        assert_eq!(fs::read(&p).unwrap(), b"due");
+        atomic_write(&p, b"one").unwrap();
+        atomic_write(&p, b"two").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 

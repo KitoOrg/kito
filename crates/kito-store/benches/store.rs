@@ -1,5 +1,5 @@
-//! Benchmark dello store (criterion). Ogni ottimizzazione di `kito-store` va
-//! giustificata da un guadagno misurato qui (vedi `docs/decisions.md`).
+//! Benchmarks of the store (criterion). Every optimization of `kito-store`
+//! must be justified by a gain measured here (see `docs/decisions.md`).
 //!
 //! ```text
 //! cargo bench -p kito-store
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 const LANES: u64 = 4;
 
-/// Contenuto simile a codice sorgente: comprimibile, lungo qualche centinaio di byte.
+/// Content similar to source code: compressible, a few hundred bytes long.
 fn source(i: u64) -> Vec<u8> {
     let lines = 4 + (i * 7) % 20;
     (0..lines)
@@ -34,7 +34,7 @@ impl Gen {
         Gen { n: 0, heads: [None; LANES as usize] }
     }
 
-    /// Un'op `TextEdit` con i suoi due blob: il caso tipico della cattura continua.
+    /// A `TextEdit` op with its two blobs: the typical case of continuous capture.
     fn next(&mut self) -> (Op, [Vec<u8>; 2]) {
         let i = self.n;
         self.n += 1;
@@ -78,7 +78,7 @@ fn write_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("write");
     group.sample_size(20).measurement_time(Duration::from_secs(8));
 
-    // Throughput di scrittura in blocco: 1000 op (con 2 blob l'una) e un commit.
+    // Bulk write throughput: 1000 ops (with 2 blobs each) and one commit.
     group.throughput(Throughput::Elements(1000));
     group.bench_function("append_1000_ops_then_commit", |b| {
         let (_dir, mut store, mut gen) = filled(0);
@@ -88,7 +88,7 @@ fn write_path(c: &mut Criterion) {
         });
     });
 
-    // Latenza di un salvataggio: una op, due blob, commit (fsync compresi).
+    // Latency of a save: one op, two blobs, commit (fsyncs included).
     group.throughput(Throughput::Elements(1));
     group.bench_function("append_1_op_then_commit", |b| {
         let (_dir, mut store, mut gen) = filled(0);
@@ -105,7 +105,7 @@ fn write_path(c: &mut Criterion) {
             let mut i = 0u64;
             b.iter(|| {
                 i += 1;
-                // Contenuto sempre diverso (niente deduplicazione), comprimibile.
+                // Content that is always different (no deduplication), compressible.
                 let mut data = source(i);
                 while data.len() < size {
                     data.extend_from_slice(&source(i + data.len() as u64));

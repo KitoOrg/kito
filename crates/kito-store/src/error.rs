@@ -1,4 +1,4 @@
-//! Errori dello store.
+//! Store errors.
 
 use kito_core::CodecError;
 use std::io;
@@ -8,42 +8,42 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("I/O su {}: {source}", path.display())]
+    #[error("I/O on {}: {source}", path.display())]
     Io {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
 
-    #[error("{} non è uno store Kito (manca o è illeggibile il file `format`)", .0.display())]
+    #[error("{} is not a Kito store (the `format` file is missing or unreadable)", .0.display())]
     NotAStore(PathBuf),
 
-    #[error("{} contiene già uno store Kito", .0.display())]
+    #[error("{} already contains a Kito store", .0.display())]
     AlreadyExists(PathBuf),
 
-    #[error("formato dello store non supportato: {0:?}")]
+    #[error("unsupported store format: {0:?}")]
     UnsupportedFormat(String),
 
-    #[error("lo store {} è già aperto in scrittura da un altro processo", .0.display())]
+    #[error("the store {} is already open for writing by another process", .0.display())]
     Locked(PathBuf),
 
-    /// Dati confermati danneggiati: non si ripara in automatico.
-    #[error("dati corrotti in {} all'offset {offset}: {reason}", path.display())]
+    /// Damaged confirmed data: it is not repaired automatically.
+    #[error("corrupt data in {} at offset {offset}: {reason}", path.display())]
     Corrupt { path: PathBuf, offset: u64, reason: String },
 
-    #[error("lo store ha subito un errore di scrittura e va riaperto")]
+    #[error("the store hit a write error and must be reopened")]
     Poisoned,
 
-    #[error("record troppo grande: {0} byte")]
+    #[error("record too large: {0} bytes")]
     RecordTooLarge(usize),
 
-    #[error("operazione rifiutata: {0}")]
+    #[error("operation rejected: {0}")]
     InvalidOp(String),
 
     #[error(transparent)]
     Codec(#[from] CodecError),
 
-    #[error("indice: {0}")]
+    #[error("index: {0}")]
     Index(String),
 }
 
@@ -52,13 +52,13 @@ impl StoreError {
         StoreError::Corrupt { path: path.to_owned(), offset, reason: reason.into() }
     }
 
-    /// `true` se l'errore è "spazio su disco esaurito".
+    /// `true` if the error is "out of disk space".
     pub fn is_storage_full(&self) -> bool {
         matches!(self, StoreError::Io { source, .. } if source.kind() == io::ErrorKind::StorageFull)
     }
 }
 
-/// Aggiunge il percorso a un errore di I/O.
+/// Adds the path to an I/O error.
 pub(crate) trait IoContext<T> {
     fn at(self, path: &Path) -> Result<T>;
 }

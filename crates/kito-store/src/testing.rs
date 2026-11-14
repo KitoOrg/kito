@@ -1,5 +1,5 @@
-//! Supporto per i test di fault injection: un file system che esaurisce lo
-//! spazio, fallisce `fsync` a comando e sa simulare una perdita di corrente.
+//! Support for the fault injection tests: a file system that runs out of
+//! space, fails `fsync` on command and can simulate a power loss.
 
 use crate::fs::{FileSystem, RawFile, StdFs};
 use std::collections::HashMap;
@@ -11,16 +11,16 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 struct Faults {
-    /// Byte ancora scrivibili prima di "disco pieno" (`u64::MAX` = illimitati).
+    /// Bytes still writable before "disk full" (`u64::MAX` = unlimited).
     space: AtomicU64,
-    /// fsync ancora concessi prima che comincino a fallire (`u64::MAX` = illimitati).
+    /// fsyncs still granted before they start failing (`u64::MAX` = unlimited).
     syncs_left: AtomicU64,
     fail_truncate: AtomicBool,
-    /// Per ogni file scritto: quanti byte sono durevoli (coperti da un fsync).
+    /// For each file written: how many bytes are durable (covered by an fsync).
     durable: Mutex<HashMap<PathBuf, u64>>,
 }
 
-/// File system reale con guasti iniettabili. I cloni condividono lo stato.
+/// Real file system with injectable faults. The clones share the state.
 #[derive(Debug, Clone)]
 pub struct FaultyFs {
     faults: Arc<Faults>,
@@ -32,19 +32,19 @@ impl Default for FaultyFs {
     }
 }
 
-/// Cosa resta, dopo una perdita di corrente, dei byte scritti ma non
-/// sincronizzati di un file.
+/// What is left, after a power loss, of the bytes of a file that were
+/// written but not synced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsynced {
-    /// Tutti persi: il file torna alla lunghezza durevole.
+    /// All lost: the file goes back to its durable length.
     Lost,
-    /// Ne sopravvive solo un prefisso.
+    /// Only a prefix of them survives.
     Partial,
-    /// Sopravvivono tutti.
+    /// They all survive.
     Kept,
-    /// La lunghezza sopravvive ma il contenuto è azzerato.
+    /// The length survives but the content is zeroed.
     Zeroed,
-    /// La lunghezza sopravvive ma il contenuto è spazzatura.
+    /// The length survives but the content is garbage.
     Garbage,
 }
 
@@ -60,42 +60,42 @@ impl FaultyFs {
         }
     }
 
-    /// Dopo altri `bytes` byte scritti, le scritture falliscono con "disco
-    /// pieno"; la scrittura che supera il limite arriva a metà.
+    /// After `bytes` more bytes written, writes fail with "disk full"; the
+    /// write that crosses the limit gets only halfway.
     pub fn set_space(&self, bytes: u64) {
         self.faults.space.store(bytes, Ordering::SeqCst);
     }
 
-    /// Toglie il limite di spazio.
+    /// Removes the space limit.
     pub fn free_space(&self) {
         self.faults.space.store(u64::MAX, Ordering::SeqCst);
     }
 
-    /// Fa fallire (o torna a far riuscire) tutti gli fsync.
+    /// Makes all the fsyncs fail (or succeed again).
     pub fn fail_sync(&self, on: bool) {
         self.faults.syncs_left.store(if on { 0 } else { u64::MAX }, Ordering::SeqCst);
     }
 
-    /// Concede ancora `n` fsync, poi li fa fallire tutti.
+    /// Grants `n` more fsyncs, then makes them all fail.
     pub fn fail_sync_after(&self, n: u64) {
         self.faults.syncs_left.store(n, Ordering::SeqCst);
     }
 
-    /// Fa fallire anche il troncamento con cui lo store annulla una
-    /// scrittura parziale: nel file resta un record a metà.
+    /// Also fails the truncation with which the store undoes a partial
+    /// write: a half-written record is left in the file.
     pub fn fail_truncate(&self, on: bool) {
         self.faults.fail_truncate.store(on, Ordering::SeqCst);
     }
 
-    /// Byte durevoli di un file scritto tramite questo file system.
+    /// Durable bytes of a file written through this file system.
     pub fn durable_len(&self, path: &Path) -> Option<u64> {
         self.faults.durable.lock().unwrap().get(path).copied()
     }
 
-    /// Simula una perdita di corrente: per ogni file scritto, i byte oltre
-    /// l'ultimo fsync subiscono la sorte scelta da `fate` (che riceve un
-    /// contatore per variare le scelte). Lo store deve essere già stato
-    /// abbandonato. Restituisce quanti file sono stati alterati.
+    /// Simulates a power loss: for each file written, the bytes past the
+    /// last fsync suffer the fate chosen by `fate` (which receives a counter
+    /// to vary the choices). The store must already have been dropped.
+    /// Returns how many files were altered.
     pub fn power_loss(&self, mut fate: impl FnMut(&Path, u64) -> (Unsynced, u64)) -> io::Result<usize> {
         let durable = std::mem::take(&mut *self.faults.durable.lock().unwrap());
         let mut files: Vec<_> = durable.into_iter().collect();
@@ -139,7 +139,7 @@ impl FaultyFs {
         Ok(altered)
     }
 
-    /// Consuma fino a `want` byte di spazio; restituisce quanti ne concede.
+    /// Consumes up to `want` bytes of space; returns how many it grants.
     fn take(&self, want: u64) -> u64 {
         let space = &self.faults.space;
         let mut current = space.load(Ordering::SeqCst);
@@ -161,7 +161,7 @@ impl FaultyFs {
 }
 
 fn disk_full() -> io::Error {
-    io::Error::new(io::ErrorKind::StorageFull, "spazio esaurito (guasto iniettato)")
+    io::Error::new(io::ErrorKind::StorageFull, "out of space (injected fault)")
 }
 
 struct FaultyFile {
@@ -192,7 +192,7 @@ impl RawFile for FaultyFile {
             })
             .is_ok();
         if !granted {
-            return Err(io::Error::other("fsync fallito (guasto iniettato)"));
+            return Err(io::Error::other("fsync failed (injected fault)"));
         }
         self.inner.sync()?;
         self.fs.set_durable(&self.path, self.len);
@@ -201,7 +201,7 @@ impl RawFile for FaultyFile {
 
     fn truncate(&mut self, len: u64) -> io::Result<()> {
         if self.fs.faults.fail_truncate.load(Ordering::SeqCst) {
-            return Err(io::Error::other("truncate fallito (guasto iniettato)"));
+            return Err(io::Error::other("truncate failed (injected fault)"));
         }
         self.inner.truncate(len)?;
         self.len = len;
@@ -215,7 +215,7 @@ impl RawFile for FaultyFile {
 impl FileSystem for FaultyFs {
     fn open_append(&self, path: &Path) -> io::Result<Box<dyn RawFile>> {
         let len = fs::metadata(path)?.len();
-        // Ciò che è su disco all'apertura è, per definizione, sopravvissuto.
+        // What is on disk at open time has, by definition, survived.
         self.faults.durable.lock().unwrap().entry(path.to_owned()).or_insert(len);
         Ok(Box::new(FaultyFile {
             inner: StdFs.open_append(path)?,
