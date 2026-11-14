@@ -272,6 +272,21 @@ impl OpKind {
         }
     }
 
+    /// Percorsi dei file il cui stato nell'albero cambia per effetto dell'op.
+    pub fn paths(&self) -> SmallVec<[&PathBuf; 2]> {
+        match self {
+            OpKind::FileAdd { path, .. } | OpKind::FileRemove { path } => SmallVec::from_slice(&[path]),
+            OpKind::FileRename { from, to } => SmallVec::from_slice(&[from, to]),
+            OpKind::TextEdit { file, .. } => SmallVec::from_slice(&[file]),
+            OpKind::AddSymbol { .. }
+            | OpKind::RemoveSymbol { .. }
+            | OpKind::ModifyBody { .. }
+            | OpKind::ModifySignature { .. }
+            | OpKind::Rename { .. }
+            | OpKind::Move { .. } => SmallVec::new(),
+        }
+    }
+
     /// Nome della variante, per log e output.
     pub fn name(&self) -> &'static str {
         match self {

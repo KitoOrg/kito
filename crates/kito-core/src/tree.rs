@@ -59,6 +59,16 @@ impl Tree {
         self.files.iter().map(|(p, e)| (p.as_path(), e))
     }
 
+    /// File contenuti nella cartella `dir` (a qualunque profondità).
+    pub fn under<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = (&'a Path, &'a TreeEntry)> {
+        // I percorsi sono ordinati per componenti: i discendenti di `dir`
+        // sono contigui e vengono subito dopo `dir`.
+        self.files
+            .range::<Path, _>((std::ops::Bound::Excluded(dir), std::ops::Bound::Unbounded))
+            .take_while(move |(p, _)| p.starts_with(dir))
+            .map(|(p, e)| (p.as_path(), e))
+    }
+
     /// Applica un'operazione. Le op che non descrivono un effetto sui file
     /// (quelle simboliche) lasciano l'albero invariato. Se l'operazione non
     /// è applicabile a questo albero restituisce un errore e non cambia nulla.
@@ -134,6 +144,20 @@ mod tests {
             files,
             [(Path::new("dir/b.txt"), &TreeEntry { blob: blob("2"), mode: FileMode::Regular })]
         );
+    }
+
+    #[test]
+    fn under_lists_exactly_the_descendants() {
+        let mut t = Tree::new();
+        for p in ["a", "a.txt", "a/b", "a/c/d", "ab/x", "b"] {
+            if p != "a" {
+                t.apply(&add(p, p)).unwrap();
+            }
+        }
+        let under: Vec<_> = t.under(Path::new("a")).map(|(p, _)| p.to_str().unwrap()).collect();
+        assert_eq!(under, ["a/b", "a/c/d"]);
+        assert_eq!(t.under(Path::new("zz")).count(), 0);
+        assert_eq!(t.under(Path::new("a/c")).count(), 1);
     }
 
     #[test]
