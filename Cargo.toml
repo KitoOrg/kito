@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-lane", "crates/kito-integrate", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
+members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-lane", "crates/kito-integrate", "crates/kito-git", "crates/kitod", "crates/kito-cli", "crates/kito-mcp"]
 
 [workspace.package]
 version = "0.2.0"
@@ -37,6 +37,7 @@ smallvec = { version = "1", features = ["serde", "union"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "process"] }
 rustix = { version = "1", features = ["process"] }
+rmcp = { version = "3.10", default-features = false, features = ["server", "transport-io"] }
 toml = "0.9"
 toml_edit = "0.23"
 tree-sitter = "0.27"

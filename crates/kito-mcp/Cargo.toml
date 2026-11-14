@@ -1,0 +1,24 @@
+[package]
+name = "kito-mcp"
+description = "Kito: the MCP server for agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kito-mcp"
+path = "src/main.rs"
+
+[dependencies]
+kitod.workspace = true
+rmcp.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

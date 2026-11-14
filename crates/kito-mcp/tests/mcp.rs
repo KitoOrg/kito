@@ -1,0 +1,272 @@
+//! The real MCP server, spoken to as a client would: JSON-RPC on its
+//! standard input and output.
+
+use serde_json::{json, Value};
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+/// The daemon binary sits next to the server's. If the tests run for this
+/// package alone it may not have been built.
+fn kitod() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kitod");
+    BUILD.call_once(|| {
+        if !path.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kitod", "--bin", "kitod"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kitod");
+        }
+    });
+    path
+}
+
+struct Session {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next: u64,
+}
+
+impl Session {
+    fn start(root: &Path, extra: &[&str]) -> Session {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kito-mcp"))
+            .arg("--repo")
+            .arg(root)
+            .args(extra)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "ada")
+            .env("KITO_CONFIG_DIR", root.join(".absent-personal-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("KITO_MCP_TOOL_PREFIX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut session = Session { child, stdin, stdout, next: 1 };
+        let hello = session.request(
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "0" } }),
+        );
+        assert_eq!(hello["serverInfo"]["name"], "kito");
+        assert!(hello["instructions"].as_str().unwrap().contains("open_lane"));
+        session.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        session
+    }
+
+    fn send(&mut self, message: &Value) {
+        writeln!(self.stdin, "{message}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Sends a request and returns its `result` (panics on a protocol error).
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+        assert_eq!(reply["id"], id, "{reply}");
+        assert!(reply.get("error").is_none(), "{method}: {reply}");
+        reply["result"].clone()
+    }
+
+    /// Calls a tool and returns what it answered, as structured content.
+    fn tool(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
+        let result = self.request("tools/call", json!({ "name": name, "arguments": arguments }));
+        let text = result["content"][0]["text"].as_str().unwrap_or_default().to_owned();
+        if result["isError"].as_bool().unwrap_or(false) {
+            return Err(text);
+        }
+        // The text is the same JSON, for clients that only read text.
+        let from_text: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+        let structured = result["structuredContent"].clone();
+        assert!(structured == from_text || structured["result"] == from_text, "{result}");
+        Ok(from_text)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn stop_daemon(root: &Path) {
+    let mut client = kitod::client::Client::connect(root).unwrap();
+    let _ = client.call_value("shutdown", json!({}));
+    let socket = kitod::rpc::socket_path(root);
+    for _ in 0..2000 {
+        if !socket.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the daemon did not stop");
+}
+
+const SHOP: &str = "export function total(items: Item[]): number {\n  let sum = 0;\n  for (const item of items) {\n    sum += item.price * item.quantity;\n  }\n  return sum;\n}\n";
+
+fn new_repo() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    kitod::Repo::init(&root).unwrap().close().unwrap();
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), SHOP).unwrap();
+    (tmp, root)
+}
+
+#[test]
+fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
+    let (_tmp, root) = new_repo();
+    let mut mcp = Session::start(&root, &[]);
+
+    // The eleven tools of the plan, by name, each with a schema.
+    let listed = mcp.request("tools/list", json!({}));
+    let names: Vec<&str> =
+        listed["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "kito.open_lane",
+            "kito.sync",
+            "kito.status",
+            "kito.log",
+            "kito.set_intent",
+            "kito.rename_symbol",
+            "kito.request_integration",
+            "kito.integration_result",
+            "kito.why",
+            "kito.resolve_conflict",
+            "kito.close_lane",
+        ]
+    );
+    for tool in listed["tools"].as_array().unwrap() {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        assert!(tool["description"].as_str().unwrap().len() > 20, "{tool}");
+    }
+
+    // Open a lane, say why, work in its working copy.
+    let lane = mcp
+        .tool("kito.open_lane", json!({ "agent": "builder", "task": "task #55: absolute totals" }))
+        .unwrap();
+    assert_eq!((lane["id"].as_str(), lane["state"].as_str()), (Some("lane/1"), Some("active")));
+    let workdir = PathBuf::from(lane["workdir"].as_str().unwrap());
+    assert_eq!(fs::read_to_string(workdir.join("src/shop.ts")).unwrap(), SHOP);
+    let intent = mcp
+        .tool("kito.set_intent", json!({ "lane": "lane/1", "summary": "never return a negative total" }))
+        .unwrap();
+    assert!(intent["intent"].as_str().unwrap().len() >= 32);
+    fs::write(workdir.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.abs(sum);")).unwrap();
+    assert_eq!(mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap()["ops"], 2);
+    let renamed = mcp
+        .tool(
+            "kito.rename_symbol",
+            json!({ "lane": "lane/1", "symbol": "src/shop.ts:total", "new_name": "grandTotal" }),
+        )
+        .unwrap();
+    assert_eq!((renamed["from"].as_str(), renamed["to"].as_str()), (Some("total"), Some("grandTotal")));
+
+    let status = mcp.tool("kito.status", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!((status["ops"].as_u64(), status["files"][0].as_str()), (Some(4), Some("src/shop.ts")));
+    assert_eq!(status["conflicts"], json!([]));
+    let log = mcp.tool("kito.log", json!({ "lane": "lane/1", "limit": 5 })).unwrap();
+    let log = log.as_array().unwrap();
+    assert_eq!(log[0]["op"], "Rename");
+    assert_eq!(log[0]["intent"], "never return a negative total");
+    let story =
+        mcp.tool("kito.log", json!({ "lane": "lane/1", "symbol": "src/shop.ts:grandTotal" })).unwrap();
+    assert_eq!(story[0]["name"], "grandTotal");
+
+    // Integrate, and read the result as the plan shows it.
+    let asked = mcp.tool("kito.request_integration", json!({ "lane": "lane/1" })).unwrap();
+    let job = asked["job"].as_str().unwrap().to_owned();
+    let result = mcp.tool("kito.integration_result", json!({ "job": job })).unwrap();
+    assert_eq!(result["lane"], "lane/1");
+    assert_eq!(result["result"], "integrated");
+    assert_eq!(result["checkpoint"], "ckpt#2");
+    assert_eq!(result["conflicts"], json!([]));
+    assert_eq!(result["your_next_base"], "ckpt#2");
+    let merged = fs::read_to_string(root.join("src/shop.ts")).unwrap();
+    assert!(merged.contains("export function grandTotal(") && merged.contains("Math.abs(sum)"), "{merged}");
+
+    let why = mcp.tool("kito.why", json!({ "file": "src/shop.ts", "symbol": "grandTotal" })).unwrap();
+    let steps: Vec<&str> =
+        why[0]["steps"].as_array().unwrap().iter().map(|s| s["what"].as_str().unwrap()).collect();
+    assert!(steps.contains(&"renamed `total` → `grandTotal`, on lane/1"), "{steps:?}");
+
+    // Mistakes come back as tool errors with a reason, not as protocol errors.
+    let error = mcp.tool("kito.sync", json!({ "lane": "lane/7" })).unwrap_err();
+    assert!(error.contains("no such open lane"), "{error}");
+    let error = mcp.tool("kito.open_lane", json!({})).unwrap_err();
+    assert!(error.contains("agent"), "{error}");
+    let error = mcp.tool("kito.log", json!({ "symbol": "grandTotal" })).unwrap_err();
+    assert!(error.contains("file:name"), "{error}");
+
+    let closed = mcp.tool("kito.close_lane", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(closed["state"], "closed");
+    assert!(!workdir.exists());
+    drop(mcp);
+    stop_daemon(&root);
+}
+
+#[test]
+fn a_conflict_is_decided_through_the_tools_and_names_can_avoid_the_dot() {
+    let (_tmp, root) = new_repo();
+    // For clients that refuse a dot in a tool name.
+    let mut mcp = Session::start(&root, &["--tool-prefix", "kito_"]);
+    let listed = mcp.request("tools/list", json!({}));
+    assert_eq!(listed["tools"][0]["name"], "kito_open_lane");
+
+    let lane = mcp.tool("kito_open_lane", json!({ "agent": "builder" })).unwrap();
+    let workdir = PathBuf::from(lane["workdir"].as_str().unwrap());
+    fs::write(workdir.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.abs(sum);")).unwrap();
+    fs::write(root.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.max(sum, 0);")).unwrap();
+
+    let job = mcp.tool("kito_request_integration", json!({ "lane": "lane/1" })).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = mcp.tool("kito_integration_result", json!({ "job": job, "wait_ms": 20000 })).unwrap();
+    assert_eq!(result["result"], "conflicts");
+    let conflict = &result["conflicts"][0];
+    assert_eq!(
+        (conflict["id"].as_str(), conflict["kind"].as_str(), conflict["symbol"].as_str()),
+        (Some("conflict#1"), Some("body_body"), Some("total"))
+    );
+    assert!(conflict["main"].as_str().unwrap().contains("Math.max(sum, 0)"));
+    assert!(conflict["lane_text"].as_str().unwrap().contains("Math.abs(sum)"));
+    // The status of the lane says the same.
+    let status = mcp.tool("kito_status", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(
+        (status["state"].as_str(), status["conflicts"][0]["id"].as_str()),
+        (Some("blocked"), Some("conflict#1"))
+    );
+
+    let text = SHOP.replace("return sum;", "return Math.max(Math.abs(sum), 0);");
+    let decided =
+        mcp.tool("kito_resolve_conflict", json!({ "conflict": "conflict#1", "text": text })).unwrap();
+    assert_eq!(decided["remaining"], 0);
+    let job = mcp.tool("kito_request_integration", json!({ "lane": "lane/1" })).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = mcp.tool("kito_integration_result", json!({ "job": job })).unwrap();
+    assert_eq!(result["result"], "integrated", "{result}");
+    assert!(fs::read_to_string(root.join("src/shop.ts")).unwrap().contains("Math.max(Math.abs(sum), 0)"));
+    // The old name of the tools is not there.
+    let reply = mcp.request("tools/list", json!({}));
+    assert!(reply["tools"].as_array().unwrap().iter().all(|t| !t["name"].as_str().unwrap().contains('.')));
+    drop(mcp);
+    stop_daemon(&root);
+}
