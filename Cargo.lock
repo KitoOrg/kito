@@ -1497,6 +1497,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kito-merge"
+version = "0.2.0"
+dependencies = [
+ "kito-core",
+ "kito-diff",
+ "kito-parse",
+ "proptest",
+]
+
+[[package]]
 name = "kito-parse"
 version = "0.2.0"
 dependencies = [

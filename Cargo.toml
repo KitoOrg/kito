@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
+members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
 
 [workspace.package]
 version = "0.2.0"
@@ -14,6 +14,7 @@ kito-core = { path = "crates/kito-core" }
 kito-store = { path = "crates/kito-store" }
 kito-parse = { path = "crates/kito-parse" }
 kito-diff = { path = "crates/kito-diff" }
+kito-merge = { path = "crates/kito-merge" }
 kito-git = { path = "crates/kito-git" }
 kitod = { path = "crates/kitod" }
 
