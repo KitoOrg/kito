@@ -343,3 +343,115 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
     assert!(!malformed.status.success());
     ok(root, &["daemon", "stop"]);
 }
+
+#[test]
+fn lanes_integration_and_conflicts_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(items: Item[]): number {\n  let sum = 0;\n  for (const item of items) {\n    sum += item.price * item.quantity;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = Math.round((amount * percent) / 100);\n  return amount - cut;\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+    assert!(ok(root, &["lanes"]).contains("No open lanes"));
+
+    // Two lanes, each with a working copy of its own.
+    let opened = ok(root, &["lane", "open", "alice", "--task", "floor the discount"]);
+    assert!(
+        opened.contains("lane/1 opened for alice on ckpt#1") && opened.contains("Working copy:"),
+        "{opened}"
+    );
+    let bob = json(root, &["lane", "open", "bob", "--json"]);
+    assert_eq!(bob["id"], "lane/2");
+    let (alice_dir, bob_dir) =
+        (root.join(".kito/lanes/1/work"), PathBuf::from(bob["workdir"].as_str().unwrap()));
+    assert_eq!(bob_dir, root.join(".kito/lanes/2/work"));
+
+    fs::write(alice_dir.join("src/shop.ts"), shop.replace("Math.round(", "Math.floor(")).unwrap();
+    fs::write(bob_dir.join("src/shop.ts"), shop.replace("return sum;", "return Math.abs(sum);")).unwrap();
+    assert!(
+        ok(root, &["intent", "absolute totals", "--lane", "lane/2", "--task", "task #9"]).contains("lane/2")
+    );
+    assert!(ok(root, &["sync", "lane/1"]).contains("Everything is recorded"));
+    let lanes = ok(root, &["lanes"]);
+    let lines: Vec<&str> = lanes.lines().collect();
+    assert_eq!(lines.len(), 2, "{lanes}");
+    assert!(
+        lines[0].starts_with("lane/1")
+            && lines[0].contains("alice")
+            && lines[0].contains("floor the discount"),
+        "{lanes}"
+    );
+    assert!(lines[0].contains("2 ops") && lines[0].contains("1 file"), "{lanes}");
+    let status = ok(root, &["lane", "status", "lane/1"]);
+    assert!(
+        status.contains("changed  src/shop.ts") && status.contains("Agent ............. alice"),
+        "{status}"
+    );
+    // The log of a lane, and a symbol's story as the lane knows it.
+    let log = ok(root, &["log", "lane/1"]);
+    assert!(log.contains("TextEdit") && log.contains("`discount` body changed"), "{log}");
+    assert!(ok(root, &["why", "src/shop.ts:discount", "--lane", "lane/1"]).contains("body changed"));
+
+    // Alice goes in. Meanwhile the main lane changes the line Bob changed.
+    let done = ok(root, &["integrate", "lane/1"]);
+    assert!(done.starts_with("lane/1: integrated as ckpt#2 (git "), "{done}");
+    assert!(fs::read_to_string(root.join("src/shop.ts")).unwrap().contains("Math.floor("));
+    let now = fs::read_to_string(root.join("src/shop.ts")).unwrap();
+    fs::write(root.join("src/shop.ts"), now.replace("return sum;", "return Math.max(sum, 0);")).unwrap();
+    let blocked = kito(root, &["integrate", "lane/2"]);
+    assert!(!blocked.status.success(), "a conflict is not a success");
+    let blocked = String::from_utf8_lossy(&blocked.stdout).into_owned();
+    assert!(
+        blocked.contains("lane/2: 1 conflict") && blocked.contains("conflict#1") && blocked.contains("total"),
+        "{blocked}"
+    );
+    assert!(blocked.contains("kito resolve"), "{blocked}");
+
+    let conflicts = ok(root, &["conflicts"]);
+    assert!(
+        conflicts.contains("conflict#1") && conflicts.contains("lane/2") && conflicts.contains("[to decide]"),
+        "{conflicts}"
+    );
+    let shown = ok(root, &["conflicts", "conflict#1"]);
+    for needle in [
+        "--- at the common starting point",
+        "--- on the main lane",
+        "--- on lane/2",
+        "Math.max(sum, 0)",
+        "Math.abs(sum)",
+    ] {
+        assert!(shown.contains(needle), "missing {needle:?} in:\n{shown}");
+    }
+    assert_eq!(json(root, &["conflicts", "--json"])[0]["kind"], "body_body");
+    assert!(!kito(root, &["resolve", "conflict#1"]).status.success(), "a decision is needed");
+    let decided = ok(root, &["resolve", "1", "--lane"]);
+    assert!(decided.contains("conflict#1 decided") && decided.contains("kito integrate lane/2"), "{decided}");
+    assert!(ok(root, &["conflicts"]).contains("[decided: lane]"));
+    let done = json(root, &["integrate", "lane/2", "--json"]);
+    assert_eq!(
+        (done[0]["result"].as_str(), done[0]["checkpoint"].as_str()),
+        (Some("integrated"), Some("ckpt#3"))
+    );
+    let merged = fs::read_to_string(root.join("src/shop.ts")).unwrap();
+    assert!(merged.contains("return Math.abs(sum);") && merged.contains("Math.floor("), "{merged}");
+    assert!(ok(root, &["conflicts"]).contains("No open conflicts"));
+    assert_eq!(
+        git(root, &["log", "--format=%an|%s"]).lines().collect::<Vec<_>>(),
+        ["bob|absolute totals", "alice|floor the discount", "ada|start"]
+    );
+
+    // An explicit rename on the main lane, and a lane that closes.
+    let renamed = ok(root, &["rename", "src/shop.ts:total", "grandTotal"]);
+    assert!(renamed.contains("`total` is now `grandTotal` in src/shop.ts"), "{renamed}");
+    assert!(ok(root, &["why", "src/shop.ts:grandTotal"]).contains("renamed `total` → `grandTotal`"));
+    assert!(ok(root, &["lane", "close", "lane/1"]).contains("lane/1 closed"));
+    assert!(!alice_dir.exists());
+    let all = ok(root, &["lanes", "--all"]);
+    assert!(all.contains("closed") && all.lines().count() == 2, "{all}");
+    let unknown = kito(root, &["integrate", "lane/1"]);
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("no such open lane"));
+    ok(root, &["daemon", "stop"]);
+}

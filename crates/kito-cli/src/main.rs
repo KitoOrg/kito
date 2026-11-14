@@ -5,8 +5,11 @@
 //! store, because they are needed before a daemon makes sense.
 
 use clap::{Parser, Subcommand};
+use kito_integrate::{ConflictInfo, IntegrationResult, JobState, Outcome as Integration};
 use kitod::client::{find_root, Client, ClientError};
 use kitod::identity::{self, Identity};
+use kitod::lanes::LaneInfo;
+use kitod::rename::RenameResult;
 use kitod::repo::{CheckpointResult, LogItem, RollbackResult};
 use kitod::rpc::DaemonStatus;
 use kitod::semantic::Why;
@@ -45,11 +48,14 @@ enum Cmd {
     },
     /// Show the operation log, most recent first
     Log {
-        /// Only what concerns this file
-        path: Option<PathBuf>,
+        /// Only what concerns this file; or a lane (lane/1) for its own log
+        target: Option<PathBuf>,
         /// How many changes to show (what each meant for the symbols comes with it)
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
+        /// The log of this lane instead of the main one
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
     },
     /// Create a checkpoint manually
     Checkpoint {
@@ -94,9 +100,72 @@ enum Cmd {
     Why {
         /// <file>:<symbol>, for example src/auth.ts:getUser or src/auth.ts:Session.refresh
         target: String,
+        /// As this lane knows the symbol (default: the main lane)
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
     },
     /// Wait until every save has been recorded
-    Sync,
+    Sync {
+        /// Only the saves of this lane
+        lane: Option<String>,
+    },
+    /// List the lanes with agent, base, number of ops, state
+    Lanes {
+        /// Closed lanes too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Open, close or inspect a lane
+    Lane {
+        #[command(subcommand)]
+        command: LaneCmd,
+    },
+    /// Integrate one or more lanes into the main lane
+    Integrate {
+        /// Lanes to integrate, in this order (lane/1 lane/2 …)
+        #[arg(required = true)]
+        lanes: Vec<String>,
+    },
+    /// List the open conflicts and who they are assigned to
+    Conflicts {
+        /// Show this conflict in full: the three texts
+        id: Option<String>,
+        /// Settled conflicts too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Decide a conflict: the next integration of its lane applies the decision
+    Resolve {
+        /// The conflict (conflict#7)
+        conflict: String,
+        /// Keep what the main lane has
+        #[arg(long, conflicts_with_all = ["lane", "text"])]
+        main: bool,
+        /// Keep what the lane has
+        #[arg(long, conflicts_with = "text")]
+        lane: bool,
+        /// Use the text in this file (`-`: standard input)
+        #[arg(long, value_name = "FILE")]
+        text: Option<PathBuf>,
+    },
+    /// Rename a symbol explicitly, in a lane's working copy or in the main directory
+    Rename {
+        /// <file>:<symbol>, or the symbol's ID
+        symbol: String,
+        new_name: String,
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
+    },
+    /// Declare the "why" of the changes recorded from now on
+    Intent {
+        /// What is being done, in a sentence
+        summary: String,
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
+        /// The task it belongs to (task #55)
+        #[arg(long)]
+        task: Option<String>,
+    },
     /// Repository status
     Status,
     /// Manage the daemon
@@ -104,6 +173,25 @@ enum Cmd {
         #[command(subcommand)]
         command: DaemonCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum LaneCmd {
+    /// Open a lane for an agent: a working copy of its own
+    Open {
+        /// Name of the agent that will work in it
+        agent: String,
+        /// What the lane is for
+        #[arg(long)]
+        task: Option<String>,
+        /// Checkpoint to start from (default: the main lane as it is now)
+        #[arg(long, value_name = "CHECKPOINT")]
+        base: Option<String>,
+    },
+    /// Record the last changes of a lane and remove its working copy
+    Close { lane: String },
+    /// Ops since the base, files touched, open conflicts
+    Status { lane: String },
 }
 
 #[derive(Subcommand)]
@@ -233,16 +321,24 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
     Ok(())
 }
 
-fn cmd_why(cli: &Cli, target: &str) -> Outcome {
+fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>) -> Outcome {
     let root = root_of(cli)?;
     // The file comes first; a symbol may itself contain colons (`Foo::bar`).
     let Some((file, symbol)) = target.split_once(':').filter(|(f, s)| !f.is_empty() && !s.is_empty()) else {
         return Err("say which symbol: <file>:<symbol>, for example src/auth.ts:getUser".to_owned());
     };
-    let file = repo_relative(&root, Path::new(file))?;
+    // In a lane, files are named as the lane's working copy has them.
+    let file = match lane {
+        Some(_) => PathBuf::from(file),
+        None => repo_relative(&root, Path::new(file))?,
+    };
     let mut client = daemon(cli)?;
     client.call_value("sync", json!({})).map_err(fail)?;
-    let histories: Vec<Why> = client.call("why", json!({ "file": file, "symbol": symbol })).map_err(fail)?;
+    let mut params = json!({ "file": file, "symbol": symbol });
+    if let Some(lane) = lane {
+        params["lane"] = json!(lane);
+    }
+    let histories: Vec<Why> = client.call("why", params).map_err(fail)?;
     if cli.json {
         print_json(&histories);
         return Ok(());
@@ -269,14 +365,30 @@ fn is_symbolic(op: &str) -> bool {
     matches!(op, "AddSymbol" | "RemoveSymbol" | "ModifyBody" | "ModifySignature" | "Rename" | "Move")
 }
 
-fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
+fn cmd_log(cli: &Cli, target: &Option<PathBuf>, limit: usize, lane: &Option<String>) -> Outcome {
     let root = root_of(cli)?;
-    let rel = path.as_ref().map(|p| repo_relative(&root, p)).transpose()?;
+    // `kito log lane/1` is the log of that lane.
+    let named =
+        target.as_ref().and_then(|t| t.to_str()).filter(|t| t.starts_with("lane/")).map(str::to_owned);
+    let (lane, path) = match (lane, named) {
+        (None, Some(named)) => (Some(named), None),
+        (lane, _) => (lane.clone(), target.clone()),
+    };
+    let rel = match (&lane, path) {
+        (_, None) => None,
+        // In a lane, files are named as its working copy has them.
+        (Some(_), Some(path)) => Some(path),
+        (None, Some(path)) => Some(repo_relative(&root, &path)?),
+    };
     let mut client = daemon(cli)?;
     // Before showing the log, make sure it contains everything that is on
     // disk, even if the watcher has missed some events.
     client.call_value("sync", json!({})).map_err(fail)?;
-    let items: Vec<LogItem> = client.call("log", json!({ "limit": limit, "path": rel })).map_err(fail)?;
+    let mut params = json!({ "limit": limit, "path": rel });
+    if let Some(lane) = &lane {
+        params["lane"] = json!(lane);
+    }
+    let items: Vec<LogItem> = client.call("log", params).map_err(fail)?;
     if cli.json {
         print_json(&items);
         return Ok(());
@@ -511,8 +623,300 @@ fn cmd_export(cli: &Cli) -> Outcome {
     Ok(())
 }
 
-fn cmd_sync(cli: &Cli) -> Outcome {
-    let done: Value = daemon(cli)?.call("sync", json!({})).map_err(fail)?;
+fn lane_line(lane: &LaneInfo) -> String {
+    let mut line = format!(
+        "{:<8} {:<12} {:<11} base {:<8} {:>7}  {:>8}",
+        lane.id,
+        lane.agent,
+        lane.state,
+        lane.base,
+        count(lane.ops, "op", "ops"),
+        count(lane.files.len() as u64, "file", "files")
+    );
+    if !lane.conflicts.is_empty() {
+        line.push_str(&format!("  {}", count(lane.conflicts.len() as u64, "conflict", "conflicts")));
+    }
+    if let Some(what) = lane.task.as_ref().or(lane.intent.as_ref()) {
+        line.push_str(&format!("  {what}"));
+    }
+    line
+}
+
+fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
+    let lanes: Vec<LaneInfo> = daemon(cli)?.call("lanes", json!({ "all": all })).map_err(fail)?;
+    if cli.json {
+        print_json(&lanes);
+    } else if lanes.is_empty() {
+        println!("No open lanes. Open one with `kito lane open <agent>`.");
+    } else {
+        lanes.iter().for_each(|lane| println!("{}", lane_line(lane)));
+    }
+    Ok(())
+}
+
+fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
+    let mut client = daemon(cli)?;
+    match command {
+        LaneCmd::Open { agent, task, base } => {
+            let lane: LaneInfo = client
+                .call("open_lane", json!({ "agent": agent, "task": task, "base": base }))
+                .map_err(fail)?;
+            if cli.json {
+                print_json(&lane);
+            } else {
+                println!("{} opened for {} on {}.", lane.id, lane.agent, lane.base);
+                println!("Working copy: {}", lane.workdir.as_deref().unwrap_or(Path::new("")).display());
+                println!(
+                    "Every save there is recorded on the lane; `kito integrate {}` brings it in.",
+                    lane.id
+                );
+            }
+        }
+        LaneCmd::Close { lane } => {
+            let closed: LaneInfo = client.call("close_lane", json!({ "lane": lane })).map_err(fail)?;
+            if cli.json {
+                print_json(&closed);
+            } else {
+                println!(
+                    "{} closed: its working copy is gone, its {} stay in the log.",
+                    closed.id,
+                    count(closed.ops, "op", "ops")
+                );
+            }
+        }
+        LaneCmd::Status { lane } => {
+            let status: Value = client.call("lane_status", json!({ "lane": lane })).map_err(fail)?;
+            if cli.json {
+                print_json(&status);
+                return Ok(());
+            }
+            let text = |key: &str| status[key].as_str().unwrap_or("-").to_owned();
+            println!("Lane .............. {} ({})", text("id"), text("state"));
+            println!("Agent ............. {}", text("agent"));
+            if status["task"].is_string() {
+                println!("Task .............. {}", text("task"));
+            }
+            if status["intent"].is_string() {
+                println!("Intent ............ {}", text("intent"));
+            }
+            println!("Base .............. {}", text("base"));
+            println!("Working copy ...... {}", text("workdir"));
+            println!("Ops since the base  {}", status["ops"].as_u64().unwrap_or(0));
+            for file in status["files"].as_array().into_iter().flatten() {
+                println!("  changed  {}", file.as_str().unwrap_or_default());
+            }
+            let conflicts: Vec<ConflictInfo> =
+                serde_json::from_value(status["conflicts"].clone()).unwrap_or_default();
+            conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
+        }
+    }
+    Ok(())
+}
+
+fn conflict_line(c: &ConflictInfo) -> String {
+    let what = c.symbol.clone().or_else(|| c.file.clone()).unwrap_or_default();
+    let place = match (&c.symbol, &c.file) {
+        (Some(_), Some(file)) => format!("  ({file})"),
+        _ => String::new(),
+    };
+    let state = match (c.resolved, &c.resolution) {
+        (true, _) => "settled".to_owned(),
+        (false, Some(choice)) => format!("decided: {choice}"),
+        (false, None) => "to decide".to_owned(),
+    };
+    format!("{:<12} {:<8} {:<14} {what}{place}  [{state}]", c.id, c.lane, c.kind)
+}
+
+fn print_integration(result: &IntegrationResult) {
+    let verified = result
+        .verification
+        .as_ref()
+        .filter(|v| v.passed && !v.commands.is_empty())
+        .map(|v| format!(", verified in {:.1} s", v.duration_ms as f64 / 1000.0))
+        .unwrap_or_default();
+    match result.result {
+        Integration::Integrated => {
+            let git = result
+                .git_commit
+                .as_ref()
+                .map(|c| format!(" (git {})", &c[..10.min(c.len())]))
+                .unwrap_or_default();
+            println!(
+                "{}: integrated as {}{git}{verified}",
+                result.lane,
+                result.checkpoint.clone().unwrap_or_default()
+            );
+            for auto in &result.auto_resolutions {
+                println!("  merged by itself: {}", auto.symbol);
+            }
+            if let Some(message) = &result.message {
+                println!("  {message}");
+            }
+        }
+        Integration::NothingToIntegrate => println!("{}: nothing to integrate", result.lane),
+        Integration::Conflicts => {
+            println!("{}: {}", result.lane, count(result.conflicts.len() as u64, "conflict", "conflicts"));
+            result.conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
+            println!("  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again.");
+        }
+        Integration::VerificationFailed => {
+            let report = result.verification.as_ref();
+            println!(
+                "{}: verification failed: `{}`",
+                result.lane,
+                report.and_then(|v| v.failed_command.clone()).unwrap_or_default()
+            );
+            for line in report.and_then(|v| v.output.clone()).unwrap_or_default().lines() {
+                println!("  | {line}");
+            }
+            println!("  Nothing was integrated: fix it in the lane and integrate again.");
+        }
+        Integration::Failed => println!("{}: {}", result.lane, result.message.clone().unwrap_or_default()),
+    }
+}
+
+fn cmd_integrate(cli: &Cli, lanes: &[String]) -> Outcome {
+    let mut client = daemon(cli)?;
+    let mut results = Vec::new();
+    for lane in lanes {
+        let asked: Value = client.call("request_integration", json!({ "lane": lane })).map_err(fail)?;
+        let job = asked["job"].as_str().unwrap_or_default().to_owned();
+        // The verification can take long: ask again until it is done.
+        let result = loop {
+            let state: JobState =
+                client.call("integration_result", json!({ "job": job, "wait_ms": 2000 })).map_err(fail)?;
+            if let JobState::Done { result } = state {
+                break *result;
+            }
+        };
+        if !cli.json {
+            print_integration(&result);
+        }
+        results.push(result);
+    }
+    if cli.json {
+        print_json(&results);
+    }
+    match results
+        .iter()
+        .all(|r| matches!(r.result, Integration::Integrated | Integration::NothingToIntegrate))
+    {
+        true => Ok(()),
+        // The details are already printed; the exit code says it did not all go through.
+        false => Err(String::new()),
+    }
+}
+
+fn cmd_conflicts(cli: &Cli, id: &Option<String>, all: bool) -> Outcome {
+    let wanted = id.as_ref().map(|id| match id.starts_with("conflict#") {
+        true => id.clone(),
+        false => format!("conflict#{id}"),
+    });
+    let conflicts: Vec<ConflictInfo> =
+        daemon(cli)?.call("conflicts", json!({ "all": all || wanted.is_some() })).map_err(fail)?;
+    let Some(wanted) = wanted else {
+        if cli.json {
+            print_json(&conflicts);
+        } else if conflicts.is_empty() {
+            println!("No open conflicts.");
+        } else {
+            conflicts.iter().for_each(|c| println!("{}", conflict_line(c)));
+        }
+        return Ok(());
+    };
+    let conflict = conflicts.iter().find(|c| c.id == wanted).ok_or(format!("{wanted}: no such conflict"))?;
+    if cli.json {
+        print_json(conflict);
+        return Ok(());
+    }
+    println!("{}", conflict_line(conflict));
+    for (title, text) in [
+        ("at the common starting point", &conflict.base),
+        ("on the main lane", &conflict.main),
+        (&format!("on {}", conflict.lane), &conflict.lane_text),
+    ] {
+        println!("\n--- {title}");
+        match text {
+            Some(text) => print!("{text}{}", if text.ends_with('\n') { "" } else { "\n" }),
+            None => println!("(does not exist)"),
+        }
+    }
+    Ok(())
+}
+
+fn cmd_resolve(cli: &Cli, conflict: &str, main: bool, lane: bool, text: &Option<PathBuf>) -> Outcome {
+    let conflict = match conflict.starts_with("conflict#") {
+        true => conflict.to_owned(),
+        false => format!("conflict#{conflict}"),
+    };
+    let mut params = json!({ "conflict": conflict });
+    match (main, lane, text) {
+        (true, _, _) => params["choice"] = json!("main"),
+        (_, true, _) => params["choice"] = json!("lane"),
+        (_, _, Some(file)) => {
+            let content = if file.as_os_str() == "-" {
+                std::io::read_to_string(std::io::stdin()).map_err(fail)?
+            } else {
+                std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?
+            };
+            params["text"] = json!(content);
+        }
+        _ => return Err("say how: --main, --lane or --text FILE".to_owned()),
+    }
+    let done: Value = daemon(cli)?.call("resolve_conflict", params).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+        return Ok(());
+    }
+    let lane = done["conflict"]["lane"].as_str().unwrap_or_default();
+    match done["remaining"].as_u64().unwrap_or(0) {
+        0 => println!("{conflict} decided. Nothing else to decide: `kito integrate {lane}` applies it."),
+        n => println!("{conflict} decided. {} still to decide on {lane}.", count(n, "conflict", "conflicts")),
+    }
+    Ok(())
+}
+
+fn cmd_rename(cli: &Cli, symbol: &str, new_name: &str, lane: &Option<String>) -> Outcome {
+    let mut params = json!({ "symbol": symbol, "new_name": new_name });
+    if let Some(lane) = lane {
+        params["lane"] = json!(lane);
+    }
+    let done: RenameResult = daemon(cli)?.call("rename_symbol", params).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+        return Ok(());
+    }
+    println!("`{}` is now `{}` in {} (symbol {}).", done.from, done.to, done.file, done.symbol);
+    if !done.possible_references.is_empty() {
+        println!("The old name is still written here (not touched: they may be uses of it):");
+        done.possible_references.iter().for_each(|place| println!("  {place}"));
+    }
+    Ok(())
+}
+
+fn cmd_intent(cli: &Cli, summary: &str, lane: &Option<String>, task: &Option<String>) -> Outcome {
+    let mut params = json!({ "summary": summary, "task": task });
+    if let Some(lane) = lane {
+        params["lane"] = json!(lane);
+    }
+    let done: Value = daemon(cli)?.call("set_intent", params).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+    } else {
+        println!(
+            "From now on the changes on {} are recorded as: {summary}",
+            done["lane"].as_str().unwrap_or("the lane")
+        );
+    }
+    Ok(())
+}
+
+fn cmd_sync(cli: &Cli, lane: &Option<String>) -> Outcome {
+    let params = match lane {
+        Some(lane) => json!({ "lane": lane }),
+        None => json!({}),
+    };
+    let done: Value = daemon(cli)?.call("sync", params).map_err(fail)?;
     if cli.json {
         print_json(&done);
     } else {
@@ -650,7 +1054,7 @@ fn main() -> ExitCode {
     let outcome = match &cli.command {
         Cmd::Init { path, fresh } => cmd_init(&cli, path, *fresh),
         Cmd::Import { path } => cmd_import(&cli, path),
-        Cmd::Log { path, limit } => cmd_log(&cli, path, *limit),
+        Cmd::Log { target, limit, lane } => cmd_log(&cli, target, *limit, lane),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
         Cmd::Rollback { to, paths, ops, dry_run } => cmd_rollback(&cli, to, paths, *ops, *dry_run),
@@ -664,8 +1068,15 @@ fn main() -> ExitCode {
             };
             cmd_identity(&cli, name, email, kind, *global)
         }
-        Cmd::Why { target } => cmd_why(&cli, target),
-        Cmd::Sync => cmd_sync(&cli),
+        Cmd::Why { target, lane } => cmd_why(&cli, target, lane),
+        Cmd::Sync { lane } => cmd_sync(&cli, lane),
+        Cmd::Lanes { all } => cmd_lanes(&cli, *all),
+        Cmd::Lane { command } => cmd_lane(&cli, command),
+        Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),
+        Cmd::Conflicts { id, all } => cmd_conflicts(&cli, id, *all),
+        Cmd::Resolve { conflict, main, lane, text } => cmd_resolve(&cli, conflict, *main, *lane, text),
+        Cmd::Rename { symbol, new_name, lane } => cmd_rename(&cli, symbol, new_name, lane),
+        Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),
         Cmd::Daemon { command: DaemonCmd::Start } => daemon(&cli).map(|_| {
@@ -677,6 +1088,8 @@ fn main() -> ExitCode {
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
+        // An empty message: the command already said what went wrong.
+        Err(message) if message.is_empty() => ExitCode::FAILURE,
         Err(message) => {
             if cli.json {
                 print_json(&json!({ "error": message }));
