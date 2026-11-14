@@ -1,38 +1,38 @@
 # Kito
 
-Version control system semantico, in Rust, per sciami di agenti AI.
+A semantic version control system, written in Rust, for swarms of AI agents.
 
-L'unità di storia è l'operazione semantica su un simbolo, catturata in
-continuo: decine di agenti lavorano in parallelo sullo stesso repository e
-incontrano quasi solo conflitti reali. Ogni checkpoint sulla linea principale
-si esporta come commit git.
+The unit of history is the semantic operation on a symbol, captured
+continuously: dozens of agents work in parallel on the same repository and
+run into almost nothing but real conflicts. Every checkpoint on the main lane
+is exported as a git commit.
 
-Il progetto si costruisce per fasi; ogni fase si chiude con test verdi e una
-demo eseguibile.
+The project is built in phases; each phase ends with green tests and a
+runnable demo.
 
-| Fase | Contenuto | Stato |
+| Phase | Content | Status |
 | --- | --- | --- |
-| 0 | Fondamenta: `kito-core`, `kito-store` | completata |
-| 1 | Cattura continua testuale: `kitod`, CLI, export/import git | completata |
-| 2 | Semantica livello 1: tree-sitter, ID stabili, `kito why` | da fare |
-| 3 | Lane e integrazione, server MCP | da fare |
-| 4 | Semantica livello 2: LSP, conflitti `SemanticRef` | da fare |
-| 5 | Copertura e prestazioni | da fare |
+| 0 | Foundations: `kito-core`, `kito-store` | done |
+| 1 | Continuous textual capture: `kitod`, CLI, git export/import | done |
+| 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | to do |
+| 3 | Lanes and integration, MCP server | to do |
+| 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | to do |
+| 5 | Coverage and performance | to do |
 
-## Crate
+## Crates
 
-| Crate | Responsabilità |
+| Crate | Responsibility |
 | --- | --- |
-| `kito-core` | Tipi del modello dati, codifica CBOR canonica, ID e hash |
-| `kito-store` | Pack dei blob, oplog a segmenti, indici ricostruibili, recupero dopo un crash |
-| `kito-diff` | Diff testuale e produzione delle op sui file (il differ AST arriva con la fase 2) |
-| `kito-git` | Export dei checkpoint come commit git, import da un repository git |
-| `kitod` | Daemon: watcher, cattura, socket JSON-RPC |
-| `kito-cli` | Binario `kito` |
+| `kito-core` | Data model types, canonical CBOR encoding, IDs and hashes |
+| `kito-store` | Blob packs, segmented oplog, rebuildable indexes, crash recovery |
+| `kito-diff` | Textual diff and generation of the file ops (the AST differ arrives with phase 2) |
+| `kito-git` | Export of checkpoints as git commits, import from a git repository |
+| `kitod` | Daemon: watcher, capture, JSON-RPC socket |
+| `kito-cli` | The `kito` binary |
 
-Gli altri crate del piano nascono con la fase che li riempie.
+The other crates in the plan are created with the phase that fills them.
 
-## Provarlo
+## Trying it out
 
 ```bash
 cargo build --release -p kitod -p kito-cli
@@ -42,24 +42,24 @@ cargo build --release -p kitod -p kito-cli
 export PATH="$PWD/target/release:$PATH"
 ```
 
-In una cartella nuova (in un repository git esistente usa `kito import`):
+In a new directory (in an existing git repository use `kito import`):
 
 ```bash
 kito init
 ```
 
-Da qui ogni salvataggio viene registrato, senza commit. Per vedere cosa è
-successo e fissare un punto, che diventa anche un commit git:
+From here on every save is recorded, with no commits. To see what happened
+and mark a point, which also becomes a git commit:
 
 ```bash
 kito log
 ```
 
 ```bash
-kito checkpoint -m "prima versione"
+kito checkpoint -m "first version"
 ```
 
-## Sviluppo
+## Development
 
 ```bash
 cargo test --workspace
@@ -73,23 +73,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p kito-store
 ```
 
-Demo della fase 1: lavorare senza commit, `kito log` mostra tutto, `git log`
-vede i checkpoint.
+Phase 1 demo: working without commits, `kito log` shows everything, `git log`
+sees the checkpoints.
 
 ```bash
-scripts/demo-fase1.sh
+scripts/demo-phase1.sh
 ```
 
-Demo della fase 0: un milione di op, `kill -9` in momenti casuali, nessuna op
-confermata persa.
+Phase 0 demo: one million ops, `kill -9` at random moments, no confirmed op
+lost.
 
 ```bash
 cargo run --release -p kito-store --example crash_demo -- driver --dir /tmp/kito-demo --ops 1000000
 ```
 
-## Documenti
+## Documents
 
-- [`docs/fasi.md`](docs/fasi.md): cosa è stato fatto in ogni fase e come rifare le demo.
-- [`docs/decisions.md`](docs/decisions.md): scelte fatte su punti che il piano non fissa.
-- [`docs/benchmarks.md`](docs/benchmarks.md): misure che giustificano le ottimizzazioni.
-- [`docs/adr/`](docs/adr/): decisioni che cambiano il modello dati o una scelta fissata dal piano.
+- [`docs/phases.md`](docs/phases.md): what was done in each phase and how to rerun the demos.
+- [`docs/decisions.md`](docs/decisions.md): choices made on points the plan does not settle.
+- [`docs/benchmarks.md`](docs/benchmarks.md): measurements that justify the optimizations.
+- [`docs/adr/`](docs/adr/): decisions that change the data model or a choice settled by the plan.

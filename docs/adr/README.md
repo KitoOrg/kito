@@ -1,35 +1,35 @@
 # ADR (Architecture Decision Record)
 
-Serve un ADR, scritto **prima** del codice, per:
+An ADR, written **before** the code, is required to:
 
-- cambiare la semantica di un tipo del modello dati (`kito-core`): aggiungere
-  campi opzionali in coda non richiede ADR, tutto il resto sì;
-- cambiare una delle scelte della sezione "Decisioni prese" del piano di
-  progetto (linguaggio, rapporto con git, hash, interfacce…);
-- cambiare il formato su disco in modo incompatibile (il test
-  `golden_encoding_is_stable` di `kito-core` fallisce).
+- change the semantics of a data model type (`kito-core`): adding optional
+  fields at the end does not require an ADR, everything else does;
+- change one of the choices in the "Decisions made" section of the project
+  plan (language, relationship with git, hashes, interfaces…);
+- change the on-disk format in an incompatible way (the
+  `golden_encoding_is_stable` test of `kito-core` fails).
 
-Le scelte su punti che il piano non copre non sono ADR: vanno in
+Choices on points the plan does not cover are not ADRs: they go in
 [`../decisions.md`](../decisions.md).
 
-## Formato
+## Format
 
-File `NNNN-titolo-breve.md`, numerati in ordine:
+Files named `NNNN-short-title.md`, numbered in order:
 
 ```markdown
-# NNNN · Titolo
+# NNNN · Title
 
-Stato: proposto | accettato | superato da NNNN
-Data: AAAA-MM-GG
+Status: proposed | accepted | superseded by NNNN
+Date: YYYY-MM-DD
 
-## Contesto
-Cosa non funziona con la scelta attuale.
+## Context
+What does not work with the current choice.
 
-## Decisione
-Cosa cambia, con i tipi o i formati interessati.
+## Decision
+What changes, with the types or formats affected.
 
-## Conseguenze
-Compatibilità con i dati esistenti, migrazione, cosa diventa più difficile.
+## Consequences
+Compatibility with existing data, migration, what becomes harder.
 ```
 
-Nessun ADR finora.
+No ADRs so far.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Demo della fase 1: lavori in una cartella senza fare commit, `kito log`
-# mostra tutto, `git log` vede i checkpoint.
+# Phase 1 demo: you work in a directory without committing, `kito log`
+# shows everything, `git log` sees the checkpoints.
 #
 #   cargo build --release -p kitod -p kito-cli
-#   scripts/demo-fase1.sh
+#   scripts/demo-phase1.sh
 set -euo pipefail
 
 BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release"
@@ -14,7 +14,7 @@ trap 'kito --repo "$DEMO" daemon stop >/dev/null 2>&1 || true; rm -rf "$DEMO"' E
 cd "$DEMO"
 
 run() { printf '\n$ %s\n' "$*"; "$@"; }
-save() { printf '\n# salvo %s\n' "$1"; mkdir -p "$(dirname "$1")"; cat > "$1"; sleep 0.2; }
+save() { printf '\n# saving %s\n' "$1"; mkdir -p "$(dirname "$1")"; cat > "$1"; sleep 0.2; }
 
 run kito init
 printf '.kito/\n' > .gitignore
@@ -25,7 +25,7 @@ export function getUser(id: string) {
 }
 TS
 save README.md <<'MD'
-# Progetto demo
+# Demo project
 MD
 save src/auth.ts <<'TS'
 export function getUser(id: string) {
@@ -33,18 +33,18 @@ export function getUser(id: string) {
 }
 TS
 
-# Nessun commit finora: il log c'è già.
+# No commits so far: the log is already there.
 run kito log
-run kito checkpoint -m "auth con cache"
+run kito checkpoint -m "auth with cache"
 
-printf '\n# rinomino README.md in LEGGIMI.md e aggiungo un file\n'
-mv README.md LEGGIMI.md
+printf '\n# renaming README.md to GUIDE.md and adding a file\n'
+mv README.md GUIDE.md
 sleep 0.2
 save src/billing.ts <<'TS'
 import { getUser } from "./auth";
 export const invoice = (id: string) => getUser(id);
 TS
-run kito checkpoint -m "fatturazione"
+run kito checkpoint -m "billing"
 
 run kito log
 run git log --format='%h  %an  %s'

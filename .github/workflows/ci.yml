@@ -23,11 +23,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # La demo della fase 0 in formato ridotto: 100.000 op con kill -9.
+      # The phase 0 demo in reduced form: 100,000 ops with kill -9.
       - run: cargo run --release -p kito-store --example crash_demo -- driver --dir "$RUNNER_TEMP/kito-demo" --ops 100000
 
   bench:
-    # Soglia di regressione del 10% rispetto al ramo di destinazione.
+    # Regression threshold of 10% relative to the base branch.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -36,11 +36,11 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Benchmark del ramo di destinazione
+      - name: Benchmark the base branch
         run: |
           git checkout --quiet "origin/${{ github.base_ref }}"
           cargo bench --workspace -- --save-baseline base
-      - name: Benchmark della pull request
+      - name: Benchmark the pull request
         run: |
           git checkout --quiet "${{ github.sha }}"
           cargo bench --workspace -- --baseline base
