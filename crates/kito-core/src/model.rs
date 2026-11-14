@@ -391,10 +391,28 @@ pub enum LaneState {
 pub struct Lane {
     pub id: LaneId,
     pub agent: Author,
+    /// The checkpoint of the main lane the lane started from, or was last
+    /// brought up to.
     pub base: CheckpointId,
+    /// The parent of the lane's next op: its last op, or `base_head` when it
+    /// has recorded none since it was last brought up to the main lane.
     pub head: OpId,
     pub workdir: PathBuf,
     pub state: LaneState,
+    /// The op of the main lane the lane's state starts from: the state of
+    /// the lane is the state of the main lane at this op, plus the lane's
+    /// own ops from `since` on.
+    pub base_head: OpId,
+    /// How many of the lane's ops were already absorbed by `base_head`
+    /// (integrated, or re-expressed on top of it).
+    #[serde(default)]
+    pub since: u64,
+    /// What the lane is for, as declared when it was opened ("task #55").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The intent the next captured ops are recorded with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<IntentId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -406,15 +424,43 @@ pub enum ConflictKind {
     Text,
 }
 
+/// How a conflict is to be settled: with what the main lane has, with what
+/// the lane has, or with a text written for the purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Resolution {
+    Main,
+    Lane,
+    Text(BlobId),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conflict {
     pub id: ConflictId,
     /// None = textual conflict on a file
     pub symbol: Option<SymbolId>,
+    /// The heads of the two sides when the conflict was found: main lane, lane.
     pub sides: Vec<OpId>,
     pub kind: ConflictKind,
     pub assigned_to: Option<LaneId>,
     pub resolved_by: Option<OpId>,
+    /// The file the conflict is in, as the main lane calls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// The symbol's qualified name, for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The contended text (of the symbol, or of the file) at the common
+    /// starting point and on the two sides. `None`: it did not exist there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_text: Option<BlobId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_text: Option<BlobId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_text: Option<BlobId>,
+    /// The choice made, waiting to be applied (it is, as soon as every
+    /// conflict of the lane has one); `resolved_by` is the op that applied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
 }
 
 /// Result of the verifier: commands, outcome, duration.

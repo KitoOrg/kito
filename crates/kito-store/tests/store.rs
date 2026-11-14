@@ -330,3 +330,83 @@ fn intents_are_durable_and_ops_can_only_cite_known_ones() {
     assert!(store.verify().unwrap().is_ok());
     assert!(tmp.path().join("intents").is_file());
 }
+
+#[test]
+fn lanes_and_conflicts_are_durable_and_updatable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::init(tmp.path()).unwrap();
+    let mut gen = OpGen::new(1);
+    let first = gen.append_to(&mut store);
+    let checkpoint = Checkpoint {
+        id: store.next_checkpoint_id(),
+        head: first.id,
+        label: "base".into(),
+        created_by: Author::human("fra"),
+        verification: None,
+        git_commit: None,
+    };
+    store.put_checkpoint(&checkpoint).unwrap();
+
+    assert_eq!(store.next_lane_id(), LaneId(1), "the main lane is lane 0 and has no record");
+    let mut lane = Lane {
+        id: store.next_lane_id(),
+        agent: Author::agent("builder"),
+        base: checkpoint.id,
+        head: first.id,
+        workdir: ".kito/lanes/1/work".into(),
+        state: LaneState::Active,
+        base_head: first.id,
+        since: 0,
+        task: Some("task #55".into()),
+        intent: None,
+    };
+    store.put_lane(&lane).unwrap();
+    assert_eq!(store.next_lane_id(), LaneId(2));
+    // A lane cannot point to ops or checkpoints the store does not have.
+    let unknown = OpId(Hash::of(b"?"));
+    for bad in [
+        Lane { id: LaneId(2), head: unknown, ..lane.clone() },
+        Lane { id: LaneId(2), base_head: unknown, ..lane.clone() },
+        Lane { id: LaneId(2), base: CheckpointId(9), ..lane.clone() },
+    ] {
+        assert!(matches!(store.put_lane(&bad), Err(StoreError::InvalidOp(_))));
+    }
+
+    // put_lane confirms the appended ops on its own: the head is durable.
+    let second = gen.append_to(&mut store);
+    lane.head = second.id;
+    lane.state = LaneState::Blocked(ConflictId(1));
+    store.put_lane(&lane).unwrap();
+
+    assert_eq!(store.next_conflict_id(), ConflictId(1));
+    let mut conflict = Conflict {
+        id: store.next_conflict_id(),
+        symbol: Some(SymbolId::new(LaneId(1), 0)),
+        sides: vec![first.id, second.id],
+        kind: ConflictKind::BodyBody,
+        assigned_to: Some(lane.id),
+        resolved_by: None,
+        file: Some("src/auth.ts".into()),
+        name: Some("getUser".into()),
+        base_text: Some(store.put_blob(b"base").unwrap()),
+        main_text: Some(store.put_blob(b"main").unwrap()),
+        lane_text: Some(store.put_blob(b"lane").unwrap()),
+        resolution: None,
+    };
+    store.put_conflict(&conflict).unwrap();
+    conflict.resolution = Some(Resolution::Lane);
+    conflict.resolved_by = Some(second.id);
+    store.put_conflict(&conflict).unwrap();
+    drop(store);
+
+    let store = Store::open(tmp.path()).unwrap();
+    assert_eq!(store.lane_records().collect::<Vec<_>>(), [&lane], "the last record of a lane wins");
+    assert_eq!(store.lane_record(LaneId(1)), Some(&lane));
+    assert_eq!(store.lane_record(LaneId::MAIN), None);
+    assert_eq!(store.conflicts().collect::<Vec<_>>(), [&conflict]);
+    assert_eq!(store.conflict(ConflictId(1)), Some(&conflict));
+    assert_eq!((store.next_lane_id(), store.next_conflict_id()), (LaneId(2), ConflictId(2)));
+    // The blobs the conflict cites were confirmed with it.
+    assert_eq!(store.get_blob(&conflict.lane_text.unwrap()).unwrap().as_deref(), Some(&b"lane"[..]));
+    assert_holds(&store, &[first, second]);
+}

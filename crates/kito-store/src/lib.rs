@@ -7,9 +7,11 @@
 //!   objects/      zstd-compressed blobs, addressed by BLAKE3, in append-only packs
 //!   oplog/        append-only segments; record = length + payload + CRC32C
 //!   index/        rebuildable indexes (redb)
-//!   lanes/<id>/   lane state (managed by `kito-lane`)
+//!   lanes/journal append-only log of the lanes (the last record of a lane wins)
+//!   lanes/<id>/   lane state and working copy (managed by the daemon)
 //!   checkpoints   append-only log of the checkpoints
 //!   intents       append-only log of the intents (the "why" of the ops)
+//!   conflicts     append-only log of the conflicts
 //!   lost+found/   log tails discarded by recovery after a crash
 //! ```
 //!
@@ -27,6 +29,7 @@ mod error;
 pub mod fs;
 mod index;
 mod intents;
+mod keyed;
 mod logfile;
 #[allow(unsafe_code)]
 mod mmap;

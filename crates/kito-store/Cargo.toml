@@ -12,6 +12,7 @@ kito-core.workspace = true
 crc32c.workspace = true
 memmap2.workspace = true
 redb.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 zstd.workspace = true
 

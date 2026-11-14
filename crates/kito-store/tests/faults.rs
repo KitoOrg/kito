@@ -147,6 +147,81 @@ fn truncation_below_the_confirmed_point_is_an_error_unless_repairing() {
 }
 
 #[test]
+fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let ops = build(&base, &StoreOptions::default(), 3);
+    {
+        let mut store = Store::open(&base).unwrap();
+        let checkpoint = Checkpoint {
+            id: store.next_checkpoint_id(),
+            head: ops[2].id,
+            label: "base".into(),
+            created_by: Author::human("fra"),
+            verification: None,
+            git_commit: None,
+        };
+        store.put_checkpoint(&checkpoint).unwrap();
+        store
+            .put_lane(&Lane {
+                id: LaneId(1),
+                agent: Author::agent("a"),
+                base: checkpoint.id,
+                head: ops[2].id,
+                workdir: "w".into(),
+                state: LaneState::Active,
+                base_head: ops[2].id,
+                since: 0,
+                task: None,
+                intent: None,
+            })
+            .unwrap();
+        store
+            .put_conflict(&Conflict {
+                id: ConflictId(1),
+                symbol: None,
+                sides: vec![ops[1].id, ops[2].id],
+                kind: ConflictKind::Text,
+                assigned_to: Some(LaneId(1)),
+                resolved_by: None,
+                file: Some("a.txt".into()),
+                name: None,
+                base_text: None,
+                main_text: None,
+                lane_text: None,
+                resolution: None,
+            })
+            .unwrap();
+        store.close().unwrap();
+    }
+
+    for (file, has_lane, has_conflict) in [("lanes/journal", false, true), ("conflicts", true, false)] {
+        for missing in [false, true] {
+            let dir = tmp.path().join("damaged");
+            let _ = fs::remove_dir_all(&dir);
+            copy_dir(&base, &dir);
+            let path = dir.join(file);
+            if missing {
+                fs::remove_file(&path).unwrap();
+            } else {
+                truncate(&path, fs::metadata(&path).unwrap().len() as usize - 1);
+            }
+            match Store::open(&dir) {
+                Err(StoreError::Corrupt { reason, .. }) => {
+                    assert!(reason.contains("repair mode"), "{reason}")
+                }
+                other => panic!("{file}: expected Corrupt, got {:?}", other.map(|_| ())),
+            }
+            // Accepting the loss is an explicit choice, and costs only that record.
+            let store = Store::open_with(&dir, repair(StoreOptions::default())).unwrap();
+            assert_eq!(store.lane_record(LaneId(1)).is_some(), has_lane, "{file}");
+            assert_eq!(store.conflict(ConflictId(1)).is_some(), has_conflict, "{file}");
+            assert_holds(&store, &ops);
+        }
+    }
+}
+
+#[test]
 fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

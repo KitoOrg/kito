@@ -271,6 +271,10 @@ fn checkpoint_and_friends_round_trip() {
         head: OpId(Hash::of(b"h")),
         workdir: PathBuf::from(".kito/lanes/2/work"),
         state: LaneState::Blocked(ConflictId(4)),
+        base_head: OpId(Hash::of(b"b")),
+        since: 3,
+        task: Some("task #55".into()),
+        intent: None,
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 
@@ -281,6 +285,12 @@ fn checkpoint_and_friends_round_trip() {
         kind: ConflictKind::BodyBody,
         assigned_to: Some(LaneId(2)),
         resolved_by: None,
+        file: Some(PathBuf::from("src/auth.ts")),
+        name: Some("Session.refresh".into()),
+        base_text: Some(BlobId::of(b"base")),
+        main_text: Some(BlobId::of(b"main")),
+        lane_text: None,
+        resolution: Some(Resolution::Text(BlobId::of(b"both"))),
     };
     assert_eq!(codec::from_slice::<Conflict>(&codec::to_vec(&conflict).unwrap()).unwrap(), conflict);
 

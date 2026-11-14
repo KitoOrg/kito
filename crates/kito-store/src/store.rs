@@ -5,11 +5,15 @@ use crate::error::{IoContext, Result, StoreError};
 use crate::fs::{atomic_write, remove_stray_tmp, FileSystem, StdFs};
 use crate::index::{Index, IndexBatch, IndexedOp, Watermark};
 use crate::intents::IntentLog;
+use crate::keyed::KeyedLog;
 use crate::logfile::LogRecovery;
 use crate::objects::Packs;
 use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
-use kito_core::{codec, BlobId, Checkpoint, CheckpointId, Intent, IntentId, LaneId, Op, OpId, SymbolId};
+use kito_core::{
+    codec, BlobId, Checkpoint, CheckpointId, Conflict, ConflictId, Intent, IntentId, Lane, LaneId, Op, OpId,
+    SymbolId,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -98,6 +102,8 @@ pub struct RecoveryReport {
     pub packs: LogRecovery,
     pub checkpoints: LogRecovery,
     pub intents: LogRecovery,
+    pub lanes: LogRecovery,
+    pub conflicts: LogRecovery,
     pub index: IndexRecovery,
 }
 
@@ -108,6 +114,8 @@ impl RecoveryReport {
             + self.packs.discarded_bytes
             + self.checkpoints.discarded_bytes
             + self.intents.discarded_bytes
+            + self.lanes.discarded_bytes
+            + self.conflicts.discarded_bytes
     }
 }
 
@@ -168,6 +176,8 @@ pub struct Store {
     oplog: SegmentedLog,
     checkpoints: CheckpointLog,
     intents: IntentLog,
+    lanes: KeyedLog<LaneId, Lane>,
+    conflicts: KeyedLog<ConflictId, Conflict>,
     index: Index,
     pending: Pending,
     poisoned: bool,
@@ -263,8 +273,31 @@ impl Store {
         oplog.sync()?;
         let (intents, intents_recovery) =
             IntentLog::open(&dir.join("intents"), &*opts.fs, &lost_found, floor.map(|w| w.intents_end))?;
-        let (index, index_recovery) =
-            reconcile_index(index, &oplog, &packs, (checkpoints.len(), intents.len()))?;
+        let (lanes, lanes_recovery) = KeyedLog::open(
+            &dir.join("lanes").join("journal"),
+            LogKind::Lanes,
+            "lane",
+            |lane: &Lane| lane.id,
+            &*opts.fs,
+            &lost_found,
+            floor.map(|w| w.lanes_end),
+        )?;
+        let (conflicts, conflicts_recovery) = KeyedLog::open(
+            &dir.join("conflicts"),
+            LogKind::Conflicts,
+            "conflict",
+            |conflict: &Conflict| conflict.id,
+            &*opts.fs,
+            &lost_found,
+            floor.map(|w| w.conflicts_end),
+        )?;
+        let ends = SmallLogs {
+            checkpoints: checkpoints.len(),
+            intents: intents.len(),
+            lanes: lanes.len(),
+            conflicts: conflicts.len(),
+        };
+        let (index, index_recovery) = reconcile_index(index, &oplog, &packs, ends)?;
 
         Ok(Store {
             dir: dir.to_owned(),
@@ -274,6 +307,8 @@ impl Store {
             oplog,
             checkpoints,
             intents,
+            lanes,
+            conflicts,
             index,
             pending: Pending::default(),
             poisoned: false,
@@ -282,6 +317,8 @@ impl Store {
                 packs: packs_recovery,
                 checkpoints: checkpoints_recovery,
                 intents: intents_recovery,
+                lanes: lanes_recovery,
+                conflicts: conflicts_recovery,
                 index: index_recovery,
             },
             index_dirty: false,
@@ -456,6 +493,8 @@ impl Store {
             tail,
             checkpoints_end: self.checkpoints.len(),
             intents_end: self.intents.len(),
+            lanes_end: self.lanes.len(),
+            conflicts_end: self.conflicts.len(),
         })
     }
 
@@ -619,6 +658,72 @@ impl Store {
         self.intents.get(id)
     }
 
+    // ---------------------------------------------------- lanes, conflicts
+
+    /// Records (or updates) a lane durably. It first confirms everything
+    /// that has been appended, so that the lane points to durable ops.
+    pub fn put_lane(&mut self, lane: &Lane) -> Result<()> {
+        self.check()?;
+        for op in [lane.head, lane.base_head] {
+            if !self.has_op(&op)? {
+                return Err(StoreError::InvalidOp(format!("{}: unknown op {op}", lane.id)));
+            }
+        }
+        if self.checkpoints.get(lane.base).is_none() {
+            return Err(StoreError::InvalidOp(format!("{}: unknown checkpoint {}", lane.id, lane.base)));
+        }
+        self.commit()?;
+        let put = self.lanes.put(lane);
+        self.guard(put)?;
+        self.note_small_logs()
+    }
+
+    /// What was last recorded about a lane (the main lane has no record).
+    pub fn lane_record(&self, id: LaneId) -> Option<&Lane> {
+        self.lanes.get(id)
+    }
+
+    /// The recorded lanes, in ID order, closed ones included.
+    pub fn lane_records(&self) -> impl DoubleEndedIterator<Item = &Lane> {
+        self.lanes.iter()
+    }
+
+    /// ID to assign to the next lane. IDs are never reused.
+    pub fn next_lane_id(&self) -> LaneId {
+        LaneId(self.lanes.last_key().map_or(1, |id| id.0 + 1))
+    }
+
+    /// Records (or updates) a conflict durably.
+    pub fn put_conflict(&mut self, conflict: &Conflict) -> Result<()> {
+        self.check()?;
+        self.commit()?;
+        let put = self.conflicts.put(conflict);
+        self.guard(put)?;
+        self.note_small_logs()
+    }
+
+    pub fn conflict(&self, id: ConflictId) -> Option<&Conflict> {
+        self.conflicts.get(id)
+    }
+
+    /// All the conflicts ever recorded, in ID order, resolved ones included.
+    pub fn conflicts(&self) -> impl DoubleEndedIterator<Item = &Conflict> {
+        self.conflicts.iter()
+    }
+
+    pub fn next_conflict_id(&self) -> ConflictId {
+        ConflictId(self.conflicts.last_key().map_or(1, |id| id.0 + 1))
+    }
+
+    /// The index takes note of the confirmed length of the logs it does not
+    /// index, as a floor for the next open.
+    fn note_small_logs(&mut self) -> Result<()> {
+        let noted = self.watermark(None).and_then(|wm| self.index.apply(&IndexBatch::default(), wm, false));
+        self.guard(noted)?;
+        self.index_dirty = true;
+        Ok(())
+    }
+
     // -------------------------------------------------------- maintenance
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -647,6 +752,8 @@ impl Store {
                 tail: None,
                 checkpoints_end: self.checkpoints.len(),
                 intents_end: self.intents.len(),
+                lanes_end: self.lanes.len(),
+                conflicts_end: self.conflicts.len(),
             };
             catch_up(&index, &self.oplog, &self.packs, start)?;
             Ok(index)
@@ -773,19 +880,31 @@ impl Store {
     }
 }
 
+/// Lengths of the logs that are not indexed: the index only records how
+/// much of each is confirmed.
+#[derive(Clone, Copy)]
+struct SmallLogs {
+    checkpoints: u64,
+    intents: u64,
+    lanes: u64,
+    conflicts: u64,
+}
+
 /// Catches the index up with the logs, or rebuilds it if it is not consistent.
 fn reconcile_index(
     index: Index,
     oplog: &SegmentedLog,
     packs: &Packs,
-    (checkpoints_end, intents_end): (u64, u64),
+    ends: SmallLogs,
 ) -> Result<(Index, IndexRecovery)> {
     let start = Watermark {
         oplog_end: oplog.start(),
         packs_end: packs.log().start(),
         tail: None,
-        checkpoints_end,
-        intents_end,
+        checkpoints_end: ends.checkpoints,
+        intents_end: ends.intents,
+        lanes_end: ends.lanes,
+        conflicts_end: ends.conflicts,
     };
     let logs_end = (oplog.end(), packs.log().end());
 
@@ -797,7 +916,16 @@ fn reconcile_index(
             Some((pos, crc)) if !matches!(oplog.read_with(pos, |_, c| c), Ok(found) if found == crc) => {
                 (start, Some("the last indexed op is no longer in the log"))
             }
-            _ => (Watermark { checkpoints_end, intents_end, ..wm }, None),
+            _ => (
+                Watermark {
+                    checkpoints_end: ends.checkpoints,
+                    intents_end: ends.intents,
+                    lanes_end: ends.lanes,
+                    conflicts_end: ends.conflicts,
+                    ..wm
+                },
+                None,
+            ),
         },
     };
 

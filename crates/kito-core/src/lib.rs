@@ -29,7 +29,7 @@ pub use hlc::{Hlc, HlcClock};
 pub use ids::{BlobId, CheckpointId, ConflictId, IdParseError, IntentId, LaneId, OpId, SymbolId};
 pub use model::{
     Author, AuthorKind, Checkpoint, Conflict, ConflictKind, FileMode, Fingerprint, Intent, Lane, LaneState,
-    Lang, Location, Op, OpKind, RefSource, Reference, Symbol, SymbolKind, Verification,
+    Lang, Location, Op, OpKind, RefSource, Reference, Resolution, Symbol, SymbolKind, Verification,
 };
 pub use symbols::{SymbolEntry, SymbolError, SymbolTable};
 pub use tree::{Tree, TreeEntry, TreeError};

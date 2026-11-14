@@ -34,6 +34,8 @@ const M_TAIL_POS: &str = "oplog_tail_pos";
 const M_TAIL_CRC: &str = "oplog_tail_crc";
 const M_CKPT_END: &str = "checkpoints_end";
 const M_INTENTS_END: &str = "intents_end";
+const M_LANES_END: &str = "lanes_end";
+const M_CONFLICTS_END: &str = "conflicts_end";
 
 /// How far the index reflects the logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,10 @@ pub(crate) struct Watermark {
     pub checkpoints_end: u64,
     /// Confirmed length of the intent log.
     pub intents_end: u64,
+    /// Confirmed length of the log of the lanes.
+    pub lanes_end: u64,
+    /// Confirmed length of the log of the conflicts.
+    pub conflicts_end: u64,
 }
 
 pub(crate) struct IndexedOp {
@@ -128,6 +134,8 @@ impl Index {
             tail,
             checkpoints_end: get(M_CKPT_END)?.unwrap_or(0),
             intents_end: get(M_INTENTS_END)?.unwrap_or(0),
+            lanes_end: get(M_LANES_END)?.unwrap_or(0),
+            conflicts_end: get(M_CONFLICTS_END)?.unwrap_or(0),
         }))
     }
 
@@ -189,6 +197,8 @@ impl Index {
             meta.insert(M_PACKS_END, watermark.packs_end.to_u64())?;
             meta.insert(M_CKPT_END, watermark.checkpoints_end)?;
             meta.insert(M_INTENTS_END, watermark.intents_end)?;
+            meta.insert(M_LANES_END, watermark.lanes_end)?;
+            meta.insert(M_CONFLICTS_END, watermark.conflicts_end)?;
             match watermark.tail {
                 Some((pos, crc)) => {
                     meta.insert(M_TAIL_POS, pos.to_u64())?;
