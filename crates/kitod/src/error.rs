@@ -26,6 +26,8 @@ pub enum Error {
     },
     #[error("nothing to checkpoint: no change has been captured yet")]
     NothingToCheckpoint,
+    #[error("{0}: no such open lane (see `kito lanes`)")]
+    NoSuchLane(kito_core::LaneId),
     #[error("{0}")]
     Other(String),
 }

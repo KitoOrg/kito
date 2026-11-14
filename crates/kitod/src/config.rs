@@ -40,6 +40,18 @@ export_on_checkpoint = true
 # branch = "main"
 # Domain of the email addresses of the exported commits.
 email_domain = "kito.invalid"
+
+[lanes]
+# Untracked paths of the main working directory that every lane sees
+# through a link instead of a copy: what the tools need and no lane changes.
+# share = ["node_modules", ".venv"]
+
+[verify]
+# Commands that must succeed before a lane is integrated into the main lane.
+# They run in order, with `sh -c`, in a copy of the merged result.
+# commands = ["npx tsc --noEmit", "npm test"]
+# Seconds after which a command is stopped and counts as failed.
+timeout_secs = 600
 "#;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +60,33 @@ pub struct Config {
     pub author: AuthorConfig,
     pub capture: CaptureConfig,
     pub git: GitConfig,
+    pub lanes: LanesConfig,
+    pub verify: VerifyConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanesConfig {
+    /// Untracked paths of the main working directory that every lane sees
+    /// through a link instead of a copy (`node_modules`, `.venv`): what the
+    /// tools need and no lane should change.
+    pub share: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerifyConfig {
+    /// Commands that must succeed, in order, before a lane is integrated.
+    /// They run with `sh -c` in a copy of the merged result.
+    pub commands: Vec<String>,
+    /// Time after which a command is stopped and counts as failed.
+    pub timeout_secs: u64,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        VerifyConfig { commands: Vec::new(), timeout_secs: 600 }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

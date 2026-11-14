@@ -4,7 +4,7 @@
 
 use crate::error::{Error, Result};
 use kito_core::{BlobId, FileMode, Hlc, LaneId, Op, OpKind, SymbolId, SymbolKind, SymbolTable, Tree};
-use kito_diff::ast::{diff_symbols, FileChange, SymbolOps, Version};
+use kito_diff::ast::{diff_symbols_with, FileChange, Identities, SymbolOps, Version};
 use kito_diff::text;
 use kito_parse::{dialect_for_path, parse_reusing, Parsed};
 use kito_store::Store;
@@ -90,12 +90,17 @@ fn version(side: &Option<Side>) -> Option<Version<'_>> {
     side.as_ref().map(|s| Version { content: s.source(), parsed: &s.file })
 }
 
-fn diff(table: &SymbolTable, lane: LaneId, files: &[(PathBuf, Option<Side>, Option<Side>)]) -> SymbolOps {
+fn diff(
+    table: &SymbolTable,
+    lane: LaneId,
+    files: &[(PathBuf, Option<Side>, Option<Side>)],
+    identities: &Identities,
+) -> SymbolOps {
     let changes: Vec<FileChange<'_>> = files
         .iter()
         .map(|(path, old, new)| FileChange { path, old: version(old), new: version(new) })
         .collect();
-    diff_symbols(table, lane, &changes)
+    diff_symbols_with(table, lane, &changes, identities)
 }
 
 /// The symbolic ops for a batch of file-level ops (`tree` and `table` are
@@ -105,6 +110,10 @@ fn diff(table: &SymbolTable, lane: LaneId, files: &[(PathBuf, Option<Side>, Opti
 /// half-written, and judging its symbols now would invent removals. Its last
 /// content that did parse is remembered in `last_clean`, and that is what
 /// the next clean save is compared with.
+///
+/// `identities`: symbols of the new contents known in advance (the result
+/// of a merge, an explicit rename).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn symbol_ops(
     store: &Store,
     tree: &Tree,
@@ -113,6 +122,7 @@ pub(crate) fn symbol_ops(
     file_ops: &[OpKind],
     last_clean: &mut HashMap<PathBuf, BlobId>,
     cache: &mut ParseCache,
+    identities: &Identities,
 ) -> Result<SymbolOps> {
     // Old and new blob of every file whose content changed. A file that is
     // removed and added again in the same batch (a change of type, such as
@@ -173,7 +183,7 @@ pub(crate) fn symbol_ops(
         last_clean.remove(path);
         files.push((path.clone(), old.filter(|side| !side.file.has_errors), new));
     }
-    Ok(diff(table, lane, &files))
+    Ok(diff(table, lane, &files, identities))
 }
 
 /// `AddSymbol` ops for the files the history knows only as text: the ones
@@ -193,7 +203,7 @@ pub(crate) fn analyze_unindexed(
             files.push((path.to_owned(), None, Some(side)));
         }
     }
-    Ok(diff(table, lane, &files))
+    Ok(diff(table, lane, &files, &Identities::new()))
 }
 
 /// One event in the life of a symbol.

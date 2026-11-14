@@ -34,7 +34,8 @@ fn main() {
     let mut blobs: HashMap<BlobId, Vec<u8>> = HashMap::new();
     for i in 0..files {
         let content =
-            format!("// file {i}\n{}", "export const value = compute(input) + offset;\n".repeat(44)).into_bytes();
+            format!("// file {i}\n{}", "export const value = compute(input) + offset;\n".repeat(44))
+                .into_bytes();
         let blob = BlobId::of(&content);
         let path = PathBuf::from(format!("src/pkg{:03}/mod{:02}/file{i}.ts", i / 10_000, (i / 100) % 100));
         tree.apply(&OpKind::FileAdd { path, blob, mode: FileMode::Regular }).unwrap();
@@ -45,7 +46,10 @@ fn main() {
     let main = root.join("main");
     let started = Instant::now();
     materialize(&tree, &main, None, &read).unwrap();
-    println!("{files} files of 2 kB written from memory in {:.2?} (the main working directory)", started.elapsed());
+    println!(
+        "{files} files of 2 kB written from memory in {:.2?} (the main working directory)",
+        started.elapsed()
+    );
 
     let holds = |_: &Path, _: &TreeEntry| true;
     let source = Source { root: &main, holds: &holds };

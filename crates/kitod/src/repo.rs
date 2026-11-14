@@ -12,6 +12,7 @@ use kito_core::{
     codec, Author, BlobId, Checkpoint, CheckpointId, FileMode, Hlc, HlcClock, Intent, IntentId, LaneId, Op,
     OpId, OpKind, SymbolTable, Tree, TreeEntry,
 };
+use kito_diff::ast::Identities;
 use kito_diff::fileops::{ops_for_changes, Snapshot};
 use kito_diff::text;
 use kito_store::fs::atomic_write;
@@ -34,14 +35,14 @@ const STATE_VERSION: u32 = 2;
 /// Size, modification time and permissions of a file at the last capture:
 /// if they have not changed, the scan does not reread it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct FileStat {
+pub(crate) struct FileStat {
     size: u64,
     mtime_ns: i64,
     mode: u32,
 }
 
 impl FileStat {
-    fn of(meta: &fs::Metadata) -> FileStat {
+    pub(crate) fn of(meta: &fs::Metadata) -> FileStat {
         FileStat {
             size: meta.len(),
             mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
@@ -165,27 +166,65 @@ pub struct RollbackResult {
     pub undo: Option<String>,
 }
 
-pub struct Repo {
-    root: PathBuf,
-    store: Store,
-    config: Config,
-    identity: Identity,
-    author: Author,
-    ignore: IgnoreRules,
-    tree: Tree,
-    symbols: SymbolTable,
+/// One lane at work: its working directory and what the log says of it.
+pub(crate) struct Work {
+    pub(crate) lane: LaneId,
+    /// The working directory the lane is captured from.
+    pub(crate) root: PathBuf,
+    /// Who signs the ops captured there.
+    pub(crate) author: Author,
+    pub(crate) ignore: IgnoreRules,
+    pub(crate) tree: Tree,
+    pub(crate) symbols: SymbolTable,
     /// For files whose current content has syntax errors: the last content
     /// that parsed, to compare the next clean save with. A hint, not state:
     /// without it only the names of the symbols are compared.
-    last_clean: HashMap<PathBuf, BlobId>,
+    pub(crate) last_clean: HashMap<PathBuf, BlobId>,
+    /// The parent of the next op.
+    pub(crate) head: Option<OpId>,
+    /// Ops of the lane, all applied to `tree` and `symbols`.
+    pub(crate) ops: u64,
+    pub(crate) stat: HashMap<PathBuf, FileStat>,
+    /// The intent captured ops are recorded with, if one was declared.
+    pub(crate) intent: Option<IntentId>,
+}
+
+impl Work {
+    pub(crate) fn new(lane: LaneId, root: PathBuf, author: Author, ignore: &[String]) -> Work {
+        Work {
+            lane,
+            ignore: IgnoreRules::new(&root, ignore),
+            root,
+            author,
+            tree: Tree::new(),
+            symbols: SymbolTable::new(),
+            last_clean: HashMap::new(),
+            head: None,
+            ops: 0,
+            stat: HashMap::new(),
+            intent: None,
+        }
+    }
+
+    /// A stand-in for a lane that is being worked on elsewhere.
+    fn hollow() -> Work {
+        Work::new(LaneId::MAIN, PathBuf::new(), Author::human(""), &[])
+    }
+}
+
+pub struct Repo {
+    pub(crate) root: PathBuf,
+    pub(crate) store: Store,
+    pub(crate) config: Config,
+    pub(crate) identity: Identity,
+    /// The main lane: the repository's own directory.
+    pub(crate) main: Work,
+    /// The open lanes of the agents.
+    pub(crate) lanes: BTreeMap<LaneId, crate::lanes::LaneAt>,
     /// Parsed versions of the files captured most recently.
-    parse_cache: semantic::ParseCache,
-    head: Option<OpId>,
-    /// Ops of the main lane.
-    ops: u64,
-    clock: HlcClock,
-    stat: HashMap<PathBuf, FileStat>,
-    counters: Counters,
+    pub(crate) parse_cache: semantic::ParseCache,
+    pub(crate) clock: HlcClock,
+    pub(crate) counters: Counters,
 }
 
 fn hex20(oid: &[u8; 20]) -> String {
@@ -233,35 +272,35 @@ impl Repo {
         Repo::open(root)
     }
 
-    /// Opens the repository in `root` and rebuilds the state of the main lane.
+    /// Opens the repository in `root` and rebuilds the state of the main
+    /// lane and of the open lanes.
     pub fn open(root: &Path) -> Result<Repo> {
         let root = root.canonicalize().map_err(Error::io(root))?;
         let store_dir = root.join(STORE_DIR);
         let store = Store::open(&store_dir)?;
         let config = Config::load(&store_dir).map_err(Error::Config)?;
-        let ignore = IgnoreRules::new(&root, &config.capture.ignore);
         let identity = identity::resolve(&config, &root);
-        let author = identity.author();
+        let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.capture.ignore);
         let mut repo = Repo {
             root,
             store,
             config,
             identity,
-            author,
-            ignore,
-            tree: Tree::new(),
-            symbols: SymbolTable::new(),
-            last_clean: HashMap::new(),
+            main,
+            lanes: BTreeMap::new(),
             parse_cache: semantic::ParseCache::default(),
-            head: None,
-            ops: 0,
             clock: HlcClock::new(),
-            stat: HashMap::new(),
             counters: Counters::default(),
         };
         repo.load_state()?;
-        if let Some(head) = repo.head {
-            let last = repo.store.get_op(&head)?.map_or(Hlc::ZERO, |op| op.at);
+        repo.load_lanes()?;
+        // The clock restarts after the last op of any lane.
+        let mut last = Hlc::ZERO;
+        let heads = repo.lanes.values().map(|at| at.work.head).chain([repo.main.head]);
+        for head in heads.flatten().collect::<Vec<_>>() {
+            last = last.max(repo.store.get_op(&head)?.map_or(Hlc::ZERO, |op| op.at));
+        }
+        if last > Hlc::ZERO {
             repo.clock = HlcClock::starting_after(last);
         }
         Ok(repo)
@@ -284,9 +323,13 @@ impl Repo {
     /// away, without restarting the daemon.
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
-        self.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
+        self.main.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
         self.identity = identity::resolve(&self.config, &self.root);
-        self.author = self.identity.author();
+        self.main.author = self.identity.author();
+        let ignore = self.lane_ignore();
+        for at in self.lanes.values_mut() {
+            at.work.ignore = IgnoreRules::new(&at.work.root, &ignore);
+        }
         Ok(())
     }
 
@@ -300,11 +343,11 @@ impl Repo {
 
     /// State of the main lane: path → blob.
     pub fn tree(&self) -> &Tree {
-        &self.tree
+        &self.main.tree
     }
 
     pub fn head(&self) -> Option<OpId> {
-        self.head
+        self.main.head
     }
 
     fn state_path(&self) -> PathBuf {
@@ -324,28 +367,28 @@ impl Repo {
                     n => self.store.lane_ops(LaneId::MAIN, n - 1, 1)?.first().map(|op| op.id) == saved.head,
                 };
             if matches_log && saved.version == STATE_VERSION {
-                self.tree = saved.tree;
-                self.symbols = saved.symbols;
-                self.last_clean = saved.last_clean.into_iter().collect();
-                self.head = saved.head;
-                self.ops = saved.ops;
+                self.main.tree = saved.tree;
+                self.main.symbols = saved.symbols;
+                self.main.last_clean = saved.last_clean.into_iter().collect();
+                self.main.head = saved.head;
+                self.main.ops = saved.ops;
                 let racy_after = saved.saved_ns - RACY_WINDOW.as_nanos() as i64;
-                self.stat = saved.stat.into_iter().filter(|(_, s)| s.mtime_ns < racy_after).collect();
+                self.main.stat = saved.stat.into_iter().filter(|(_, s)| s.mtime_ns < racy_after).collect();
             }
         }
-        while self.ops < total {
-            let page = self.store.lane_ops(LaneId::MAIN, self.ops, 1000)?;
+        while self.main.ops < total {
+            let page = self.store.lane_ops(LaneId::MAIN, self.main.ops, 1000)?;
             if page.is_empty() {
                 break;
             }
             for op in page {
                 for path in op.kind.paths() {
-                    self.stat.remove(path);
+                    self.main.stat.remove(path);
                 }
-                self.tree.apply(&op.kind)?;
-                self.symbols.apply(&op.kind)?;
-                self.head = Some(op.id);
-                self.ops += 1;
+                self.main.tree.apply(&op.kind)?;
+                self.main.symbols.apply(&op.kind)?;
+                self.main.head = Some(op.id);
+                self.main.ops += 1;
             }
         }
         Ok(())
@@ -355,12 +398,12 @@ impl Repo {
     pub fn save_state(&self) -> Result<()> {
         let saved = SavedState {
             version: STATE_VERSION,
-            ops: self.ops,
-            head: self.head,
-            tree: self.tree.clone(),
-            symbols: self.symbols.clone(),
-            last_clean: self.last_clean.iter().map(|(p, b)| (p.clone(), *b)).collect(),
-            stat: self.stat.iter().map(|(p, s)| (p.clone(), *s)).collect(),
+            ops: self.main.ops,
+            head: self.main.head,
+            tree: self.main.tree.clone(),
+            symbols: self.main.symbols.clone(),
+            last_clean: self.main.last_clean.iter().map(|(p, b)| (p.clone(), *b)).collect(),
+            stat: self.main.stat.iter().map(|(p, s)| (p.clone(), *s)).collect(),
             saved_ns: now_ns(),
         };
         let path = self.state_path();
@@ -375,17 +418,52 @@ impl Repo {
         path.strip_prefix(&self.root).ok().map(Path::to_owned)
     }
 
-    /// Full scan: compares the working directory with the tree and captures
-    /// every difference. It is also the barrier of `sync`: when it returns,
-    /// everything that was on disk is in the log.
+    /// Full scan of the main working directory: compares it with the tree
+    /// and captures every difference. It is also the barrier of `sync`: when
+    /// it returns, everything that was on disk is in the log.
     pub fn scan(&mut self) -> Result<Vec<Op>> {
+        self.scan_lane(LaneId::MAIN)
+    }
+
+    /// The same, for the working copy of a lane.
+    pub fn scan_lane(&mut self, lane: LaneId) -> Result<Vec<Op>> {
+        self.with(lane, |repo, work| repo.scan_work(work))
+    }
+
+    /// Runs `f` on a lane and on the rest of the repository at once: the
+    /// lane is taken out while `f` runs, and put back whatever happens.
+    pub(crate) fn with<T>(
+        &mut self,
+        lane: LaneId,
+        f: impl FnOnce(&mut Repo, &mut Work) -> Result<T>,
+    ) -> Result<T> {
+        let mut work = match lane.is_main() {
+            true => std::mem::replace(&mut self.main, Work::hollow()),
+            false => {
+                let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
+                std::mem::replace(&mut at.work, Work::hollow())
+            }
+        };
+        let result = f(self, &mut work);
+        match lane.is_main() {
+            true => self.main = work,
+            false => {
+                if let Some(at) = self.lanes.get_mut(&lane) {
+                    at.work = work;
+                }
+            }
+        }
+        result
+    }
+
+    fn scan_work(&mut self, work: &mut Work) -> Result<Vec<Op>> {
         self.counters.scans += 1;
         let mut found = Vec::new();
-        self.walk(Path::new(""), &mut found);
+        Self::walk(work, Path::new(""), &mut found);
         let mut candidates = BTreeSet::new();
         let mut seen = HashSet::new();
         for (rel, meta) in found {
-            let unchanged = self.tree.contains(&rel) && self.stat.get(&rel) == Some(&FileStat::of(&meta));
+            let unchanged = work.tree.contains(&rel) && work.stat.get(&rel) == Some(&FileStat::of(&meta));
             if !unchanged {
                 candidates.insert(rel.clone());
             }
@@ -393,25 +471,26 @@ impl Repo {
         }
         // Files of the tree that the walk did not come across: removed, or
         // now covered by an ignore rule (in which case they stay tracked).
-        for (path, _) in self.tree.iter() {
+        for (path, _) in work.tree.iter() {
             if !seen.contains(path) {
                 candidates.insert(path.to_owned());
             }
         }
-        self.capture(candidates)
+        let intent = work.intent;
+        self.capture_work(work, candidates, intent, &Identities::new())
     }
 
     /// Non-ignored files and links under `dir`, without following links.
-    fn walk(&self, dir: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) {
-        let Ok(entries) = fs::read_dir(self.root.join(dir)) else { return };
+    fn walk(work: &Work, dir: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) {
+        let Ok(entries) = fs::read_dir(work.root.join(dir)) else { return };
         for entry in entries.flatten() {
             let rel = dir.join(entry.file_name());
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() {
-                if !self.ignore.is_ignored(&rel, true) {
-                    self.walk(&rel, out);
+                if !work.ignore.is_ignored(&rel, true) {
+                    Self::walk(work, &rel, out);
                 }
-            } else if (kind.is_file() || kind.is_symlink()) && !self.ignore.is_ignored(&rel, false) {
+            } else if (kind.is_file() || kind.is_symlink()) && !work.ignore.is_ignored(&rel, false) {
                 if let Ok(meta) = entry.metadata() {
                     out.push((rel, meta));
                 }
@@ -419,11 +498,24 @@ impl Repo {
         }
     }
 
-    /// Captures the current state of the given paths (relative to the root)
-    /// and records the resulting ops. A directory stands for everything it
-    /// contains. Returns the recorded ops, already confirmed.
+    /// Captures the current state of the given paths of the main working
+    /// directory (relative to the root) and records the resulting ops. A
+    /// directory stands for everything it contains. Returns the recorded
+    /// ops, already confirmed.
     pub fn capture(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Result<Vec<Op>> {
-        self.capture_as(paths, None)
+        self.capture_lane(LaneId::MAIN, paths)
+    }
+
+    /// The same, for paths of the working copy of a lane.
+    pub fn capture_lane(
+        &mut self,
+        lane: LaneId,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Vec<Op>> {
+        self.with(lane, |repo, work| {
+            let intent = work.intent;
+            repo.capture_work(work, paths, intent, &Identities::new())
+        })
     }
 
     /// Like [`Repo::capture`], declaring the "why" of the recorded ops.
@@ -432,29 +524,41 @@ impl Repo {
         paths: impl IntoIterator<Item = PathBuf>,
         intent: Option<IntentId>,
     ) -> Result<Vec<Op>> {
+        self.with(LaneId::MAIN, |repo, work| repo.capture_work(work, paths, intent, &Identities::new()))
+    }
+
+    /// Captures paths of a lane's working directory. `identities`: symbols
+    /// of the new contents whose identity is known in advance.
+    pub(crate) fn capture_work(
+        &mut self,
+        work: &mut Work,
+        paths: impl IntoIterator<Item = PathBuf>,
+        intent: Option<IntentId>,
+        identities: &Identities,
+    ) -> Result<Vec<Op>> {
         // 1. From the reported paths to the individual files to look at.
         let mut files: BTreeSet<PathBuf> = BTreeSet::new();
         for rel in paths {
             if rel.file_name().is_some_and(|n| n == ".gitignore" || n == ".kitoignore") {
-                self.ignore.invalidate();
+                work.ignore.invalidate();
             }
-            let tracked_below: Vec<PathBuf> = self.tree.under(&rel).map(|(p, _)| p.to_owned()).collect();
-            match fs::symlink_metadata(self.root.join(&rel)) {
+            let tracked_below: Vec<PathBuf> = work.tree.under(&rel).map(|(p, _)| p.to_owned()).collect();
+            match fs::symlink_metadata(work.root.join(&rel)) {
                 Ok(meta) if meta.is_dir() => {
-                    if !self.ignore.is_ignored(&rel, true) {
+                    if !work.ignore.is_ignored(&rel, true) {
                         let mut found = Vec::new();
-                        self.walk(&rel, &mut found);
+                        Self::walk(work, &rel, &mut found);
                         files.extend(found.into_iter().map(|(p, _)| p));
                     }
                     files.extend(tracked_below);
                     // A file replaced by a directory with the same name.
-                    if self.tree.contains(&rel) {
+                    if work.tree.contains(&rel) {
                         files.insert(rel);
                     }
                 }
                 _ => {
                     files.extend(tracked_below);
-                    if self.tree.contains(&rel) || !self.ignore.is_ignored(&rel, false) {
+                    if work.tree.contains(&rel) || !work.ignore.is_ignored(&rel, false) {
                         files.insert(rel);
                     }
                 }
@@ -472,7 +576,7 @@ impl Repo {
                 self.counters.skipped_not_utf8 += 1;
                 continue;
             }
-            let abs = self.root.join(&rel);
+            let abs = work.root.join(&rel);
             let on_disk = match fs::symlink_metadata(&abs) {
                 Ok(meta) if meta.is_file() => {
                     if meta.len() > self.config.capture.max_file_bytes {
@@ -496,7 +600,7 @@ impl Repo {
             match on_disk {
                 Some((content, mode, meta)) => {
                     let blob = BlobId::of(&content);
-                    let same = self.tree.get(&rel).is_some_and(|e| e.blob == blob && e.mode == mode);
+                    let same = work.tree.get(&rel).is_some_and(|e| e.blob == blob && e.mode == mode);
                     if !same {
                         self.store.put_blob(&content)?;
                         changes.insert(rel.clone(), Some(Snapshot { blob, mode }));
@@ -509,7 +613,7 @@ impl Repo {
                     stats.push((rel, (!fresh).then(|| FileStat::of(&meta))));
                 }
                 None => {
-                    if self.tree.contains(&rel) {
+                    if work.tree.contains(&rel) {
                         changes.insert(rel.clone(), None);
                     }
                     stats.push((rel, None));
@@ -519,22 +623,23 @@ impl Repo {
 
         // 3. Ops, in an order that can be applied to the tree, chained to the head.
         let store = &self.store;
-        let file_ops = ops_for_changes(&self.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
+        let file_ops = ops_for_changes(&work.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
         // The file-level ops carry the new contents; what the change means
         // for the symbols follows.
         let symbolic = semantic::symbol_ops(
             &self.store,
-            &self.tree,
-            &self.symbols,
-            LaneId::MAIN,
+            &work.tree,
+            &work.symbols,
+            work.lane,
             &file_ops,
-            &mut self.last_clean,
+            &mut work.last_clean,
             &mut self.parse_cache,
+            identities,
         )?;
         for blob in &symbolic.blobs {
             self.store.put_blob(blob)?;
         }
-        let ops = self.record(file_ops.into_iter().chain(symbolic.ops), intent)?;
+        let ops = self.record_work(work, file_ops.into_iter().chain(symbolic.ops), intent)?;
         if !ops.is_empty() {
             self.store.commit()?;
             self.counters.captures += 1;
@@ -542,38 +647,49 @@ impl Repo {
         }
         for (rel, stat) in stats {
             match stat {
-                Some(stat) => self.stat.insert(rel, stat),
-                None => self.stat.remove(&rel),
+                Some(stat) => work.stat.insert(rel, stat),
+                None => work.stat.remove(&rel),
             };
         }
         Ok(ops)
     }
 
-    /// Appends ops to the main lane, chained to the head, and applies them
-    /// to the state. They are confirmed by the caller's commit.
-    fn record(
+    /// Appends ops to a lane, chained to its head, and applies them to its
+    /// state. They are confirmed by the caller's commit.
+    pub(crate) fn record_work(
         &mut self,
+        work: &mut Work,
         kinds: impl IntoIterator<Item = OpKind>,
         intent: Option<IntentId>,
     ) -> Result<Vec<Op>> {
         let mut ops = Vec::new();
         for kind in kinds {
-            let op = Op::new(self.head, LaneId::MAIN, self.author.clone(), self.clock.now(), kind, intent)?;
-            self.tree.apply(&op.kind)?;
-            self.symbols.apply(&op.kind)?;
+            let op = Op::new(work.head, work.lane, work.author.clone(), self.clock.now(), kind, intent)?;
+            work.tree.apply(&op.kind)?;
+            work.symbols.apply(&op.kind)?;
             self.store.append_op(&op)?;
-            self.head = Some(op.id);
-            self.ops += 1;
+            work.head = Some(op.id);
+            work.ops += 1;
             ops.push(op);
         }
         Ok(ops)
+    }
+
+    /// The same, on the main lane.
+    fn record(
+        &mut self,
+        kinds: impl IntoIterator<Item = OpKind>,
+        intent: Option<IntentId>,
+    ) -> Result<Vec<Op>> {
+        self.with(LaneId::MAIN, |repo, work| repo.record_work(work, kinds, intent))
     }
 
     /// Analyzes the files the history knows only as text (imported from git,
     /// or captured before symbols existed) and records their symbols. Does
     /// nothing once every parseable file has been analyzed.
     pub fn analyze(&mut self) -> Result<usize> {
-        let found = semantic::analyze_unindexed(&self.store, &self.tree, &self.symbols, LaneId::MAIN)?;
+        let found =
+            semantic::analyze_unindexed(&self.store, &self.main.tree, &self.main.symbols, LaneId::MAIN)?;
         if found.ops.is_empty() {
             return Ok(0);
         }
@@ -590,25 +706,25 @@ impl Repo {
 
     /// The symbols the history knows.
     pub fn symbols(&self) -> &SymbolTable {
-        &self.symbols
+        &self.main.symbols
     }
 
     /// The history of the symbol called `name` in `file`, across renames
     /// and moves.
     pub fn why(&self, file: &Path, name: &str) -> Result<Vec<Why>> {
-        semantic::why(&self.store, &self.symbols, LaneId::MAIN, file, name)
+        semantic::why(&self.store, &self.main.symbols, LaneId::MAIN, file, name)
     }
 
     /// Creates a checkpoint on the current state of the working directory
     /// and, if configured, exports it to git.
     pub fn checkpoint(&mut self, label: &str) -> Result<CheckpointResult> {
         self.scan()?;
-        let head = self.head.ok_or(Error::NothingToCheckpoint)?;
+        let head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
         let checkpoint = Checkpoint {
             id: self.store.next_checkpoint_id(),
             head,
             label: label.trim().to_owned(),
-            created_by: self.author.clone(),
+            created_by: self.main.author.clone(),
             verification: None,
             git_commit: None,
         };
@@ -642,11 +758,11 @@ impl Repo {
     /// Imports the history of the git repository in `root` (empty store).
     pub fn import_git(&mut self) -> Result<kito_git::Imported> {
         let report = kito_git::import(&mut self.store, &self.root, &mut self.clock)?;
-        self.tree = Tree::new();
-        self.symbols = SymbolTable::new();
-        self.head = None;
-        self.ops = 0;
-        self.stat.clear();
+        self.main.tree = Tree::new();
+        self.main.symbols = SymbolTable::new();
+        self.main.head = None;
+        self.main.ops = 0;
+        self.main.stat.clear();
         self.load_state()?;
         // The imported history is text; the state it ends in gets the full analysis.
         self.analyze()?;
@@ -658,11 +774,11 @@ impl Repo {
         let checkpoints: Vec<&Checkpoint> = self.store.checkpoints().collect();
         let last = checkpoints.last();
         let ops_since_checkpoint = match last {
-            Some(ck) if Some(ck.head) == self.head => 0,
+            Some(ck) if Some(ck.head) == self.main.head => 0,
             Some(ck) => {
                 // Position of the checkpoint's op in the lane: search from the tail.
                 let mut since = 0u64;
-                let mut end = self.ops;
+                let mut end = self.main.ops;
                 'search: while end > 0 {
                     let start = end.saturating_sub(500);
                     let page = self.store.lane_ops(LaneId::MAIN, start, (end - start) as usize)?;
@@ -676,16 +792,16 @@ impl Repo {
                 }
                 since
             }
-            None => self.ops,
+            None => self.main.ops,
         };
         Ok(Status {
             root: self.root.clone(),
-            author: self.author.to_string(),
+            author: self.main.author.to_string(),
             identity: self.identity.clone(),
-            head: self.head.map(|h| h.to_string()),
-            ops: self.ops,
-            files: self.tree.len(),
-            symbols: self.symbols.len(),
+            head: self.main.head.map(|h| h.to_string()),
+            ops: self.main.ops,
+            files: self.main.tree.len(),
+            symbols: self.main.symbols.len(),
             checkpoints: checkpoints.len(),
             last_checkpoint: last.map(|c| c.id.to_string()),
             unexported: checkpoints.iter().filter(|c| c.git_commit.is_none()).count(),
@@ -703,7 +819,7 @@ impl Repo {
         for ck in self.store.checkpoints() {
             by_head.entry(ck.head).or_default().push(ck);
         }
-        let mut reader = Backwards { store: &self.store, end: self.ops, page: Vec::new() };
+        let mut reader = Backwards { store: &self.store, end: self.main.ops, page: Vec::new() };
         let mut items = Vec::new();
         let mut shown = 0usize;
         // Symbolic ops waiting for the file change they belong to: in the
@@ -805,7 +921,7 @@ impl Repo {
                 _ => {}
             }
         }
-        file.or_else(|| self.symbols.get(id).map(|entry| entry.file.clone()))
+        file.or_else(|| self.main.symbols.get(id).map(|entry| entry.file.clone()))
     }
 
     /// `true` if a symbolic op belongs in the log of `path`.
@@ -845,7 +961,10 @@ impl Repo {
                 let id = other.symbol();
                 let file = file_then.or_else(|| self.file_then(op, None));
                 let name = id.and_then(|id| {
-                    self.symbols.qualified_name(id).or_else(|| semantic::last_known_name(&self.store, id))
+                    self.main
+                        .symbols
+                        .qualified_name(id)
+                        .or_else(|| semantic::last_known_name(&self.store, id))
                 });
                 let what = semantic::describe_symbol_op(&self.store, other);
                 let detail = match (name, what) {
@@ -880,7 +999,7 @@ impl Repo {
     /// (from 0), most recent first.
     fn positions_of(&self, matches: impl Fn(&Op) -> bool) -> Result<Vec<(u64, OpId)>> {
         let mut found = Vec::new();
-        let mut end = self.ops;
+        let mut end = self.main.ops;
         while end > 0 {
             let start = end.saturating_sub(500);
             let page = self.store.lane_ops(LaneId::MAIN, start, (end - start) as usize)?;
@@ -907,7 +1026,7 @@ impl Repo {
             let back: usize =
                 back.parse().map_err(|_| invalid("~ must be followed by a number of file changes"))?;
             if back == 0 {
-                return Ok((self.ops, "the current state".to_owned()));
+                return Ok((self.main.ops, "the current state".to_owned()));
             }
             // What counts are the ops that change a file: the symbolic ops
             // that follow them only say what the change meant.
@@ -981,13 +1100,13 @@ impl Repo {
         let mut restore: Vec<(PathBuf, TreeEntry, &str)> = Vec::new();
         let mut remove: Vec<PathBuf> = Vec::new();
         for (path, entry) in target.iter().filter(|(p, _)| selected(p)) {
-            match self.tree.get(path) {
+            match self.main.tree.get(path) {
                 Some(current) if current == entry => {}
                 Some(_) => restore.push((path.to_owned(), *entry, "restore")),
                 None => restore.push((path.to_owned(), *entry, "recreate")),
             }
         }
-        for (path, _) in self.tree.iter().filter(|(p, _)| selected(p)) {
+        for (path, _) in self.main.tree.iter().filter(|(p, _)| selected(p)) {
             if !target.contains(path) {
                 remove.push(path.to_owned());
             }
@@ -1005,7 +1124,7 @@ impl Repo {
             )
             .collect();
         changes.sort_by(|a, b| a.path.cmp(&b.path));
-        let undo = self.head.map(|h| h.hash().short());
+        let undo = self.main.head.map(|h| h.hash().short());
         if dry_run || changes.is_empty() {
             return Ok(RollbackResult { target: description, changes, applied: false, ops: 0, undo: None });
         }
@@ -1014,7 +1133,7 @@ impl Repo {
         // must be recreated: its content is not in the log and must not be
         // overwritten.
         for (path, _, _) in &restore {
-            if !self.tree.contains(path) && fs::symlink_metadata(self.root.join(path)).is_ok() {
+            if !self.main.tree.contains(path) && fs::symlink_metadata(self.root.join(path)).is_ok() {
                 return Err(Error::Other(format!(
                     "{}: exists but is not tracked; move it away before rolling back",
                     path.display()
@@ -1052,10 +1171,15 @@ impl Repo {
         Ok(RollbackResult { target: description, changes, applied: true, ops: ops.len(), undo })
     }
 
-    /// Writes into the working directory a file with the given content and type.
+    /// Writes into the main working directory a file with the given content and type.
     fn write_file(&self, rel: &Path, entry: &TreeEntry) -> Result<()> {
+        self.write_file_in(&self.root, rel, entry)
+    }
+
+    /// Writes into a working directory a file with the given content and type.
+    pub(crate) fn write_file_in(&self, root: &Path, rel: &Path, entry: &TreeEntry) -> Result<()> {
         use std::os::unix::ffi::OsStrExt;
-        let abs = self.root.join(rel);
+        let abs = root.join(rel);
         if let Some(dir) = abs.parent() {
             fs::create_dir_all(dir).map_err(Error::io(dir))?;
         }
@@ -1082,6 +1206,7 @@ impl Repo {
     /// Closes the repository, saving the state and leaving the indexes durable.
     pub fn close(self) -> Result<()> {
         self.save_state()?;
+        self.save_lanes()?;
         self.store.close()?;
         Ok(())
     }
