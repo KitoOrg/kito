@@ -334,7 +334,242 @@ cargo run --release -p kitod --example latency -- --shape typical
   heuristics, arrive with the MCP server in phase 3.
 - References between symbols (who calls whom) are level 2: phase 4.
 
-## Phase 3 · lanes and integration — to do
+## Phase 3 · lanes and integration — done
+
+`kito-lane` with copy-on-write working copies; `kito-merge` with every
+composition rule except `SemanticRef`; `kito-integrate` with the queue and
+the verifier; `kito-mcp`, the MCP server; a swarm simulator.
+
+### What is there
+
+- **Lanes** (`kito lane open <agent>`): an agent gets a working copy of its
+  own, `.kito/lanes/<id>/work`, cloned from the main directory where the
+  file system shares data between files (reflink) and copied elsewhere.
+  Every save there is captured exactly as in the main directory — file ops
+  and symbolic ops, signed by the agent — on the lane's own log. What the
+  tools need and is not tracked (`node_modules`, `.venv`) is seen through a
+  link: `[lanes] share` in the configuration.
+- **Semantic rebase** (`kito-merge`): integrating a lane means composing
+  what it did since its base with what the main lane has become, symbol by
+  symbol. A file is merged as what it is made of — a header, its symbols in
+  order, a tail — and so is every symbol that contains others.
+
+  | On the main lane | On the lane | Result |
+  | --- | --- | --- |
+  | change to symbol X | change to symbol Y | both apply, wherever they are in the file |
+  | new symbol at some place | another new symbol at the same place | both stay, in an order that does not depend on who integrates first |
+  | change to X | change to X | merged line by line; if the same lines changed, conflict `body_body` |
+  | rename of X | change to X | both apply |
+  | rename of X | another rename of X | conflict `rename_rename` |
+  | removal of X | change to X | conflict `remove_modify` |
+  | X moved to another file, class or namespace | change to X | both apply: the change follows the symbol |
+  | text outside the symbols, files without a grammar | the same | three-way merge of the lines; if it fails, conflict `text` |
+
+- **Integration** (`kito integrate lane/1 …`): the merged files are written
+  in the main directory and recorded there as ops signed by the lane's
+  agent; the first has two parents, the head of the main lane and the head
+  of the lane. Symbols keep the IDs the lane gave them. Every integration
+  is a checkpoint, exported as a git commit with the agent as its author.
+  The lane then continues from the new state of the main lane.
+- **Queue and verifier**: the daemon integrates one lane at a time. Before
+  anything is written, the merged result is checked in a copy of its own
+  (`.kito/verify/work`) by the commands of `[verify] commands` — a type
+  checker, the tests — each with a time limit. If one fails the lane is not
+  integrated and gets the report. The repository is not held while they
+  run: saves keep being recorded.
+- **Conflicts** are recorded with the three texts (starting point, main
+  lane, lane) and assigned to the lane's agent. `kito conflicts` lists
+  them, `kito resolve <conflict> --main | --lane | --text FILE` decides one;
+  the next integration of the lane applies the decisions, provided the
+  texts they were taken on have not changed.
+- **MCP server** (`kito-mcp`, on standard input and output): the tools of
+  the plan — `kito.open_lane`, `kito.sync`, `kito.status`, `kito.log`,
+  `kito.set_intent`, `kito.rename_symbol`, `kito.request_integration`,
+  `kito.integration_result`, `kito.why`, `kito.resolve_conflict`,
+  `kito.close_lane`. An agent asks for an integration, gets a job, and
+  reads the result when it is ready:
+
+  ```json
+  {
+    "lane": "lane/2",
+    "result": "integrated",
+    "checkpoint": "ckpt#3",
+    "git_commit": "824ccb29795a983219cbe3b94653849fe1a01d3f",
+    "auto_resolutions": [
+      { "kind": "body_merge", "symbol": "ts/m.a#0", "locations": ["src/m.ts"] }
+    ],
+    "conflicts": [],
+    "verification": { "commands": ["npx tsc --noEmit"], "passed": true, "duration_ms": 1312 },
+    "your_next_base": "ckpt#3"
+  }
+  ```
+
+- **Intents and explicit renames**: `kito intent "why" [--task …]` (or
+  `kito.set_intent`) labels the ops recorded from then on. The checkpoint
+  of an integration is named after the lane's task or, without one, after
+  its intent. `kito rename <file:symbol> <new name>`
+  (or `kito.rename_symbol`) renames a symbol and records the rename as such,
+  without leaving it to the heuristics.
+- **Command line**: `kito lanes`, `kito lane open | close | status`,
+  `kito integrate`, `kito conflicts`, `kito resolve`, `kito rename`,
+  `kito intent`; `kito log`, `kito why` and `kito sync` take a lane. `--json`
+  prints what the MCP server returns.
+- **Swarm simulator** (`kitod::simulate`): agents that work at the same
+  time, through the real daemon, on a project where every one of them
+  touches every file. It knows which conflicts are real because it stages
+  them, and fails on any other.
+
+### Demo
+
+Two agents add a function at the same place of the same file and fix two
+lines of the same function: git reports a conflict, Kito integrates both.
+Then the same line changed in two ways: a real conflict, reported with the
+three texts, decided and integrated. Then ten simulated agents, four rounds
+each, every integration checked by the TypeScript compiler.
+
+```bash
+cargo build --release -p kitod -p kito-cli
+```
+
+```bash
+cargo build --release -p kitod --example swarm
+```
+
+```bash
+scripts/demo-phase3.sh
+```
+
+Output of the run of 14 November 2026 in
+[`demo/phase3-demo.txt`](demo/phase3-demo.txt). The heart of it:
+
+```text
+$ git merge-file -p alice/src/shop.ts src/shop.ts bob/src/shop.ts | tail -n 8
+<<<<<<< alice
+export function tax(amount: number): number {
+  return Math.round(amount * 0.22);
+=======
+export function shipping(weight: number): number {
+  return weight > 1000 ? 900 : 500;
+>>>>>>> bob
+}
+(git merge-file: 1 conflict)
+
+$ kito integrate lane/1 lane/2
+lane/1: integrated as ckpt#2 (git 883d187613)
+lane/2: integrated as ckpt#3 (git 78a383c445)
+  merged by itself: ts/shop.total#0
+```
+
+and, from the swarm:
+
+```text
+| Integrations asked | 40 |
+| Integrated | 40 |
+| Fake conflicts (changes to different symbols) | 0 |
+| Real conflicts staged / found and settled | 3 / 3 |
+| Kinds of the real conflicts | rename_rename, remove_modify, body_body |
+| Verification failures | 0 |
+| Checkpoints (one per integration, each a git commit) | 46 |
+
+git fsck --strict: ok;  git status: clean
+tsc on the main lane after the swarm: no errors
+```
+
+The median of 12 s per integration in that run is the queue: ten agents ask
+at the same moment and each verification is a run of `tsc` (1.3 s).
+
+### Acceptance criteria rechecked
+
+**0 fake conflicts.** In the simulator every agent edits a function of its
+own in every file, adds functions where the others add theirs, and renames
+and moves its symbols: 40 integrations out of 40 without a conflict, and
+the 3 conflicts staged on purpose found, of the 3 kinds. A property test
+checks that lanes working on different symbols give the same files in
+whatever order they are integrated. The first runs of the simulator did
+find fake conflicts, and their cause was in the capture, not in the merge:
+see D-047.
+
+**Integration without conflicts under 200 ms per 100 ops, verifier
+excluded.** Measured on a repository of 50,000 files (250,000 symbols),
+lanes that change one function per file:
+
+| Lane | Ops | Time | Per 100 ops |
+| --- | --- | --- | --- |
+| 50 files changed, the main lane has not moved | 100 | 90 ms | 90 ms |
+| 500 files changed | 1,000 | 299 ms | 30 ms |
+| 50 files changed, the main lane is 550 to 650 files ahead | 100 | 123–136 ms | 123–136 ms |
+
+On 5,000 files the first two take 37 ms and 317 ms. The target is met; the
+first version took 2.1 s for the first row, and what changed is in
+[`benchmarks.md`](benchmarks.md).
+
+```bash
+cargo run --release -p kitod --example scale -- --files 50000
+```
+
+**Creating a lane under 1 s on 50,000 files (copy-on-write).** Not shown as
+the plan states it: the disk of the test machine is ext4, which cannot share
+data between files, so every file is copied; no file system with reflinks
+was available to measure the other case. With copies, a lane on 50,000 files
+(1 kB each) took 462–561 ms (median 490 ms) in a quiet run and up to 2 s in
+others. The difference is the machine, not Kito: on this VM creating an
+empty file costs between 13 and 250 µs depending on what the file system has
+in memory. On the 15 files of the demo a lane opens in 2 ms.
+
+**No confirmed op lost after a crash.** The logs of the lanes and of the
+conflicts are the same checksummed append-only logs as the op log, and what
+a lane has is rebuilt from the log alone: a test restarts in the middle of a
+lane's work with the saved states removed.
+
+**Latency of a save.** Unchanged: the phase 2 code and this one, measured
+one after the other, give the same figures (processing p50 13 ms, p95
+20 ms on the ordinary file).
+
+**Git round trip.** Every integration is a commit; `git fsck --strict` and
+a clean `git status` are checked after the swarm, in the demo and in the
+tests.
+
+### Tests
+
+202 in the workspace. New in this phase:
+
+- Merge: one scenario per rule of the table above, in both directions;
+  moves between files, classes and namespaces while the other side edits;
+  renamed and removed files; a lane that stayed behind reads only the files
+  tied to its work; the property test on the order of integration.
+- Lanes: working copies with content, permissions and links; independence
+  from the main directory; a file that changes while it is copied is not
+  used; capture on several lanes at once.
+- Integration: the three steps, a failed verification that leaves the main
+  lane untouched, a verification that outlives its time limit, conflicts
+  recorded, decided and applied, decisions that no longer apply, restart in
+  the middle.
+- Daemon, command line and MCP server end to end with the real binaries.
+- The simulator: 6 agents for 4 rounds through the real daemon on every run
+  of the tests.
+
+### Known limitations
+
+- **No `SemanticRef` yet** (phase 4): a lane that renames a function does
+  not update the calls another lane adds meanwhile, and two lanes that add
+  a function with the same name both keep theirs. Neither is a conflict
+  for Kito at this level: it is the verifier (a type checker) that stops
+  the integration.
+- An explicit rename changes the definition and the uses inside the symbol
+  itself; the other places where the name appears are listed, not edited.
+- A conflict is about a whole symbol (or a whole file, for text): it is
+  decided by choosing a side or giving the new text, not hunk by hunk.
+- A reordering is not an op: when both sides changed a file, its symbols
+  stay in the order the main lane has.
+- An integration is a squash: the lane's own ops stay in its log, where
+  `kito why` and `kito log --lane` find them, and git gets one commit.
+- Without reflinks a lane costs a copy of the repository, in time and in
+  disk space.
+- A lane's working copy is inside the repository's directory and has no
+  `.git` of its own: git commands run there see the main repository.
+- The saved states are written when the daemon stops. After a crash nothing
+  is lost, but every lane rereads its files once (D-048).
+- One integration at a time: with slow verification commands, lanes wait.
 
 ## Phase 4 · level 2 semantics — to do
 

@@ -1,0 +1,190 @@
+# Part 1: two agents, one file
+
+$ kito init
+Kito repository created in /tmp/tmp.jgm40TZBqK/.kito
+The daemon is running: every save is recorded from now on.
+
+$ kito checkpoint -m shop
+ckpt#1 created and exported as git commit 6a0fc8a000
+
+$ kito lane open alice --task taxes
+lane/1 opened for alice on ckpt#1.
+Working copy: /tmp/tmp.jgm40TZBqK/.kito/lanes/1/work
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito lane open bob --task shipping
+lane/2 opened for bob on ckpt#1.
+Working copy: /tmp/tmp.jgm40TZBqK/.kito/lanes/2/work
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+# alice, in her working copy: a new function at the end of the file, and a fix in `total`
+# bob, in his: another new function at the same place, and a fix on another line of `total`
+
+$ kito sync
+Everything is recorded (5 new operations).
+
+$ kito lanes
+lane/1   alice        active      base ckpt#1     2 ops    1 file  taxes
+lane/2   bob          active      base ckpt#1     3 ops    1 file  shipping
+
+# git, on the same two versions of the file: two functions added at the same place
+
+$ git merge-file -p alice/src/shop.ts src/shop.ts bob/src/shop.ts | tail -n 8
+<<<<<<< alice
+export function tax(amount: number): number {
+  return Math.round(amount * 0.22);
+=======
+export function shipping(weight: number): number {
+  return weight > 1000 ? 900 : 500;
+>>>>>>> bob
+}
+(git merge-file: 1 conflict)
+
+$ kito integrate lane/1 lane/2
+lane/1: integrated as ckpt#2 (git 883d187613)
+lane/2: integrated as ckpt#3 (git 78a383c445)
+  merged by itself: ts/shop.total#0
+
+$ cat src/shop.ts
+// Prices are in cents.
+export function total(items: Item[]): number {
+  let sum = 0; // cents
+  for (const item of items) {
+    sum += item.price * item.quantity;
+  }
+  return Math.round(sum);
+}
+
+export function discount(amount: number, percent: number): number {
+  const cut = Math.round((amount * percent) / 100);
+  return amount - cut;
+}
+
+export function tax(amount: number): number {
+  return Math.round(amount * 0.22);
+}
+
+export function shipping(weight: number): number {
+  return weight > 1000 ? 900 : 500;
+}
+
+$ kito log -n 6
+◆ ckpt#3  shipping  (git 78a383c445)
+  0313d029  2026-11-14 17:55:22  bob        TextEdit   src/shop.ts  +5 −1  [integrate lane/2: shipping]
+      ↳ function `shipping` created in src/shop.ts
+      ↳ `total` body changed (+1 −1)
+◆ ckpt#2  taxes  (git 883d187613)
+  17867e8c  2026-11-14 17:55:22  alice      TextEdit   src/shop.ts  +5 −1  [integrate lane/1: taxes]
+      ↳ function `tax` created in src/shop.ts
+◆ ckpt#1  shop  (git 6a0fc8a000)
+  bbd46458  2026-11-14 17:55:22  francesco  FileAdd    src/shop.ts
+      ↳ function `total` created in src/shop.ts
+      ↳ function `discount` created in src/shop.ts
+  82371245  2026-11-14 17:55:22  francesco  FileAdd    .gitignore
+
+# Now a real conflict: the same line of `discount`, changed in two ways
+
+$ kito sync
+Everything is recorded (4 new operations).
+
+$ kito integrate lane/1
+lane/1: integrated as ckpt#4 (git 15f16112d9)
+
+$ kito integrate lane/2
+lane/2: 1 conflict
+  conflict#1   lane/2   body_body      discount  (src/shop.ts)  [to decide]
+  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again.
+(exit status 1)
+
+$ kito conflicts
+conflict#1   lane/2   body_body      discount  (src/shop.ts)  [to decide]
+
+$ kito conflicts conflict#1
+conflict#1   lane/2   body_body      discount  (src/shop.ts)  [to decide]
+
+--- at the common starting point
+export function discount(amount: number, percent: number): number {
+  const cut = Math.round((amount * percent) / 100);
+  return amount - cut;
+}
+
+--- on the main lane
+export function discount(amount: number, percent: number): number {
+  const cut = Math.floor((amount * percent) / 100);
+  return amount - cut;
+}
+
+--- on lane/2
+export function discount(amount: number, percent: number): number {
+  const cut = Math.ceil((amount * percent) / 100);
+  return amount - cut;
+}
+
+$ kito resolve conflict#1 --lane
+conflict#1 decided. Nothing else to decide: `kito integrate lane/2` applies it.
+
+$ kito integrate lane/2
+lane/2: integrated as ckpt#5 (git f285b26a0f)
+
+$ grep -n percent) / 100 src/shop.ts
+11:  const cut = Math.ceil((amount * percent) / 100);
+
+$ kito why src/shop.ts:discount
+function discount  (src/shop.ts)  symbol 0#1
+  2026-11-14 17:55:22  francesco  function `discount` created in src/shop.ts
+  2026-11-14 17:55:22  alice      body changed (+1 −1), on lane/1
+  2026-11-14 17:55:22  bob        body changed (+1 −1), on lane/2
+  2026-11-14 17:55:22  alice      body changed (+1 −1)  [integrate lane/1: taxes]
+  2026-11-14 17:55:22  bob        body changed (+1 −1)  [integrate lane/2: shipping]
+
+$ kito lane close lane/1
+lane/1 closed: its working copy is gone. Nothing it did was left out of the main lane.
+
+$ kito lane close lane/2
+lane/2 closed: its working copy is gone. Nothing it did was left out of the main lane.
+
+$ kito export-git
+Nothing to export.
+
+$ git log --oneline
+f285b26 shipping
+15f1611 taxes
+78a383c shipping
+883d187 taxes
+6a0fc8a shop
+
+$ git fsck --strict --no-dangling
+
+
+# Part 2: a swarm of ten agents
+
+$ /home/user/kito/target/release/examples/swarm --agents 10 --rounds 4
+10 agents, 4 rounds each, on a TypeScript project of 15 files in /tmp/kito-swarm-25407
+Verification before every integration: `tsc --noEmit -p .`
+
+| Measure | Value |
+| --- | --- |
+| Agents, each in its own lane | 10 |
+| Rounds of edits per agent | 4 |
+| Integrations asked | 40 |
+| Integrated | 40 |
+| Fake conflicts (changes to different symbols) | 0 |
+| Symbols changed on both sides and merged by themselves | 0 |
+| Real conflicts staged / found and settled | 3 / 3 |
+| Kinds of the real conflicts | rename_rename, remove_modify, body_body |
+| Verification failures | 0 |
+| Opening a lane | median 3 ms, max 8 ms |
+| One integration, queue and verification included | median 12427 ms, max 13217 ms |
+| Ops recorded on the lanes | 322 |
+| Ops on the main lane | 383 |
+| Checkpoints (one per integration, each a git commit) | 46 |
+| Problems | none |
+
+Wall time: 56.6 s
+
+git log: 46 commits (ada 1, agent-0 5, agent-1 4, agent-2 5, agent-3 5, agent-4 5, agent-5 5, agent-6 4, agent-7 4, agent-8 4, agent-9 4)
+git fsck --strict: ok;  git status: clean
+tsc on the main lane after the swarm: no errors
+store: 705 ops, 454 blobs, verified
+
+No fake conflicts.

@@ -15,7 +15,7 @@ runnable demo.
 | 0 | Foundations: `kito-core`, `kito-store` | done |
 | 1 | Continuous textual capture: `kitod`, CLI, git export/import | done |
 | 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | done |
-| 3 | Lanes and integration, MCP server | to do |
+| 3 | Lanes and integration, MCP server | done |
 | 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | to do |
 | 5 | Coverage and performance | to do |
 
@@ -27,16 +27,20 @@ runnable demo.
 | `kito-store` | Blob packs, segmented oplog, rebuildable indexes, crash recovery |
 | `kito-parse` | tree-sitter grammars and symbol queries for the ten languages, normalized hashes |
 | `kito-diff` | Textual diff, file ops, and the AST differ that keeps symbol IDs stable |
+| `kito-merge` | The semantic rebase: three states composed symbol by symbol, conflicts |
+| `kito-lane` | Working copies of the lanes, cloned copy-on-write where the file system allows |
+| `kito-integrate` | Integration queue, verifier, the result an agent reads |
 | `kito-git` | Export of checkpoints as git commits, import from a git repository |
-| `kitod` | Daemon: watcher, capture, JSON-RPC socket |
+| `kitod` | Daemon: watcher, capture on every lane, integration, JSON-RPC socket |
 | `kito-cli` | The `kito` binary |
+| `kito-mcp` | The MCP server agents talk to |
 
 The other crates in the plan are created with the phase that fills them.
 
 ## Trying it out
 
 ```bash
-cargo build --release -p kitod -p kito-cli
+cargo build --release -p kitod -p kito-cli -p kito-mcp
 ```
 
 ```bash
@@ -80,6 +84,64 @@ kito rollback ckpt#1
 kito identity --name "Ada" --email ada@example.com
 ```
 
+## Agents and lanes
+
+Every agent works in a lane: a working copy of its own, where its saves are
+recorded like yours. Opening one prints where it is:
+
+```bash
+kito lane open alice --task "task #12: taxes"
+```
+
+When the agent is done, its work is composed with what the main lane has
+become meanwhile, symbol by symbol: two agents that changed different
+functions of the same file, or added functions at the same place, do not
+conflict.
+
+```bash
+kito integrate lane/1
+```
+
+Commands that must succeed before anything reaches the main lane (a type
+checker, the tests) go in `.kito/config.toml`:
+
+```toml
+[verify]
+commands = ["npx tsc --noEmit", "npm test"]
+
+[lanes]
+share = ["node_modules"]
+```
+
+A real conflict — the same lines of the same function, a symbol removed on
+one side and changed on the other — stops that lane only, and is decided by
+taking one side or writing the text:
+
+```bash
+kito conflicts
+```
+
+```bash
+kito resolve conflict#1 --lane
+```
+
+Agents do all this through the MCP server, `kito-mcp`, which offers
+`kito.open_lane`, `kito.sync`, `kito.status`, `kito.log`, `kito.set_intent`,
+`kito.rename_symbol`, `kito.request_integration`, `kito.integration_result`,
+`kito.why`, `kito.resolve_conflict` and `kito.close_lane`. In the
+configuration of an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "kito": { "command": "kito-mcp", "args": ["--repo", "/path/to/the/repository"] }
+  }
+}
+```
+
+If the client does not accept a dot in tool names, add
+`"--tool-prefix", "kito_"`.
+
 ## Development
 
 ```bash
@@ -92,6 +154,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 3 demo: two agents on the same file, a real conflict decided, then a
+swarm of ten simulated agents verified by the TypeScript compiler.
+
+```bash
+cargo build --release -p kitod --example swarm
+```
+
+```bash
+scripts/demo-phase3.sh
 ```
 
 Phase 2 demo: a function is renamed, moved to another file and edited;

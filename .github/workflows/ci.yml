@@ -25,6 +25,9 @@ jobs:
       - run: cargo test --workspace
       # The phase 0 demo in reduced form: 100,000 ops with kill -9.
       - run: cargo run --release -p kito-store --example crash_demo -- driver --dir "$RUNNER_TEMP/kito-demo" --ops 100000
+      # The phase 3 demo in reduced form: a swarm through the real daemon.
+      - run: cargo build --release -p kitod
+      - run: cargo run --release -p kitod --example swarm -- --agents 6 --rounds 3
 
   bench:
     # Regression threshold of 10% relative to the base branch.

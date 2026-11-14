@@ -306,8 +306,160 @@ with. `~N` and `--ops N` count file-level ops: the symbolic ops that follow a
 change are part of it. `kito log -n` counts the same way.
 
 ### D-039 · Incremental parsing and the parse cache
-The daemon keeps the syntax trees of the last 64 contents it parsed (16 MiB
-at most). The old side of a save is almost always there, and tree-sitter
-reparses the new side from it. Compiled queries are shared by all threads.
-Measured in [`benchmarks.md`](benchmarks.md).
+The daemon keeps the syntax trees of the last contents it parsed: 1,024 of
+them, 16 MiB of source at most (64 until phase 3: an integration reads many
+files at once, see D-052). The old side of a save is almost always there,
+and tree-sitter reparses the new side from it. Compiled queries are shared
+by all threads. Measured in [`benchmarks.md`](benchmarks.md).
 
+## Phase 3
+
+### D-040 · Where a lane starts
+A lane starts from the main lane as it is when the lane is opened, saves not
+yet under a checkpoint included; `--base` starts it from a checkpoint
+instead. The `base` the data model asks for is the latest checkpoint; if the
+repository has none yet, one named `start` is made. The exact starting point
+is `base_head`, the op the main lane was at.
+
+### D-041 · What the store knows of a lane
+`Lane` gets four fields (ADR not needed: fields are added, none changes
+meaning): `base_head`, `since` (how many of its ops were already integrated),
+`task` and `next_symbol`. The records are in an append-only log of their own,
+`.kito/lanes/journal`, last one wins. The state of a lane is always the main
+lane at `base_head` plus the lane's ops from `since` on: it can be rebuilt
+from the logs alone, and a working copy that is lost is made again. Symbols a
+lane creates get IDs with the lane as origin; `next_symbol` makes sure a
+number is never used twice, even after the lane restarts from a new base.
+
+### D-042 · An integration is a squash
+What reaches the main lane is the merged result, recorded as new ops signed
+by the lane's agent: the first has two parents, the head of the main lane and
+the head of the lane, so the graph says where it comes from. The lane's own
+ops stay in the lane's log. Replaying them one by one on the main lane was
+the alternative: it gives the same files and a longer, noisier log, and every
+intermediate state would have to be verified or trusted unverified. Symbols
+keep the IDs the lane gave them: the merge tells the capture which symbol is
+at which place of the merged files (`Identities`, D-030). Every integration
+makes a checkpoint, and so a git commit, authored by the agent. Afterwards
+the lane is brought to the new state of the main lane and keeps its ID.
+
+### D-043 · How files are merged
+A file is a header, units and a tail; a unit is a symbol with the text that
+leads to it (comments, decorators, `export`), and whole lines only. A symbol
+that contains others is merged the same way, one level down. Consequences:
+
+- Units added by the two sides at the same place are both kept, ordered by
+  symbol ID: the result does not depend on who integrates first.
+- The order of the units is the main lane's; a side that only reorders, in a
+  file the other side changed too, loses its order (a reordering is not an
+  op).
+- A symbol one side moved is merged where it went, with its indentation
+  taken off before the merge and put back after.
+- A symbol whose kind changes is a new symbol (D-033), here too.
+- What cannot be read this way — no grammar, a syntax error on either side,
+  symbols the history does not know, more than 2 MiB — is merged as text,
+  line by line, and so are the header and the tail.
+- A file one side renamed without changing it follows the rename with the
+  other side's content.
+
+Only the files the lane touched are read, and those tied to them by a symbol
+that crossed files or by a rename on the main lane: a lane that stayed
+behind does not pay for what only the main lane changed.
+
+### D-044 · Conflicts
+A conflict is recorded in its own append-only log (`.kito/conflicts`) with
+the three texts as blobs, the symbol or file it is about, and the lane's
+agent as `assigned_to`. It blocks that lane only. A decision — the main
+lane's text, the lane's, or a new one — is recorded on the conflict and
+applied by the next integration of the lane, if the texts it was taken on
+are still the ones in conflict; otherwise the conflict stays open, with the
+texts as they are now and no decision. A conflict whose cause went away is
+closed. `Conflict` gets the fields for this
+(`file`, `name`, the three texts, `resolution`): added, none changed.
+Conflict markers are never written in a file.
+
+### D-045 · Verification
+The commands of `[verify] commands` run with `sh -c`, in order, in a copy of
+the merged result (`.kito/verify/work`, made like a lane's working copy and
+with the same shared links), with `KITO_VERIFY=1` and nothing on standard
+input. The first that fails stops the integration; the last lines of its
+output go in the report. A command that runs longer than `timeout_secs`
+(600 by default) is killed with every process it started. The repository is
+not held meanwhile; if the main lane or the lane moved in the files involved,
+the integration is prepared and verified again (three times at most). With
+no commands configured, nothing is verified: the plan's verifier is whatever
+the project uses, and Kito cannot guess it.
+
+### D-046 · The integration queue
+One integration at a time, in the order of the requests: the result of each
+is the starting point of the next. A request returns a job; the daemon keeps
+the results of the last 256 jobs for whoever asks. `kito integrate lane/1
+lane/2` asks and waits, lane after lane.
+
+### D-047 · Files caught in the middle of a save
+Most programs save by emptying the file and writing it again. A capture that
+reads in between sees an empty or half-written file, records every symbol as
+removed and then, a moment later, as new: new IDs, and a fake conflict with
+whoever changed those symbols elsewhere. The swarm simulator found this in
+the first runs. Three defenses, in the order they act:
+
+- a file modified less than 25 ms ago is not trusted yet: the capture waits,
+  or, for file events, leaves it for the next round;
+- on Linux, where the system says when a file is closed, a file that is
+  open for writing is left alone until it is closed;
+- a symbol removed and seen again in the same file, with the same enclosing
+  symbol, kind and name, gets its ID back. `kito why` says "restored".
+
+The third is the one that holds when the first two are fooled (a slow disk,
+events that arrive late), and it makes a rollback bring back the same symbol
+too, which D-038 did not.
+
+### D-048 · What an integration looks at, and when states are saved
+An integration scans the lane's working copy whole, and of the main
+directory only the files it is going to merge or write, before merging and
+again before writing: a save not yet recorded there is never written over.
+The rest of the main directory is the watcher's business. The saved states
+(`state` files) are written when the daemon stops and at checkpoints made by
+hand, not at every integration: they are caches, checked against the log
+when the repository is opened. After a crash the lanes are rebuilt from the
+log and reread their files once.
+
+### D-049 · Explicit renames
+`kito rename` (and `kito.rename_symbol`) writes the new name in the
+definition and in the uses inside the symbol itself, and records a `Rename`
+op directly. The other places where the old name appears as a word are
+returned as a list, not edited: knowing which of them refer to this symbol
+is level 2 (phase 4).
+
+### D-050 · The MCP server
+`kito-mcp` is a separate process that speaks MCP on standard input and
+output (the `rmcp` crate) and passes every call to the daemon over its
+socket, starting it if needed. The tools have the names of the plan, with a
+dot: `kito.open_lane`. For a client that does not accept dots in tool names
+there is `--tool-prefix` (or `KITO_MCP_TOOL_PREFIX`): `--tool-prefix kito_`.
+The command line prints the same structures with `--json`.
+
+### D-051 · What a lane shares with the main directory
+A working copy has the tracked files. What is ignored and the tools need
+(`node_modules`, `.venv`, build caches) is not copied: the paths listed in
+`[lanes] share` are linked. A lane that must change one of them is not
+served by this.
+
+### D-052 · Persistent maps for the state
+`Tree` and `SymbolTable` keep their entries in persistent ordered maps (the
+`imbl` crate): a copy shares everything with the original. A lane's state
+starts as a copy of the main lane's and is replaced by a new copy at every
+integration, and the base is a third; with ordinary maps those copies were
+most of the time of an integration on a large repository. The encoding does
+not change (a map, keys in order). Measured in
+[`benchmarks.md`](benchmarks.md), together with the parse cache.
+
+### D-053 · `kito why` across lanes
+The story of a symbol is read from the lane asked for and from what that
+lane is built on: the main lane up to the lane's base. Steps taken on a lane
+say so ("on lane/3"); the op that brought a lane's symbol to the main lane
+reads "integrated into the main lane".
+
+### D-054 · Debug information of the dependencies
+The development profile builds the dependencies without debug information:
+with it, `target/` passed 25 GB. The workspace's own crates keep theirs.

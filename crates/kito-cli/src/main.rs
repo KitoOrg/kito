@@ -677,11 +677,19 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
             if cli.json {
                 print_json(&closed);
             } else {
-                println!(
-                    "{} closed: its working copy is gone, its {} stay in the log.",
-                    closed.id,
-                    count(closed.ops, "op", "ops")
-                );
+                // What a lane did before its last integration is on the
+                // main lane; the rest is only in its log.
+                match closed.ops {
+                    0 => println!(
+                        "{} closed: its working copy is gone. Nothing it did was left out of the main lane.",
+                        closed.id
+                    ),
+                    ops => println!(
+                        "{} closed: its working copy is gone. Its {} not integrated stay in the log.",
+                        closed.id,
+                        count(ops, "op", "ops")
+                    ),
+                }
             }
         }
         LaneCmd::Status { lane } => {

@@ -88,3 +88,62 @@ cargo run --release -p kitod --example latency -- --shape typical
 | 2,000 lines, 143 functions (58 kB) | 14.1 ms | 20.9 ms |
 | 2,000 lines, 2,000 functions (172 kB) | 31.5 ms | 50.5 ms |
 
+## Phase 3 · integration and lane creation on a large repository
+
+```bash
+cargo run --release -p kitod --example scale -- --files 50000
+```
+
+A repository of 50,000 TypeScript files of 1 kB (250,000 symbols). A lane
+changes one function in each of 50 files, which is 100 ops (a file-level op
+and a symbolic one per file), and is integrated; the verifier is off.
+
+| On 50,000 files | Before | After |
+| --- | --- | --- |
+| Integrating 100 ops | 2,119 ms | 90 ms |
+| Integrating 1,000 ops | 3,753 ms | 299 ms |
+| Integrating 100 ops from a lane the main lane left 550–650 files behind | 754–919 ms (measured halfway through the work) | 123–136 ms |
+| Creating a lane (plain copies, ext4) | 1,433–1,840 ms | 462–561 ms |
+
+Where the 2,119 ms of the first row went, step by step:
+
+| Step | Before | After | What changed |
+| --- | --- | --- | --- |
+| Scanning the lane's working copy | 168 ms | 60 ms | the file system is asked about the files by four threads; only what the stat cache does not vouch for is looked at |
+| Scanning the main directory, before the merge | 177 ms | 3 ms | only the files the lane touched are looked at (D-048) |
+| Merge | 177 ms | 5 ms | reads only the files involved; the three versions come from the parse cache |
+| Scanning both again, before writing | 358 ms | 2 ms | only the files about to be written |
+| Writing and recording the merged files | 46 ms | 20–30 ms | — |
+| Saving the state of the main lane | 250 ms | 0 | saved when the daemon stops (D-048) |
+| Bringing the lane to the new state | 941 ms | 0.5 ms | `Tree` and `SymbolTable` are persistent maps: the copies of the state cost nothing (D-052); the lane's state is not saved here |
+
+The parse cache went from 64 to 1,024 entries in the same work. On 5,000
+files, same build except for the constant:
+
+| Integrating | 64 entries | 1,024 entries |
+| --- | --- | --- |
+| 100 ops (50 files) | 71–96 ms | 37–38 ms |
+| 1,000 ops (500 files) | 1,034–1,092 ms | 316–318 ms |
+
+A save in a lane or in the main directory costs what it did: the phase 2
+code and this one, run one after the other on the same machine, both process
+a save of the ordinary 2,000-line file in 12–15 ms at p50 and 19–21 ms at
+p95.
+
+### Creating a lane
+
+```bash
+cargo run --release -p kito-lane --example lane_creation -- --files 50000
+```
+
+No file system with reflinks was available on the test machine, so the
+figures are for the fallback: every file copied. Per file, the first version
+tried to clone, failed, removed what the attempt left and copied (about 20
+system calls); now the first failure settles the matter for the whole lane,
+and a small file is one read and one write (10 system calls).
+
+These figures vary more than the others. On this VM (ext4 mounted with
+`discard`, block bitmaps read on first use) creating a file costs from 13 µs
+to 250 µs depending on what the file system has in memory, and the same
+50,000-file lane takes from 0.5 s to 2 s, sometimes more, on consecutive
+runs of the same binary. The "after" above is a quiet run.
