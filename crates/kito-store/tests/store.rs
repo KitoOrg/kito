@@ -75,9 +75,15 @@ fn ops_are_validated_before_being_logged() {
     let at = Hlc::new(1, 0);
 
     let blob = BlobId::of(b"contenuto");
-    let add =
-        Op::new([], LaneId::MAIN, author.clone(), at, OpKind::FileAdd { path: "a.txt".into(), blob }, None)
-            .unwrap();
+    let add = Op::new(
+        [],
+        LaneId::MAIN,
+        author.clone(),
+        at,
+        OpKind::FileAdd { path: "a.txt".into(), blob, mode: FileMode::Regular },
+        None,
+    )
+    .unwrap();
     // Il blob non è nello store.
     assert!(matches!(store.append_op(&add), Err(StoreError::InvalidOp(m)) if m.contains("blob")));
     store.put_blob(b"contenuto").unwrap();

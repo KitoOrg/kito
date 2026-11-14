@@ -96,7 +96,7 @@ fn arb_kind() -> impl Strategy<Value = OpKind> {
         }),
         (arb_path(), blob(), blob(), arb_edits())
             .prop_map(|(file, before, after, edits)| { OpKind::TextEdit { file, before, after, edits } }),
-        (arb_path(), blob()).prop_map(|(path, blob)| OpKind::FileAdd { path, blob }),
+        (arb_path(), blob()).prop_map(|(path, blob)| OpKind::FileAdd { path, blob, mode: FileMode::Regular }),
         arb_path().prop_map(|path| OpKind::FileRemove { path }),
         (arb_path(), arb_path()).prop_map(|(from, to)| OpKind::FileRename { from, to }),
     ]

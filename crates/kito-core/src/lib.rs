@@ -17,6 +17,7 @@ pub mod hlc;
 pub mod ids;
 pub mod model;
 mod serde_helpers;
+pub mod tree;
 
 pub use codec::CodecError;
 pub use edit::{apply_edits, EditError, TextEdit};
@@ -24,6 +25,7 @@ pub use hash::{Hash, HashParseError};
 pub use hlc::{Hlc, HlcClock};
 pub use ids::{BlobId, CheckpointId, ConflictId, IdParseError, IntentId, LaneId, OpId, SymbolId};
 pub use model::{
-    Author, AuthorKind, Checkpoint, Conflict, ConflictKind, Fingerprint, Intent, Lane, LaneState, Lang,
-    Location, Op, OpKind, RefSource, Reference, Symbol, SymbolKind, Verification,
+    Author, AuthorKind, Checkpoint, Conflict, ConflictKind, FileMode, Fingerprint, Intent, Lane, LaneState,
+    Lang, Location, Op, OpKind, RefSource, Reference, Symbol, SymbolKind, Verification,
 };
+pub use tree::{Tree, TreeEntry, TreeError};

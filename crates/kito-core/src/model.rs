@@ -118,6 +118,22 @@ pub struct Location {
     pub end: u32,
 }
 
+/// Tipo di un file nell'albero: quanto basta per esportarlo fedelmente in git.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum FileMode {
+    #[default]
+    Regular,
+    Executable,
+    /// Il blob contiene il percorso di destinazione del link.
+    Symlink,
+}
+
+impl FileMode {
+    pub fn is_regular(&self) -> bool {
+        *self == FileMode::Regular
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Op {
     pub id: OpId,
@@ -136,17 +152,55 @@ pub struct Op {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpKind {
-    AddSymbol { sym: Symbol, text: BlobId },
-    RemoveSymbol { id: SymbolId },
-    ModifyBody { id: SymbolId, before: BlobId, after: BlobId, edits: Vec<TextEdit> },
-    ModifySignature { id: SymbolId, before: BlobId, after: BlobId },
-    Rename { id: SymbolId, from: String, to: String },
-    Move { id: SymbolId, from: Location, to: Location },
+    AddSymbol {
+        sym: Symbol,
+        text: BlobId,
+    },
+    RemoveSymbol {
+        id: SymbolId,
+    },
+    ModifyBody {
+        id: SymbolId,
+        before: BlobId,
+        after: BlobId,
+        edits: Vec<TextEdit>,
+    },
+    ModifySignature {
+        id: SymbolId,
+        before: BlobId,
+        after: BlobId,
+    },
+    Rename {
+        id: SymbolId,
+        from: String,
+        to: String,
+    },
+    Move {
+        id: SymbolId,
+        from: Location,
+        to: Location,
+    },
     // Fallback: file non analizzabili e testo fuori dai simboli (import, commenti)
-    TextEdit { file: PathBuf, before: BlobId, after: BlobId, edits: Vec<TextEdit> },
-    FileAdd { path: PathBuf, blob: BlobId },
-    FileRemove { path: PathBuf },
-    FileRename { from: PathBuf, to: PathBuf },
+    TextEdit {
+        file: PathBuf,
+        before: BlobId,
+        after: BlobId,
+        edits: Vec<TextEdit>,
+    },
+    FileAdd {
+        path: PathBuf,
+        blob: BlobId,
+        /// Tipo di file. Assente nella codifica quando è un file normale.
+        #[serde(default, skip_serializing_if = "FileMode::is_regular")]
+        mode: FileMode,
+    },
+    FileRemove {
+        path: PathBuf,
+    },
+    FileRename {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 impl Op {

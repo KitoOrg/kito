@@ -1,0 +1,22 @@
+[package]
+name = "kito-git"
+description = "Kito: export dei checkpoint in commit git, import da un repo git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kito-core.workspace = true
+kito-store.workspace = true
+kito-diff.workspace = true
+gix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

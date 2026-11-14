@@ -94,7 +94,7 @@ impl Gen {
         let (kind, blobs) = match i % 6 {
             0 => {
                 let c = Gen::content(i);
-                (OpKind::FileAdd { path: file, blob: BlobId::of(&c) }, vec![c])
+                (OpKind::FileAdd { path: file, blob: BlobId::of(&c), mode: FileMode::Regular }, vec![c])
             }
             1 => {
                 let (a, b) = (Gen::content(i - 1), Gen::content(i));

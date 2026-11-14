@@ -56,7 +56,7 @@ impl OpGen {
         let (kind, blobs) = match i % 5 {
             0 => {
                 let c = Self::content(i);
-                (OpKind::FileAdd { path: file, blob: BlobId::of(&c) }, vec![c])
+                (OpKind::FileAdd { path: file, blob: BlobId::of(&c), mode: FileMode::Regular }, vec![c])
             }
             1 => {
                 let (a, b) = (Self::content(i - 1), Self::content(i));
