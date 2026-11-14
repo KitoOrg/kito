@@ -52,6 +52,9 @@ In a new directory (in an existing git repository use `kito import`):
 kito init
 ```
 
+It also sets the project up for Claude Code (see [Claude Code](#claude-code);
+`--no-claude` leaves that out).
+
 From here on every save is recorded, with no commits. To see what happened
 and mark a point, which also becomes a git commit:
 
@@ -155,8 +158,40 @@ configuration of an MCP client:
 }
 ```
 
-If the client does not accept a dot in tool names, add
+Started inside the repository it finds it by itself, and `--repo` can be
+left out. If the client does not accept a dot in tool names, add
 `"--tool-prefix", "kito_"`.
+
+### Claude Code
+
+`kito init` and `kito import` set the project up for Claude Code, and
+`kito claude` does it in a repository that is already there:
+
+```bash
+kito claude
+```
+
+| File | What goes in it |
+| --- | --- |
+| `.gitignore` | `.kito/`, so that git does not see Kito's own directory |
+| `.mcp.json` | the `kito` server: `{ "command": "kito-mcp" }` |
+| `.claude/settings.json` | `mcp__kito__*` among the allowed tools: Claude calls them without asking each time |
+| `CLAUDE.md` | the rules: one lane per task, edits only in the lane's working copy, `rename_symbol` for renames, integrate at the end |
+
+Each file is touched only for what is missing in it: what is already there
+stays as it is written, and a second run changes nothing. A file that is not
+what was expected (JSON that does not parse, say) is left alone and named.
+They are files of the project: Kito records them, and they reach git with
+the next checkpoint, so that whoever clones the project has them. To leave a
+project as it is, `kito init --no-claude` (or `KITO_NO_CLAUDE=1` in the
+environment).
+
+Then start Claude Code in the project directory. The first time it asks to
+trust the folder and to approve the `kito` server; `/mcp` shows it connected
+with its eleven tools. `kito-mcp` has to be on the `PATH`. Claude Code
+writes an underscore where a tool's name has a dot (`kito.open_lane` is
+`mcp__kito__kito_open_lane` to it): no `--tool-prefix` is needed. From
+there, a task asked in plain words is done in a lane and integrated.
 
 ## Development
 

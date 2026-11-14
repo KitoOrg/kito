@@ -6,6 +6,9 @@
 #   scripts/store-growth.sh [source file] [saves] [directory to work in]
 set -euo pipefail
 
+# Kito alone: `kito init` would also set the project up for Claude Code.
+export KITO_NO_CLAUDE=1
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$ROOT/target/release:$PATH"
 export KITO_AUTHOR="${KITO_AUTHOR:-ada}"

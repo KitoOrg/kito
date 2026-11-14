@@ -15,6 +15,9 @@
 #   scripts/demo-phase4.sh
 set -euo pipefail
 
+# Kito alone: `kito init` would also set the project up for Claude Code.
+export KITO_NO_CLAUDE=1
+
 BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release"
 export PATH="$BIN:$PATH"
 export KITO_AUTHOR="${KITO_AUTHOR:-francesco}"

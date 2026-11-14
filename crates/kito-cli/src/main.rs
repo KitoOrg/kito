@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod claude;
+
 #[derive(Parser)]
 #[command(name = "kito", version, about = "Semantic version control for agent swarms")]
 struct Cli {
@@ -40,12 +42,21 @@ enum Cmd {
         /// Start from scratch even if the directory is a git repository
         #[arg(long)]
         fresh: bool,
+        /// Do not set the project up for Claude Code (see `kito claude`)
+        #[arg(long)]
+        no_claude: bool,
     },
     /// Import the current state and the history of a git repository
     Import {
         /// Git repository to import (default: the current directory)
         path: Option<PathBuf>,
+        /// Do not set the project up for Claude Code (see `kito claude`)
+        #[arg(long)]
+        no_claude: bool,
     },
+    /// Set the project up for Claude Code: the MCP server, the permission to
+    /// call it, the rules in CLAUDE.md (`init` and `import` do it too)
+    Claude,
     /// Show the operation log, most recent first
     Log {
         /// Only what concerns this file; or a lane (lane/1) for its own log
@@ -270,7 +281,23 @@ fn stop_daemon(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool) -> Outcome {
+/// Sets the project up for Claude Code, unless that was not wanted. The
+/// files are written before the first scan, which records them.
+fn claude_setup(root: &Path, no_claude: bool) -> Option<claude::Setup> {
+    (!no_claude && !claude::disabled()).then(|| claude::setup(root))
+}
+
+fn cmd_claude(cli: &Cli) -> Outcome {
+    let setup = claude::setup(&root_of(cli)?);
+    if cli.json {
+        print_json(&setup.json());
+    } else {
+        setup.print();
+    }
+    Ok(())
+}
+
+fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&root).map_err(fail)?;
     if root.join(".git").exists() && !fresh && !root.join(".kito").join("format").is_file() {
@@ -281,19 +308,23 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool) -> Outcome {
     let repo = Repo::init(&root).map_err(fail)?;
     let root = repo.root().to_owned();
     repo.close().map_err(fail)?;
+    let setup = claude_setup(&root, no_claude);
     // Capture is continuous from the very start: the daemon starts with the repository.
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
     if cli.json {
-        print_json(&json!({ "root": root }));
+        print_json(&json!({ "root": root, "claude": setup.as_ref().map(claude::Setup::json) }));
     } else {
         println!("Kito repository created in {}", root.join(".kito").display());
+        if let Some(setup) = &setup {
+            setup.print();
+        }
         println!("The daemon is running: every save is recorded from now on.");
         warn_if_events_unreliable(&mut client);
     }
     Ok(())
 }
 
-fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
+fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
     // The import works directly on the store: the daemon, if there is one, steps aside.
@@ -302,6 +333,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
         if root.join(".kito").join("format").is_file() { Repo::open(&root) } else { Repo::init(&root) }
             .map_err(fail)?;
     let report = repo.import_git().map_err(fail)?;
+    let setup = claude_setup(&root, no_claude);
     let captured = repo.scan().map_err(fail)?;
     repo.close().map_err(fail)?;
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
@@ -312,6 +344,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
             "checkpoints": report.checkpoints,
             "skipped": report.skipped,
             "uncommitted_ops": captured.len(),
+            "claude": setup.as_ref().map(claude::Setup::json),
         }));
     } else {
         println!(
@@ -322,6 +355,9 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
         );
         for line in &report.skipped {
             println!("  skipped {line}");
+        }
+        if let Some(setup) = &setup {
+            setup.print();
         }
         if !captured.is_empty() {
             println!("Captured {} not yet in git.", count(captured.len() as u64, "change", "changes"));
@@ -1113,8 +1149,9 @@ fn cmd_daemon_stop(cli: &Cli) -> Outcome {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match &cli.command {
-        Cmd::Init { path, fresh } => cmd_init(&cli, path, *fresh),
-        Cmd::Import { path } => cmd_import(&cli, path),
+        Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
+        Cmd::Import { path, no_claude } => cmd_import(&cli, path, *no_claude),
+        Cmd::Claude => cmd_claude(&cli),
         Cmd::Log { target, limit, lane } => cmd_log(&cli, target, *limit, lane),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),

@@ -876,3 +876,13 @@ to the one made from the log; many new files at once equal to one by one.
 - A C or C++ project needs a `compile_commands.json` for `clangd` to find
   the uses in other files.
 - Windows is still served through WSL only.
+
+## After phase 5
+
+- **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and
+  `import` write what Claude Code needs to work through Kito: the server in
+  `.mcp.json`, the permission in `.claude/settings.json`, the rules in
+  `CLAUDE.md`, `.kito/` in `.gitignore`; `kito claude` does it later.
+  Tried with Claude Code itself on a project that had only `kito init` run
+  in it: asked in plain words to add a function, and to rename one, it
+  opened a lane, worked in it, integrated and closed.

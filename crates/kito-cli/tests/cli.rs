@@ -22,8 +22,9 @@ fn kitod() -> PathBuf {
     path
 }
 
-fn kito(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kito"))
+fn command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kito"));
+    command
         .current_dir(cwd)
         .args(args)
         .env("KITOD_BIN", kitod())
@@ -32,9 +33,26 @@ fn kito(cwd: &Path, args: &[&str]) -> Output {
         // No identity taken from the machine the tests run on.
         .env("KITO_CONFIG_DIR", cwd.join(".absent-personal-config"))
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .output()
-        .unwrap()
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
+    command
+}
+
+/// Kito alone: `init` and `import` leave the project's files as they are.
+fn kito(cwd: &Path, args: &[&str]) -> Output {
+    command(cwd, args).env("KITO_NO_CLAUDE", "1").output().unwrap()
+}
+
+/// As it runs for somebody who did not ask otherwise: `init` and `import`
+/// set the project up for Claude Code.
+fn kito_as_installed(cwd: &Path, args: &[&str]) -> String {
+    let out = command(cwd, args).env_remove("KITO_NO_CLAUDE").output().unwrap();
+    assert!(
+        out.status.success(),
+        "kito {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// Runs a command that must succeed and returns its standard output.
@@ -454,4 +472,97 @@ fn lanes_integration_and_conflicts_from_the_command_line() {
     let unknown = kito(root, &["integrate", "lane/1"]);
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("no such open lane"));
     ok(root, &["daemon", "stop"]);
+}
+
+const CLAUDE_FILES: [&str; 4] = [".gitignore", ".mcp.json", ".claude/settings.json", "CLAUDE.md"];
+
+#[test]
+fn init_sets_the_project_up_for_claude_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("app.ts"), "export const a = 1;\n").unwrap();
+    let out = kito_as_installed(root, &["init"]);
+    assert!(out.contains("Set up for Claude Code:"), "{out}");
+    for file in CLAUDE_FILES {
+        assert!(root.join(file).is_file(), "{file} is missing");
+        assert!(out.contains(&format!("created     {file}")), "{file} in:\n{out}");
+    }
+    let servers: Value = serde_json::from_str(&fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(servers["mcpServers"]["kito"]["command"], "kito-mcp");
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap()).unwrap();
+    assert_eq!(settings["permissions"]["allow"][0], "mcp__kito__*");
+    assert!(fs::read_to_string(root.join("CLAUDE.md")).unwrap().contains("`open_lane`"));
+
+    // They are files of the project like the others: recorded, and in git
+    // with the first checkpoint, where `.kito/` does not show.
+    ok(root, &["sync"]);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 5);
+    ok(root, &["checkpoint", "-m", "start"]);
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+    let tracked = git(root, &["ls-files"]);
+    for file in CLAUDE_FILES {
+        assert!(tracked.lines().any(|line| line == file), "{file} not in git:\n{tracked}");
+    }
+
+    // Asked again, there is nothing to do.
+    let again = kito_as_installed(root, &["claude"]);
+    assert!(again.contains("set up here already"), "{again}");
+    let again = json(root, &["claude", "--json"]);
+    assert!(again["files"].as_array().unwrap().iter().all(|file| file["change"] == "unchanged"), "{again}");
+    ok(root, &["sync"]);
+    assert!(ok(root, &["status"]).contains("0 since the last checkpoint"));
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
+fn a_project_can_be_left_alone_and_set_up_later() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    fs::write(root.join("CLAUDE.md"), "# Notes\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "start"]);
+
+    let out = kito_as_installed(root, &["import", "--no-claude"]);
+    assert!(!out.contains("Claude"), "{out}");
+    assert!(!root.join(".mcp.json").exists() && !root.join(".claude").exists());
+    assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "# Notes\n");
+
+    // Later, with the daemon running: the files are recorded as they are written.
+    let out = kito_as_installed(root, &["claude"]);
+    for (file, change) in [
+        (".gitignore", "updated"),
+        (".mcp.json", "created"),
+        (".claude/settings.json", "created"),
+        ("CLAUDE.md", "updated"),
+    ] {
+        assert!(out.contains(&format!("{change:<10}  {file}")), "{change} {file} in:\n{out}");
+    }
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "target/\n.kito/\n");
+    assert!(fs::read_to_string(root.join("CLAUDE.md"))
+        .unwrap()
+        .starts_with("# Notes\n\n## Version control: Kito\n"));
+    ok(root, &["sync"]);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 4);
+    ok(root, &["checkpoint", "-m", "claude"]);
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+    ok(root, &["daemon", "stop"]);
+
+    // `import` does it by itself, and what it writes is waiting for a checkpoint.
+    let other = tempfile::tempdir().unwrap();
+    let other = other.path();
+    git(other, &["init", "-q", "-b", "main"]);
+    fs::write(other.join("a.txt"), "a\n").unwrap();
+    git(other, &["add", "-A"]);
+    git(other, &["commit", "-q", "-m", "start"]);
+    let out = kito_as_installed(other, &["import"]);
+    assert!(
+        out.contains("Set up for Claude Code:") && out.contains("Captured 4 changes not yet in git"),
+        "{out}"
+    );
+    let imported = json(other, &["status", "--json"]);
+    assert_eq!(imported["repo"]["files"], 5);
+    ok(other, &["daemon", "stop"]);
 }

@@ -653,3 +653,27 @@ definition role are read; the messages are written by hand for `prost`, so
 that building Kito needs no protobuf compiler. This is the index D-059
 left for later, in the form the plan gives it: built in one go by a tool
 made for that, not maintained by the daemon in the background.
+
+### D-072 · `kito init` sets the project up for Claude Code
+Telling Claude Code to work through Kito took four things done by hand: the
+MCP server in `.mcp.json`, the permission to call its tools in
+`.claude/settings.json`, the rules in `CLAUDE.md`, and `.kito/` in
+`.gitignore`. `kito init` and `kito import` now do them, and `kito claude`
+does them in a repository that already exists. It is the default because a
+project is put under Kito to have agents work in it, and one that is not
+ready for them does nothing wrong, only nothing: `--no-claude`, or
+`KITO_NO_CLAUDE` in the environment, leaves the project as it is. The files
+are the project's own, shared through git like the rest, which is why the
+server is named `kito-mcp` without a path: it has to be on the `PATH` of
+whoever uses it, and the command says so when it is not. Each file is only
+added to: a server called `kito` that is already there is kept whatever it
+runs, the keys of a JSON file stay in the order they were written in, and a
+file that cannot be read as expected is left alone and named. The approval
+of a project's server and the trust in the folder are Claude Code's
+questions to the person, and are left to be asked: nothing is written that
+answers them. What was tried: Claude Code 2.1 with the files as `init`
+writes them connects to the server, opens a lane, renames, integrates and
+closes; the rule in `.claude/settings.json` is read, and applies once the
+folder is trusted. The rules say two things the trials taught: a rename
+without a language server leaves uses to update by hand, and an integration
+asked in the same step as an edit can go ahead without it.
