@@ -4,7 +4,7 @@ use crate::{git_err, object_id, oid20, GitError};
 use gix::bstr::BString;
 use gix::objs::tree::EntryKind;
 use gix::refs::transaction::PreviousValue;
-use kito_core::{Checkpoint, CheckpointId, FileMode, LaneId, Tree};
+use kito_core::{Checkpoint, CheckpointId, FileMode, LaneId, OpId, Tree};
 use kito_store::Store;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,17 @@ pub struct Exported {
     pub commit: [u8; 20],
 }
 
+/// What the caller already knows of the two ends of an export: the files at
+/// the last checkpoint exported and at the head of the main lane. When the
+/// only checkpoint to export is at that head, the commit is made from the
+/// difference between the two, without reading the log again.
+pub struct Known<'a> {
+    pub exported: CheckpointId,
+    pub exported_tree: &'a Tree,
+    pub head: OpId,
+    pub tree: &'a Tree,
+}
+
 /// Exports to `root/.git` the checkpoints not yet exported, in order.
 /// If `root` is not a git repository, it initializes it.
 ///
@@ -39,6 +50,17 @@ pub struct Exported {
 /// op) and message depend only on the checkpoint, so redoing it gives the
 /// same commits.
 pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Vec<Exported>, GitError> {
+    export_known(store, root, opts, None)
+}
+
+/// Like [`export`], for a caller that keeps the state of the main lane in
+/// memory: see [`Known`]. The commits are the same.
+pub fn export_known(
+    store: &mut Store,
+    root: &Path,
+    opts: &ExportOptions,
+    known: Option<&Known<'_>>,
+) -> Result<Vec<Exported>, GitError> {
     let checkpoints: Vec<Checkpoint> = store.checkpoints().cloned().collect();
     let first = checkpoints.iter().position(|c| c.git_commit.is_none());
     if let Some(first) = first {
@@ -92,16 +114,29 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
         }
     }
 
-    let mut done = Vec::new();
-    let mut last_commit = prev_commit;
-    let mut last_tree: Option<gix::ObjectId> = None;
-
-    if let Some(first) = first {
-        let mut parent = prev_commit.or(tip);
-        let mut base_tree = match prev_commit {
+    let mut out = Progress {
+        parent: prev_commit.or(tip),
+        base_tree: match prev_commit {
             Some(commit) => repo.find_commit(commit).map_err(git_err)?.tree_id().map_err(git_err)?.detach(),
             None => repo.empty_tree().id,
-        };
+        },
+        last_commit: prev_commit,
+        last_tree: None,
+        done: Vec::new(),
+    };
+
+    // One checkpoint to export, at the head of the main lane, right after
+    // the one the caller knows the files of: the usual case in the daemon.
+    let shortcut = first.and_then(|first| {
+        let known = known?;
+        let [only] = &checkpoints[first..] else { return None };
+        (only.head == known.head && prev.map(|p| p.id) == Some(known.exported)).then_some((only, known))
+    });
+    if let Some((ck, known)) = shortcut {
+        let at = store.get_op(&ck.head)?.ok_or(GitError::HeadNotOnMain(ck.id, ck.head))?.at.wall_ms;
+        let dirty: Vec<&Path> = known.exported_tree.differences(known.tree).collect();
+        commit_checkpoint(&repo, store, opts, ck, known.tree, &dirty, at, &mut out)?;
+    } else if let Some(first) = first {
         let prev_head = prev.map(|p| p.head);
         let mut tracking = prev.is_none();
         let mut dirty: BTreeSet<PathBuf> = BTreeSet::new();
@@ -124,63 +159,9 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
                     tracking = true;
                 }
                 while let Some(ck) = todo.next_if(|c| c.head == op.id) {
-                    let mut editor = repo.edit_tree(base_tree).map_err(git_err)?;
-                    for path in &dirty {
-                        let rela =
-                            path.to_str().ok_or_else(|| git_err(format!("non-UTF-8 path: {path:?}")))?;
-                        match tree.get(path) {
-                            Some(entry) => {
-                                let content =
-                                    store.get_blob(&entry.blob)?.ok_or(GitError::MissingBlob(entry.blob))?;
-                                let blob = repo.write_blob(&content).map_err(git_err)?.detach();
-                                let kind = match entry.mode {
-                                    FileMode::Regular => EntryKind::Blob,
-                                    FileMode::Executable => EntryKind::BlobExecutable,
-                                    FileMode::Symlink => EntryKind::Link,
-                                };
-                                editor.upsert(rela, kind, blob).map_err(git_err)?;
-                            }
-                            None => {
-                                editor.remove(rela).map_err(git_err)?;
-                            }
-                        }
-                    }
+                    let paths: Vec<&Path> = dirty.iter().map(PathBuf::as_path).collect();
+                    commit_checkpoint(&repo, store, opts, ck, &tree, &paths, op.at.wall_ms, &mut out)?;
                     dirty.clear();
-                    let tree_id = editor.write().map_err(git_err)?.detach();
-
-                    let time = gix::date::Time { seconds: (op.at.wall_ms / 1000) as i64, offset: 0 };
-                    let name = ck.created_by.name.clone();
-                    // The real email, if the author has one: it is what GitHub uses to
-                    // attribute the commit. Otherwise a placeholder address.
-                    let email = ck
-                        .created_by
-                        .email
-                        .clone()
-                        .unwrap_or_else(|| format!("{}@{}", email_local_part(&name), opts.email_domain));
-                    let signature = gix::actor::Signature { name: name.into(), email: email.into(), time };
-                    let commit = gix::objs::Commit {
-                        tree: tree_id,
-                        parents: parent.into_iter().collect(),
-                        author: signature.clone(),
-                        committer: signature,
-                        encoding: None,
-                        message: commit_message(ck),
-                        extra_headers: Vec::new(),
-                    };
-                    let commit_id = repo.write_object(&commit).map_err(git_err)?.detach();
-
-                    // First it is recorded in the store, then (at the end) the
-                    // branch is moved: if the process dies in between, the next
-                    // export finds the branch behind and realigns it.
-                    let mut updated = ck.clone();
-                    updated.git_commit = Some(oid20(commit_id));
-                    store.put_checkpoint(&updated)?;
-                    done.push(Exported { checkpoint: ck.id, commit: oid20(commit_id) });
-
-                    parent = Some(commit_id);
-                    base_tree = tree_id;
-                    last_commit = Some(commit_id);
-                    last_tree = Some(tree_id);
                 }
                 if todo.peek().is_none() {
                     break 'replay;
@@ -191,6 +172,7 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
             return Err(GitError::HeadNotOnMain(ck.id, ck.head));
         }
     }
+    let Progress { last_commit, last_tree, done, .. } = out;
 
     if let Some(commit) = last_commit {
         if tip != Some(commit) {
@@ -212,6 +194,85 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
         }
     }
     Ok(done)
+}
+
+/// Where an export has got to.
+struct Progress {
+    parent: Option<gix::ObjectId>,
+    base_tree: gix::ObjectId,
+    last_commit: Option<gix::ObjectId>,
+    last_tree: Option<gix::ObjectId>,
+    done: Vec<Exported>,
+}
+
+/// Writes the commit of one checkpoint: the tree of the commit before it
+/// with the files at `dirty` as `tree` has them now.
+#[allow(clippy::too_many_arguments)]
+fn commit_checkpoint(
+    repo: &gix::Repository,
+    store: &mut Store,
+    opts: &ExportOptions,
+    ck: &Checkpoint,
+    tree: &Tree,
+    dirty: &[&Path],
+    wall_ms: u64,
+    out: &mut Progress,
+) -> Result<(), GitError> {
+    let mut editor = repo.edit_tree(out.base_tree).map_err(git_err)?;
+    for path in dirty {
+        let rela = path.to_str().ok_or_else(|| git_err(format!("non-UTF-8 path: {path:?}")))?;
+        match tree.get(path) {
+            Some(entry) => {
+                let content = store.get_blob(&entry.blob)?.ok_or(GitError::MissingBlob(entry.blob))?;
+                let blob = repo.write_blob(&content).map_err(git_err)?.detach();
+                let kind = match entry.mode {
+                    FileMode::Regular => EntryKind::Blob,
+                    FileMode::Executable => EntryKind::BlobExecutable,
+                    FileMode::Symlink => EntryKind::Link,
+                };
+                editor.upsert(rela, kind, blob).map_err(git_err)?;
+            }
+            None => {
+                editor.remove(rela).map_err(git_err)?;
+            }
+        }
+    }
+    let tree_id = editor.write().map_err(git_err)?.detach();
+
+    let time = gix::date::Time { seconds: (wall_ms / 1000) as i64, offset: 0 };
+    let name = ck.created_by.name.clone();
+    // The real email, if the author has one: it is what GitHub uses to
+    // attribute the commit. Otherwise a placeholder address.
+    let email = ck
+        .created_by
+        .email
+        .clone()
+        .unwrap_or_else(|| format!("{}@{}", email_local_part(&name), opts.email_domain));
+    let signature = gix::actor::Signature { name: name.into(), email: email.into(), time };
+    let commit = gix::objs::Commit {
+        tree: tree_id,
+        parents: out.parent.into_iter().collect(),
+        author: signature.clone(),
+        committer: signature,
+        encoding: None,
+        message: commit_message(ck),
+        extra_headers: Vec::new(),
+    };
+    let commit_id = repo.write_object(&commit).map_err(git_err)?.detach();
+
+    // First it is recorded in the store, then (at the end) the branch is
+    // moved: if the process dies in between, the next export finds the
+    // branch behind and realigns it.
+    let mut updated = ck.clone();
+    updated.git_commit = Some(oid20(commit_id));
+    store.put_checkpoint(&updated)?;
+    out.done.push(Exported { checkpoint: ck.id, commit: oid20(commit_id) });
+
+    out.parent = Some(commit_id);
+    out.base_tree = tree_id;
+    out.last_commit = Some(commit_id);
+    out.last_tree = Some(tree_id);
+    Ok(())
 }
 
 /// `true` if `ancestor` is `descendant` or can be reached from it by walking

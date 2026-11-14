@@ -64,6 +64,12 @@ unsafe_code = "deny"
 
 # Dependencies are built without debug information: the grammars and gix
 # alone add gigabytes to target/ and minutes to every link.
+# Test binaries are many and each links everything: with full debug
+# information and incremental caches `target/` passes 20 GB.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 [profile.dev.package."*"]
 debug = false
 

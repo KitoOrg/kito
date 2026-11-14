@@ -96,7 +96,8 @@ cargo run --release -p kitod --example scale -- --files 50000
 
 A repository of 50,000 TypeScript files of 1 kB (250,000 symbols). A lane
 changes one function in each of 50 files, which is 100 ops (a file-level op
-and a symbolic one per file), and is integrated; the verifier is off.
+and a symbolic one per file), and is integrated; the verifier is off, and so
+is the export of each checkpoint to git, which is measured further down.
 
 | On 50,000 files | Before | After |
 | --- | --- | --- |
@@ -147,3 +148,74 @@ These figures vary more than the others. On this VM (ext4 mounted with
 to 250 µs depending on what the file system has in memory, and the same
 50,000-file lane takes from 0.5 s to 2 s, sometimes more, on consecutive
 runs of the same binary. The "after" above is a quiet run.
+
+## Phase 3 · the git commit of every integration
+
+```bash
+cargo run --release -p kitod --example scale -- --files 50000 --git-export
+```
+
+With `export_on_checkpoint` on, which is the default, every integration also
+writes a git commit. The export replayed the main lane's log from its first
+op to know the files at the checkpoint: on 50,000 files (250,000 ops) that
+was a second per commit. The daemon now remembers the files at the last
+checkpoint it exported, and the commit is made from what differs.
+
+| On 50,000 files, git export on | Before | After |
+| --- | --- | --- |
+| Integrating 100 ops | 1,097 ms | 135–145 ms |
+| Integrating 1,000 ops | 1,520 ms | 447–511 ms |
+| Integrating 100 ops from a lane 550–650 files behind | 1,065–1,207 ms | 185–245 ms |
+
+The last row includes rewriting those 600 files in the lane's working copy.
+A test checks that the commit made this way is the one the log gives, bit
+for bit.
+
+## The first capture of a large project
+
+```bash
+cargo run --release -p kitod --example scale -- --files 50000
+```
+
+`kito init` in a directory that already has 50,000 files (or the first scan
+after a long absence) records every file and every symbol in it.
+
+| First capture | Before | After |
+| --- | --- | --- |
+| 5,000 files (25,000 ops) | 3.2 s | 1.3 s |
+| 20,000 files (100,000 ops) | 20.1 s | 5.2 s |
+| 50,000 files (250,000 ops) | 88–92 s | 14.7 s |
+
+The time grew faster than the files: the step that pairs the old and the new
+content of each file looked each path up by scanning the list of the paths
+of the batch. With that gone, the rest was parsing, on one thread. Many new
+files are now parsed on every processor, 256 at a time, so that the syntax
+trees of a whole repository are never in memory together; nothing can have
+moved between files that are all new, so the ops are the ones the files
+would give one by one (a test compares the two).
+
+Where the 14.7 s go: parsing 5.3 s (four cores), recording 250,000 ops
+4.5 s, storing the text of 200,000 symbols 1.3 s, reading and storing the
+files 0.8 s. `kito import` of a git repository with the same files in one
+commit takes 30 s: it records the files from git's objects, analyzes them,
+and then the daemon reads the working directory once.
+
+## Compared with git
+
+The same operations with git 2.43 and with Kito, on the same machine and
+the same 50,000 files, one after the other (`git worktree` for the agents'
+working copies, `git add -A && git commit` in the worktree and
+`git merge --no-ff` for bringing their work in):
+
+| Operation | git | Kito |
+| --- | --- | --- |
+| First import of the 50,000 files | 2.6 s | 14.7 s |
+| Seeing that nothing changed (`git status` / a scan) | 48 ms | 55–60 ms |
+| Recording one save | 154 ms (`git add <file> && git commit`) | 13–20 ms of work, about 70 ms after the save with the debounce; no command |
+| A working copy for an agent | 1.6 s (1.56–2.0 s) | 1.1–3.1 s in the same run; 0.46–0.56 s on a quiet disk |
+| Bringing in an agent's work, 50 files | 523–676 ms | 135–245 ms with the git commit, 86–206 ms without |
+| Bringing in an agent's work, 500 files | 1,202 ms | 447–511 ms with the git commit |
+
+git does not parse anything, which is the whole difference in the first row.
+The comparison says nothing about what git cannot do at any speed: the two
+agents of the phase 3 demo conflict in git and do not in Kito.

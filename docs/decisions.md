@@ -463,3 +463,24 @@ reads "integrated into the main lane".
 ### D-054 · Debug information of the dependencies
 The development profile builds the dependencies without debug information:
 with it, `target/` passed 25 GB. The workspace's own crates keep theirs.
+
+### D-055 · The export remembers the files of the last commit
+The export to git needs the files at the checkpoint and the paths that
+changed since the commit before. From the log alone that is a replay from
+the first op. The daemon keeps the tree of the last checkpoint it exported
+(a persistent map: it costs nothing) and passes it to the export with the
+current one; the commit is made from the difference. A daemon that has just
+started, or an export of several checkpoints, reads the log as before.
+
+### D-056 · Many new files at once
+A batch of more than 256 new files in which nothing is known in advance and
+nothing can be coming back (an import, the first capture of a project) is
+analyzed 256 files at a time, parsed on every processor. Between files that
+are all new no symbol can have moved, so the result is the one the files
+would give one by one, IDs included. The syntax trees of these files are
+not kept: the parse cache is for files being edited.
+
+### D-057 · Debug information, again
+The development profile keeps only line tables for the workspace's crates
+and builds without incremental caches (D-054 was not enough: every test
+binary links everything, and `target/` passed 20 GB a second time).

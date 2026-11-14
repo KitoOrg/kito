@@ -128,12 +128,12 @@ pub(crate) fn symbol_ops(
     // removed and added again in the same batch (a change of type, such as
     // `chmod +x`) is one file that changed, not two.
     let mut touched: Vec<(&PathBuf, Option<BlobId>, Option<BlobId>)> = Vec::new();
-    let mut slot = |path| match touched.iter().position(|(p, _, _)| *p == path) {
-        Some(at) => at,
-        None => {
+    let mut slots: HashMap<&PathBuf, usize> = HashMap::new();
+    let mut slot = |path| {
+        *slots.entry(path).or_insert_with(|| {
             touched.push((path, None, None));
             touched.len() - 1
-        }
+        })
     };
     let mut edits: Vec<(usize, Option<BlobId>, Option<BlobId>)> = Vec::new();
     for op in file_ops {
@@ -154,6 +154,17 @@ pub(crate) fn symbol_ops(
     for (at, before, after) in edits {
         touched[at].1 = touched[at].1.or(before);
         touched[at].2 = touched[at].2.or(after);
+    }
+
+    // Many new files and nothing they could be confused with: an import, the
+    // first capture of a project. No symbol can have moved between them.
+    let only_new = touched.len() > BULK
+        && identities.knows_nothing()
+        && touched.iter().all(|(path, before, after)| {
+            before.is_none() && after.is_some() && !last_clean.contains_key(*path)
+        });
+    if only_new {
+        return new_files(store, table, lane, &touched, identities);
     }
 
     let mut files: Vec<(PathBuf, Option<Side>, Option<Side>)> = Vec::new();
@@ -186,6 +197,69 @@ pub(crate) fn symbol_ops(
     Ok(diff(table, lane, &files, identities))
 }
 
+/// More new files than this in one batch are read a group at a time.
+const BULK: usize = 256;
+
+/// The symbols of many new files: parsed on every processor, a group of
+/// files at a time so that the syntax trees of a whole repository are never
+/// in memory together. The ops are the ones the files would give one by one.
+fn new_files(
+    store: &Store,
+    table: &SymbolTable,
+    lane: LaneId,
+    touched: &[(&PathBuf, Option<BlobId>, Option<BlobId>)],
+    identities: &Identities,
+) -> Result<SymbolOps> {
+    let mut all = SymbolOps::default();
+    let mut identities = identities.clone();
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(16);
+    for group in touched.chunks(BULK) {
+        let mut contents: Vec<(&PathBuf, kito_parse::Dialect, Vec<u8>)> = Vec::new();
+        for (path, _, after) in group {
+            let (Some(dialect), Some(blob)) = (dialect_for_path(path), after) else { continue };
+            match store.get_blob(blob)? {
+                Some(content) if content.len() <= MAX_PARSED_BYTES => contents.push((path, dialect, content)),
+                _ => {}
+            }
+        }
+        let share = contents.len().div_ceil(workers).max(1);
+        let parsed: Vec<Option<Parsed>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = contents
+                .chunks(share)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|(_, dialect, content)| parse_reusing(*dialect, content, None))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|handle| handle.join().expect("a parser thread panicked")).collect()
+        });
+        let files: Vec<(PathBuf, Option<Side>, Option<Side>)> = contents
+            .iter()
+            .zip(parsed)
+            .filter_map(|((path, _, _), parsed)| {
+                // Half-written code is left alone, as in a single save.
+                let parsed = parsed.filter(|parsed| !parsed.file.has_errors)?;
+                Some(((*path).clone(), None, Some(Arc::new(parsed))))
+            })
+            .collect();
+        let found = diff(table, lane, &files, &identities);
+        // The next group continues the numbering of this one.
+        let last = found.ops.iter().filter_map(|op| match op {
+            OpKind::AddSymbol { sym, .. } if sym.id.origin() == lane => Some(sym.id.seq()),
+            _ => None,
+        });
+        if let Some(last) = last.max() {
+            identities.start_new_ids_at(last + 1);
+        }
+        all.ops.extend(found.ops);
+        all.blobs.extend(found.blobs);
+    }
+    Ok(all)
+}
+
 /// `AddSymbol` ops for the files the history knows only as text: the ones
 /// imported from git, or captured before symbols existed.
 pub(crate) fn analyze_unindexed(
@@ -194,16 +268,14 @@ pub(crate) fn analyze_unindexed(
     table: &SymbolTable,
     lane: LaneId,
 ) -> Result<SymbolOps> {
-    let mut files: Vec<(PathBuf, Option<Side>, Option<Side>)> = Vec::new();
-    for (path, entry) in tree.iter() {
-        if entry.mode == FileMode::Symlink || table.in_file(path).next().is_some() {
-            continue;
-        }
-        if let Some(side) = load(store, None, path, &entry.blob, None)?.filter(|side| !side.file.has_errors) {
-            files.push((path.to_owned(), None, Some(side)));
-        }
-    }
-    Ok(diff(table, lane, &files, &Identities::new()))
+    let paths: Vec<(PathBuf, BlobId)> = tree
+        .iter()
+        .filter(|(path, entry)| entry.mode != FileMode::Symlink && table.in_file(path).next().is_none())
+        .map(|(path, entry)| (path.to_owned(), entry.blob))
+        .collect();
+    let files: Vec<(&PathBuf, Option<BlobId>, Option<BlobId>)> =
+        paths.iter().map(|(path, blob)| (path, None, Some(*blob))).collect();
+    new_files(store, table, lane, &files, &Identities::new())
 }
 
 /// One event in the life of a symbol.

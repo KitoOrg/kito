@@ -499,9 +499,13 @@ lanes that change one function per file:
 | 500 files changed | 1,000 | 299 ms | 30 ms |
 | 50 files changed, the main lane is 550 to 650 files ahead | 100 | 123–136 ms | 123–136 ms |
 
-On 5,000 files the first two take 37 ms and 317 ms. The target is met; the
-first version took 2.1 s for the first row, and what changed is in
-[`benchmarks.md`](benchmarks.md).
+These are without the git commit of each integration. With it, as by
+default, the three rows take 135–145 ms, 447–511 ms and 185–245 ms: the
+target is met for a lane that is up to date and is at the limit for one
+that is 600 files behind, whose working copy is rewritten in the same
+time. On 5,000 files the first two rows take 37 ms and 317 ms. The first
+version took 2.1 s for the first row (and a second more for the commit);
+what changed is in [`benchmarks.md`](benchmarks.md).
 
 ```bash
 cargo run --release -p kitod --example scale -- --files 50000

@@ -50,10 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(full, file(i, 0))?;
     }
     let mut repo = Repo::init(&root)?;
-    // The export to git is measured apart: it is not part of either target.
+    // The export to git is not part of either target: it is on only with
+    // `--git-export`, to see what the mirror costs.
+    let export = args.iter().any(|a| a == "--git-export");
     std::fs::write(
         root.join(".kito/config.toml"),
-        "[author]\nname = \"ada\"\n[git]\nexport_on_checkpoint = false\n",
+        format!("[author]\nname = \"ada\"\n[git]\nexport_on_checkpoint = {export}\n"),
     )?;
     repo.reload_config()?;
     let started = Instant::now();
@@ -63,7 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file(0, 0).len() / 1000,
         started.elapsed()
     );
+    let started = Instant::now();
     repo.checkpoint("start")?;
+    if export {
+        println!("first checkpoint, exported to git: {:.1?}", started.elapsed());
+    }
 
     // What the first capture wrote is still on its way to the disk: the
     // measures that follow are not about that.

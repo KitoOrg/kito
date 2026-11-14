@@ -442,6 +442,9 @@ pub struct Repo {
     pub(crate) lanes: BTreeMap<LaneId, crate::lanes::LaneAt>,
     /// Parsed versions of the files captured most recently.
     pub(crate) parse_cache: semantic::ParseCache,
+    /// The last checkpoint exported to git while it was the head of the
+    /// main lane, and the files at that point.
+    exported: Option<(kito_core::CheckpointId, Tree)>,
     pub(crate) clock: HlcClock,
     pub(crate) counters: Counters,
     /// Files being written right now, kept up to date by whoever follows
@@ -512,6 +515,7 @@ impl Repo {
             main,
             lanes: BTreeMap::new(),
             parse_cache: semantic::ParseCache::default(),
+            exported: None,
             clock: HlcClock::new(),
             counters: Counters::default(),
             writing: std::sync::Arc::default(),
@@ -1091,7 +1095,26 @@ impl Repo {
 
     /// Exports the checkpoints not yet exported to git.
     pub fn export_git(&mut self) -> Result<Vec<(String, String)>> {
-        let done = kito_git::export(&mut self.store, &self.root, &self.config.export_options())?;
+        // The files at the last checkpoint exported are remembered: the
+        // next commit is made from what changed since, not from the log.
+        let known = match (&self.exported, self.main.head) {
+            (Some((exported, exported_tree)), Some(head)) => {
+                Some(kito_git::Known { exported: *exported, exported_tree, head, tree: &self.main.tree })
+            }
+            _ => None,
+        };
+        let done = kito_git::export_known(
+            &mut self.store,
+            &self.root,
+            &self.config.export_options(),
+            known.as_ref(),
+        )?;
+        self.exported = match (self.store.checkpoints().next_back(), self.main.head) {
+            (Some(last), Some(head)) if last.head == head && last.git_commit.is_some() => {
+                Some((last.id, self.main.tree.clone()))
+            }
+            _ => None,
+        };
         Ok(done.into_iter().map(|e| (e.checkpoint.to_string(), hex20(&e.commit))).collect())
     }
 

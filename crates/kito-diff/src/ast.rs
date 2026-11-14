@@ -96,6 +96,12 @@ impl Identities {
         self.by_start.is_empty()
     }
 
+    /// `true` if no symbol is known in advance and none may be coming back:
+    /// the symbols of new files are then simply new.
+    pub fn knows_nothing(&self) -> bool {
+        self.by_start.is_empty() && self.gone.is_empty()
+    }
+
     /// A symbol with this ID was removed from `file`, where it had this
     /// enclosing symbol, kind and name. If a new symbol shows up in the
     /// same place with the same name, it is that symbol coming back, and

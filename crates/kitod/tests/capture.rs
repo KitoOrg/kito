@@ -328,6 +328,112 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
 }
 
 #[test]
+fn many_new_files_at_once_give_the_symbols_they_give_one_by_one() {
+    isolate_identity();
+    // More files than are read in one group, with nested symbols, another
+    // language, a file that is not code and one that does not parse.
+    let mut files: Vec<(PathBuf, String)> = (0..300)
+        .map(|i| {
+            let content = format!(
+                "export class C{i} {{\n  m(): number {{\n    return {i};\n  }}\n}}\n\nexport function f{i}(): number {{\n  return {i} + 1;\n}}\n"
+            );
+            (PathBuf::from(format!("src/d{:02}/f{i:03}.ts", i % 7)), content)
+        })
+        .collect();
+    files.push(("src/broken.ts".into(), "export function (: {\n".into()));
+    files.push(("notes.md".into(), "# Notes\n".into()));
+    files.push(("tool.py".into(), "def tool():\n    return 1\n".into()));
+    files.sort();
+
+    let all_at_once = tempfile::tempdir().unwrap();
+    let mut a = Repo::init(all_at_once.path()).unwrap();
+    for (path, content) in &files {
+        write(all_at_once.path(), path.to_str().unwrap(), content);
+    }
+    a.scan().unwrap();
+
+    let one_by_one = tempfile::tempdir().unwrap();
+    let mut b = Repo::init(one_by_one.path()).unwrap();
+    for (path, content) in &files {
+        write(one_by_one.path(), path.to_str().unwrap(), content);
+        b.scan().unwrap();
+    }
+
+    let table = |repo: &Repo| -> Vec<(SymbolId, SymbolEntry)> {
+        repo.symbols().iter().map(|(id, entry)| (id, entry.clone())).collect()
+    };
+    assert_eq!(table(&a).len(), 300 * 3 + 1);
+    assert_eq!(table(&a), table(&b));
+    assert_eq!(kito_state(&a), kito_state(&b));
+    assert!(a.store().verify().unwrap().is_ok());
+    // And each of them has its story.
+    assert_eq!(story(&a, "src/d03/f199.ts", "C199.m"), ["method `m` created in src/d03/f199.ts"]);
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_export_from_memory_gives_the_commit_an_export_from_the_log_gives() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("a");
+    fs::create_dir_all(&root).unwrap();
+    let mut repo = Repo::init(&root).unwrap();
+    write(&root, ".kito/config.toml", "[git]\nexport_on_checkpoint = false\n");
+    repo.reload_config().unwrap();
+    write(&root, ".gitignore", ".kito/\n");
+    write(&root, "src/keep.ts", "export const keep = 1;\n");
+    write(&root, "src/edit.ts", "export function edit(): number {\n  return 1;\n}\n");
+    write(&root, "src/gone.ts", "export const gone = 1;\n");
+    write(&root, "old/name.txt", "moved as it is\n");
+    write(&root, "run.sh", "#!/bin/sh\n");
+    repo.checkpoint("one").unwrap();
+    // The first export reads the log; the daemon remembers the files.
+    assert_eq!(repo.export_git().unwrap().len(), 1);
+
+    // Every kind of change, then a checkpoint that is not exported yet.
+    write(&root, "src/edit.ts", "export function edit(): number {\n  return 2;\n}\n");
+    write(&root, "src/deep/new.ts", "export const fresh = 1;\n");
+    fs::remove_file(root.join("src/gone.ts")).unwrap();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::rename(root.join("old/name.txt"), root.join("new/name.txt")).unwrap();
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    repo.checkpoint("two").unwrap();
+
+    // A copy of the repository, opened afresh, knows nothing and exports
+    // from the log; the original exports from what it remembers. The commit
+    // must be the same, to the last bit.
+    let copy = tmp.path().join("b");
+    copy_dir(&root, &copy);
+    let from_memory = repo.export_git().unwrap();
+    let mut fresh = Repo::open(&copy).unwrap();
+    assert_eq!(from_memory, fresh.export_git().unwrap());
+    assert_eq!(from_memory.len(), 1);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), git(&copy, &["rev-parse", "HEAD"]));
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+    git(&root, &["fsck", "--strict", "--no-dangling"]);
+    let files = git(&root, &["ls-tree", "-r", "HEAD"]);
+    assert!(files.contains("100755 blob") && files.contains("\tnew/name.txt"), "{files}");
+    assert!(files.contains("\tsrc/deep/new.ts") && files.contains("\tsrc/keep.ts"), "{files}");
+    assert!(!files.contains("gone.ts") && !files.contains("old/"), "{files}");
+    assert_eq!(
+        git(&root, &["show", "HEAD:src/edit.ts"]),
+        "export function edit(): number {\n  return 2;\n}\n"
+    );
+}
+
+#[test]
 fn a_git_repository_is_imported_and_then_continued() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
