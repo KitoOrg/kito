@@ -917,6 +917,9 @@ fn cmd_rename(cli: &Cli, symbol: &str, new_name: &str, lane: &Option<String>) ->
         println!("Its uses took the new name:");
         done.references_updated.iter().for_each(|place| println!("  {place}"));
     }
+    for note in &done.notes {
+        println!("Note: {note}");
+    }
     if !done.possible_references.is_empty() {
         println!("The old name is still written here (not touched: they may be uses of it):");
         done.possible_references.iter().for_each(|place| println!("  {place}"));

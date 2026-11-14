@@ -41,6 +41,8 @@ pub struct Prepared {
     settled: Vec<ConflictId>,
     /// Renames that reached the other side's uses of the symbol.
     propagated: Vec<AutoResolution>,
+    /// Language servers that failed while the uses were looked for.
+    problems: Vec<String>,
 }
 
 /// What [`Repo::prepare_integration`] found.
@@ -365,13 +367,18 @@ impl Repo {
         if !outcome.conflicts.is_empty() {
             let infos = self.record_conflicts(lane, &outcome.conflicts, &open, &same_texts)?;
             let mut result = IntegrationResult::new(lane.to_string(), Outcome::Conflicts);
-            result.message = Some(format!(
+            let mut message = format!(
                 "{} to decide with kito.resolve_conflict (or `kito resolve`), then ask again",
                 match infos.iter().filter(|c| c.resolution.is_none()).count() {
                     1 => "1 conflict".to_owned(),
                     n => format!("{n} conflicts"),
                 }
-            ));
+            );
+            // Why the uses of a renamed symbol are asked about and not known.
+            for problem in answers.iter().flat_map(|answers| &answers.problems) {
+                message.push_str(&format!("; {problem}"));
+            }
+            result.message = Some(message);
             result.conflicts = infos;
             return Ok(Preparation::Done(Box::new(result)));
         }
@@ -407,6 +414,7 @@ impl Repo {
             outcome,
             settled,
             propagated,
+            problems: answers.map(|answers| answers.problems.clone()).unwrap_or_default(),
         })))
     }
 
@@ -631,6 +639,9 @@ impl Repo {
             }
         }
         self.fast_forward(lane, checkpoint.id)?;
+        if !prepared.problems.is_empty() && result.message.is_none() {
+            result.message = Some(prepared.problems.join("; "));
+        }
 
         result.auto_resolutions = prepared
             .outcome

@@ -198,7 +198,15 @@ async fn a_server_that_fails_is_stopped_and_the_heuristic_answers() {
 }
 
 fn installed(program: &str) -> bool {
-    Command::new(program).arg("--version").output().is_ok_and(|out| out.status.success())
+    let found = Command::new("sh").args(["-c", &format!("command -v {program}")]).output();
+    found.is_ok_and(|out| out.status.success())
+}
+
+/// A test of a real server is skipped where the server is not installed,
+/// unless `KITO_TEST_REQUIRE_SERVERS` says it must run.
+fn skip(what: &str) {
+    assert!(std::env::var_os("KITO_TEST_REQUIRE_SERVERS").is_none(), "{what} is not installed");
+    eprintln!("{what} is not installed: skipped");
 }
 
 /// The TypeScript package the `tsc` on the path belongs to: the server
@@ -213,7 +221,7 @@ fn typescript_package() -> Option<PathBuf> {
 #[tokio::test]
 async fn the_typescript_server_follows_a_symbol_into_a_lane() {
     let Some(typescript) = typescript_package().filter(|_| installed("typescript-language-server")) else {
-        eprintln!("typescript-language-server or typescript is not installed: skipped");
+        skip("typescript-language-server, or a TypeScript with a tsserver for it,");
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
@@ -279,13 +287,16 @@ async fn the_typescript_server_follows_a_symbol_into_a_lane() {
 #[tokio::test]
 async fn the_go_server_follows_a_symbol_into_a_lane() {
     if !installed("gopls") || !installed("go") {
-        eprintln!("gopls is not installed: skipped");
+        skip("gopls (or go)");
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
+    // Not the temporary directory itself: its name starts with a dot, and
+    // the Go tools do not look into directories named like that.
+    let root = tmp.path().join("project");
     let web = "package web\n\nimport \"app/users\"\n\nfunc Profile(id string) string {\n\treturn users.GetUser(id)\n}\n";
     let main = World::on_disk(
-        tmp.path(),
+        &root,
         &[
             ("go.mod", "module app\n\ngo 1.21\n"),
             ("users/users.go", "package users\n\nfunc GetUser(id string) string {\n\treturn id\n}\n\nfunc Twice(id string) string {\n\treturn GetUser(GetUser(id))\n}\n"),
@@ -299,7 +310,7 @@ async fn the_go_server_follows_a_symbol_into_a_lane() {
         timeout_secs: 120,
         options: None,
     };
-    let server = LspProvider::new("gopls", config, tmp.path());
+    let server = LspProvider::new("gopls", config, &root);
     let get_user = main.id("users/users.go", "GetUser");
     let found = server.usages(&main.snapshot(), get_user).await.unwrap();
     assert_eq!(

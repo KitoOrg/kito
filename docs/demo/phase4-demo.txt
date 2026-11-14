@@ -1,0 +1,142 @@
+# 1. With git: alice renames getUser to fetchUser, bob adds a file that uses getUser
+
+$ git merge -q --no-edit alice
+
+$ git merge --no-edit bob
+Merge made by the 'ort' strategy.
+ src/billing.ts | 5 +++++
+ 1 file changed, 5 insertions(+)
+ create mode 100644 src/billing.ts
+
+$ tsc --noEmit -p .
+src/billing.ts(1,10): error TS2305: Module '"./auth"' has no exported member 'getUser'.
+(exit status 2)
+
+
+# 2. With Kito and a language server (typescript-language-server)
+
+$ kito init
+Kito repository created in /tmp/tmp.kDsWAOe2L7/with-server/.kito
+The daemon is running: every save is recorded from now on.
+
+$ kito checkpoint -m start
+ckpt#1 created and exported as git commit 165e26693d
+
+$ kito lane open alice --task rename getUser to fetchUser
+lane/1 opened for alice on ckpt#1.
+Working copy: /tmp/tmp.kDsWAOe2L7/with-server/.kito/lanes/1/work
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito lane open bob --task billing
+lane/2 opened for bob on ckpt#1.
+Working copy: /tmp/tmp.kDsWAOe2L7/with-server/.kito/lanes/2/work
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+# alice renames the function: its uses in her lane follow
+
+$ kito rename src/auth.ts:getUser fetchUser --lane lane/1
+`getUser` is now `fetchUser` in src/auth.ts (symbol 0#0).
+Its uses took the new name:
+  src/web.ts:1
+  src/web.ts:4
+
+# bob, who knows nothing of it, adds his file
+
+$ kito integrate lane/1
+lane/1: integrated as ckpt#2 (git e4cd595d93), verified in 2.4 s
+
+$ kito integrate lane/2
+lane/2: integrated as ckpt#3 (git 420722a3a6), verified in 2.4 s
+  rename followed: ts/auth.getUser#0 is now `fetchUser` also in src/billing.ts:1, src/billing.ts:4
+
+$ cat src/billing.ts
+import { fetchUser } from "./auth";
+
+export function invoice(id: string): string {
+  return "invoice for " + fetchUser(id);
+}
+
+$ kito log -n 2
+◆ ckpt#3  billing  (git 420722a3a6)
+  99955676  2026-11-14 19:16:16  bob        FileAdd    src/billing.ts  [integrate lane/2: billing]
+      ↳ function `invoice` created in src/billing.ts
+◆ ckpt#2  rename getUser to fetchUser  (git e4cd595d93)
+  1b4704ac  2026-11-14 19:16:13  alice      TextEdit   src/web.ts  +2 −2  [integrate lane/1: rename getUser to fetchUser]
+      ↳ renamed `getUser` → `fetchUser`  (src/auth.ts)
+      ↳ `profile` body changed (+1 −1)
+
+$ kito why src/auth.ts:fetchUser
+function fetchUser  (src/auth.ts)  symbol 0#0
+  2026-11-14 19:16:10  francesco  function `getUser` created in src/auth.ts
+  2026-11-14 19:16:11  alice      renamed `getUser` → `fetchUser`, on lane/1
+  2026-11-14 19:16:13  alice      renamed `getUser` → `fetchUser`  [integrate lane/1: rename getUser to fetchUser]
+
+$ git log --oneline
+420722a billing
+e4cd595 rename getUser to fetchUser
+165e266 start
+
+
+# 3. With Kito and no language server: it asks
+
+$ kito init
+Kito repository created in /tmp/tmp.kDsWAOe2L7/without/.kito
+The daemon is running: every save is recorded from now on.
+
+$ kito checkpoint -m start
+ckpt#1 created and exported as git commit 89dd307c3d
+
+$ kito lane open alice --task rename getUser to fetchUser
+lane/1 opened for alice on ckpt#1.
+Working copy: /tmp/tmp.kDsWAOe2L7/without/.kito/lanes/1/work
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito lane open bob --task billing
+lane/2 opened for bob on ckpt#1.
+Working copy: /tmp/tmp.kDsWAOe2L7/without/.kito/lanes/2/work
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+# alice renames by hand, everywhere she finds the name; bob adds his file
+
+$ kito integrate lane/1
+lane/1: integrated as ckpt#2 (git 16b312ed7f), verified in 2.4 s
+
+$ kito integrate lane/2
+lane/2: 1 conflict
+  conflict#1   lane/2   semantic_ref   getUser  (src/auth.ts)  [to decide]
+  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again.
+  For a semantic_ref (uses that may be of a renamed symbol): `kito resolve <conflict> --rewrite | --keep`.
+(exit status 1)
+
+$ kito conflicts conflict#1
+conflict#1   lane/2   semantic_ref   getUser  (src/auth.ts)  [to decide]
+
+--- at the common starting point
+getUser
+
+--- on the main lane
+renamed: getUser → fetchUser
+
+--- on lane/2
+uses of `getUser` that may be of this symbol:
+src/billing.ts:1: import { getUser } from "./auth";
+src/billing.ts:4: return "invoice for " + getUser(id);
+
+$ kito resolve conflict#1 --rewrite
+conflict#1 decided. Nothing else to decide: `kito integrate lane/2` applies it.
+
+$ kito integrate lane/2
+lane/2: integrated as ckpt#3 (git 5cd39ec641), verified in 2.3 s
+  rename followed: ts/auth.getUser#0 is now `fetchUser` also in src/billing.ts:1, src/billing.ts:4
+
+$ cat src/billing.ts
+import { fetchUser } from "./auth";
+
+export function invoice(id: string): string {
+  return "invoice for " + fetchUser(id);
+}
+
+$ git log --oneline
+5cd39ec billing
+16b312e rename getUser to fetchUser
+89dd307 start

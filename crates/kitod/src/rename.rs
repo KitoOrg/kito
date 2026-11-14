@@ -29,6 +29,10 @@ pub struct RenameResult {
     /// outside the symbol's definition: they may be uses of it, and were
     /// not touched.
     pub possible_references: Vec<String>,
+    /// What went wrong while asking who uses the symbol: a language server
+    /// that failed, and whose place the reading of the syntax took.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 fn is_word(c: u8) -> bool {
@@ -257,6 +261,7 @@ impl Repo {
             ops: ops.iter().map(|op| op.id.to_string()).collect(),
             references_updated,
             possible_references,
+            notes: uses.map(|uses| uses.problems.clone()).unwrap_or_default(),
         })
     }
 }

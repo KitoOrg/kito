@@ -387,6 +387,12 @@ struct Running {
     stdin: ChildStdin,
     messages: Receiver<Option<Value>>,
     next_id: u64,
+    /// The work the server said it began and has not said it ended.
+    busy: std::collections::HashSet<String>,
+    /// It said it began some work, since this was last set to `false`.
+    reported: bool,
+    /// No question was answered yet: the project may still be loading.
+    fresh: bool,
 }
 
 /// Reads one message: headers, an empty line, a JSON body.
@@ -451,6 +457,9 @@ impl Running {
             stdin,
             messages,
             next_id: 0,
+            busy: Default::default(),
+            reported: false,
+            fresh: true,
         };
         let root_uri = uri_of(root, Path::new(""));
         let root_uri = root_uri.trim_end_matches('/');
@@ -469,7 +478,8 @@ impl Running {
                         "references": { "dynamicRegistration": false },
                         "definition": { "dynamicRegistration": false, "linkSupport": false }
                     },
-                    "workspace": { "workspaceFolders": true, "configuration": true }
+                    "workspace": { "workspaceFolders": true, "configuration": true },
+                    "window": { "workDoneProgress": true }
                 }
             }),
             deadline,
@@ -499,6 +509,76 @@ impl Running {
         self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
     }
 
+    /// Takes note of something the server sent that is not the answer to a
+    /// request: what it asks is answered with what little a client that
+    /// only asks questions has to say, and what it tells of its work in
+    /// progress is remembered.
+    fn incoming(&mut self, message: &Value) -> Result<()> {
+        match (message.get("id"), message.get("method").and_then(Value::as_str)) {
+            (Some(their), Some(asked)) => {
+                let result = match asked {
+                    "workspace/configuration" => {
+                        let items = message["params"]["items"].as_array().map_or(0, Vec::len);
+                        Value::Array(vec![Value::Null; items])
+                    }
+                    "workspace/workspaceFolders" => {
+                        json!([{ "uri": uri_of(&self.root, Path::new("")), "name": "kito" }])
+                    }
+                    _ => Value::Null,
+                };
+                self.send(&json!({ "jsonrpc": "2.0", "id": their, "result": result }))
+            }
+            (None, Some("$/progress")) => {
+                let token = message["params"]["token"].to_string();
+                match message["params"]["value"]["kind"].as_str() {
+                    Some("begin") => {
+                        self.busy.insert(token);
+                        self.reported = true;
+                    }
+                    Some("end") => {
+                        self.busy.remove(&token);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            // Other notifications, and answers to nothing we wait for.
+            _ => Ok(()),
+        }
+    }
+
+    fn next_message(&mut self, wait: Duration) -> Result<Option<Value>> {
+        match self.messages.recv_timeout(wait) {
+            Ok(Some(message)) => Ok(Some(message)),
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => Err(self.fail("it ended")),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+        }
+    }
+
+    /// Waits until the server has nothing in progress. A server asked right
+    /// after it starts, or right after it is shown new documents, answers
+    /// with what it has loaded so far: it says when it begins to load a
+    /// project and when it is done, and for `grace` we wait for it to begin.
+    fn settle(&mut self, grace: Duration, deadline: Instant) -> Result<()> {
+        const QUIET: Duration = Duration::from_millis(40);
+        let started = Instant::now();
+        let mut last = Instant::now();
+        self.reported = false;
+        loop {
+            let waited_enough = self.reported || started.elapsed() >= grace;
+            if self.busy.is_empty() && waited_enough && last.elapsed() >= QUIET {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout { server: self.name.clone(), seconds: self.timeout });
+            }
+            if let Some(message) = self.next_message(Duration::from_millis(10))? {
+                self.incoming(&message)?;
+                last = Instant::now();
+            }
+        }
+    }
+
     /// Sends a request and waits for its answer, answering meanwhile what
     /// the server asks in turn.
     fn request(&mut self, method: &str, params: Value, deadline: Instant) -> Result<Value> {
@@ -507,39 +587,19 @@ impl Running {
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let message = match self.messages.recv_timeout(left) {
-                Ok(Some(message)) => message,
-                Ok(None) | Err(RecvTimeoutError::Disconnected) => return Err(self.fail("it ended")),
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(Error::Timeout { server: self.name.clone(), seconds: self.timeout })
-                }
+            let Some(message) = self.next_message(left)? else {
+                return Err(Error::Timeout { server: self.name.clone(), seconds: self.timeout });
             };
-            match (message.get("id"), message.get("method").and_then(Value::as_str)) {
-                // A request of the server's: answered with what little a
-                // client that only asks questions has to say.
-                (Some(their), Some(asked)) => {
-                    let result = match asked {
-                        "workspace/configuration" => {
-                            let items = message["params"]["items"].as_array().map_or(0, Vec::len);
-                            Value::Array(vec![Value::Null; items])
-                        }
-                        "workspace/workspaceFolders" => {
-                            json!([{ "uri": uri_of(&self.root, Path::new("")), "name": "kito" }])
-                        }
-                        _ => Value::Null,
-                    };
-                    self.send(&json!({ "jsonrpc": "2.0", "id": their, "result": result }))?;
-                }
-                (Some(theirs), None) if theirs.as_u64() == Some(id) => {
-                    if let Some(error) = message.get("error") {
-                        let text = error["message"].as_str().unwrap_or("request refused").to_owned();
-                        return Err(self.fail(format!("{method}: {text}")));
-                    }
-                    return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-                }
-                // Notifications, and answers to nothing we are waiting for.
-                _ => {}
+            let answered = message.get("method").is_none() && message["id"].as_u64() == Some(id);
+            if !answered {
+                self.incoming(&message)?;
+                continue;
             }
+            if let Some(error) = message.get("error") {
+                let text = error["message"].as_str().unwrap_or("request refused").to_owned();
+                return Err(self.fail(format!("{method}: {text}")));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
@@ -557,6 +617,16 @@ impl Running {
                 } }),
             )?;
         }
+        // Loading a project takes a server from a moment to minutes, and
+        // most begin a little after they are shown the first document.
+        let grace = match self.fresh {
+            true => Duration::from_secs(3),
+            false => Duration::from_millis(150),
+        };
+        // (Never more than half of the time the question has.)
+        let grace = grace.min(deadline.saturating_duration_since(Instant::now()) / 2);
+        self.settle(grace, deadline)?;
+        self.fresh = false;
         let mut answers = Vec::with_capacity(questions.len());
         let mut failure = None;
         for question in questions {
