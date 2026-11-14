@@ -177,6 +177,7 @@ impl World {
             lane: Side { tree: &state.tree, symbols: &state.table },
             blob: &|id| blobs.get(id).cloned(),
             resolutions: &resolutions,
+            parse: None,
         })
     }
 

@@ -688,30 +688,75 @@ impl Repo {
 
     fn scan_work(&mut self, work: &mut Work) -> Result<Vec<Op>> {
         self.counters.scans += 1;
+        // The names first: reading directories is quick. What takes time in
+        // a large repository is asking the file system about every file,
+        // and that is done by several threads.
         let mut found = Vec::new();
         Self::walk(work, Path::new(""), &mut found);
-        let mut candidates = BTreeSet::new();
-        let mut seen = HashSet::new();
-        for (rel, meta) in found {
-            let unchanged = work.tree.contains(&rel) && work.stat.get(&rel) == Some(&FileStat::of(&meta));
-            if !unchanged {
-                candidates.insert(rel.clone());
+        let (mut candidates, tracked_seen) = {
+            let work: &Work = work;
+            let look = |files: &[PathBuf]| {
+                let mut candidates = Vec::new();
+                let mut tracked_seen = 0usize;
+                for rel in files {
+                    let stat = fs::symlink_metadata(work.root.join(rel)).ok().map(|meta| FileStat::of(&meta));
+                    match work.stat.get(rel) {
+                        // Only what the stat cache does not vouch for is
+                        // looked at closely. The cache holds tracked files
+                        // only: a hit is also a tracked file seen.
+                        Some(known) if Some(known) == stat.as_ref() => tracked_seen += 1,
+                        Some(_) => {
+                            tracked_seen += 1;
+                            candidates.push(rel.clone());
+                        }
+                        // A tracked file stays tracked whatever the ignore
+                        // rules say now.
+                        None if work.tree.contains(rel) => {
+                            tracked_seen += 1;
+                            candidates.push(rel.clone());
+                        }
+                        None if !work.ignore.is_ignored(rel, false) => candidates.push(rel.clone()),
+                        None => {}
+                    }
+                }
+                (candidates, tracked_seen)
+            };
+            let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(8);
+            if found.len() < 4096 || workers < 2 {
+                look(&found)
+            } else {
+                let look = &look;
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = found
+                        .chunks(found.len().div_ceil(workers))
+                        .map(|part| scope.spawn(move || look(part)))
+                        .collect();
+                    let mut all = (Vec::new(), 0usize);
+                    for handle in handles {
+                        let (candidates, tracked_seen) = handle.join().expect("a scan worker panicked");
+                        all.0.extend(candidates);
+                        all.1 += tracked_seen;
+                    }
+                    all
+                })
             }
-            seen.insert(rel);
-        }
+        };
         // Files of the tree that the walk did not come across: removed, or
-        // now covered by an ignore rule (in which case they stay tracked).
-        for (path, _) in work.tree.iter() {
-            if !seen.contains(path) {
-                candidates.insert(path.to_owned());
-            }
+        // inside a directory an ignore rule now covers (in which case they
+        // stay tracked).
+        if tracked_seen < work.tree.len() {
+            let seen: HashSet<&Path> = found.iter().map(PathBuf::as_path).collect();
+            candidates.extend(
+                work.tree.iter().filter(|(path, _)| !seen.contains(path)).map(|(path, _)| path.to_owned()),
+            );
         }
         let intent = work.intent;
         self.capture_work(work, candidates, intent, &Identities::new(), Unsettled::Wait)
     }
 
-    /// Non-ignored files and links under `dir`, without following links.
-    fn walk(work: &Work, dir: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) {
+    /// Files and links under `dir`, without following links and without
+    /// entering ignored directories.
+    fn walk(work: &Work, dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(work.root.join(dir)) else { return };
         for entry in entries.flatten() {
             let rel = dir.join(entry.file_name());
@@ -720,10 +765,8 @@ impl Repo {
                 if !work.ignore.is_ignored(&rel, true) {
                     Self::walk(work, &rel, out);
                 }
-            } else if (kind.is_file() || kind.is_symlink()) && !work.ignore.is_ignored(&rel, false) {
-                if let Ok(meta) = entry.metadata() {
-                    out.push((rel, meta));
-                }
+            } else if kind.is_file() || kind.is_symlink() {
+                out.push(rel);
             }
         }
     }
@@ -814,7 +857,11 @@ impl Repo {
                     if !work.ignore.is_ignored(&rel, true) {
                         let mut found = Vec::new();
                         Self::walk(work, &rel, &mut found);
-                        files.extend(found.into_iter().map(|(p, _)| p));
+                        files.extend(found.into_iter().filter(|file| {
+                            work.stat.contains_key(file)
+                                || work.tree.contains(file)
+                                || !work.ignore.is_ignored(file, false)
+                        }));
                     }
                     files.extend(tracked_below);
                     // A file replaced by a directory with the same name.

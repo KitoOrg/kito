@@ -396,6 +396,57 @@ fn renamed_and_removed_files() {
 }
 
 #[test]
+fn files_only_the_main_lane_changed_are_not_even_read() {
+    // Forty modules. The main lane goes on in thirty of them while the lane
+    // edits one function of another: integrating reads that module only.
+    let files: Vec<(String, String)> = (0..40).map(|n| (format!("src/m{n}.ts"), module(3))).collect();
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let mut w = World::new(&files);
+    let lane = w.open();
+    for n in 0..30 {
+        let edited = module(3).replace("return y * 2;", &format!("return y * {};", n + 3));
+        w.on_main(&[(&format!("src/m{n}.ts"), Some(&edited))]);
+    }
+    let edited = module(3).replace("const y = x + 1;", "const y = x + 10;");
+    w.on_lane(lane, &[("src/m35.ts", Some(&edited))]);
+
+    let read = std::cell::RefCell::new(std::collections::BTreeSet::new());
+    let parser = |path: &std::path::Path, _: &BlobId, content: &[u8]| {
+        read.borrow_mut().insert(path.to_owned());
+        kito_parse::parse(kito_parse::dialect_for_path(path)?, content)
+    };
+    let (state, base) = &w.lanes[lane];
+    let outcome = kito_merge::merge(&kito_merge::Input {
+        base: kito_merge::Side { tree: &base.tree, symbols: &base.table },
+        main: kito_merge::Side { tree: &w.main.tree, symbols: &w.main.table },
+        lane: kito_merge::Side { tree: &state.tree, symbols: &state.table },
+        blob: &|id| w.blobs.get(id).cloned(),
+        resolutions: &Default::default(),
+        parse: Some(&parser),
+    });
+    assert!(outcome.conflicts.is_empty(), "{:?}", describe(&outcome));
+    assert_eq!(outcome.files.keys().collect::<Vec<_>>(), [std::path::Path::new("src/m35.ts")]);
+    assert_eq!(read.into_inner().into_iter().collect::<Vec<_>>(), [std::path::PathBuf::from("src/m35.ts")]);
+
+    // The same when a symbol crossed files on the main lane: the file it
+    // went to is tied to the lane's work, and is read.
+    let mut w = shop();
+    let lane = w.open();
+    let start = SHOP.find("export function discount").unwrap();
+    let end = SHOP.find("export class Cart").unwrap();
+    let (function, rest) = (&SHOP[start..end], format!("{}{}", &SHOP[..start], &SHOP[end..]));
+    w.on_main(&[("src/shop.ts", Some(&rest)), ("src/prices.ts", Some(function))]);
+    w.on_main(&[("README.md", Some("# Shop\n\nA demo, edited.\n"))]);
+    w.on_lane(
+        lane,
+        &[("src/shop.ts", Some(&SHOP.replace("return amount - cut;", "return amount - cut - 0;")))],
+    );
+    w.integrate(lane);
+    assert!(w.main_file("src/prices.ts").contains("return amount - cut - 0;"));
+    assert!(w.main_file("README.md").contains("edited"));
+}
+
+#[test]
 fn a_lane_that_did_nothing_changes_nothing() {
     let mut w = shop();
     let lane = w.open();

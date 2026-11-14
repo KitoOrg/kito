@@ -140,8 +140,8 @@ impl Repo {
         kito_lane::remove(workdir).map_err(Error::io(workdir))?;
         // The main directory vouches for the files that have not changed
         // since their last capture.
-        let holds = |path: &Path, entry: &TreeEntry| {
-            self.main.tree.get(path) == Some(entry) && self.main.stat.contains_key(path)
+        let holds = |path: &Path, entry: &TreeEntry, meta: &fs::Metadata| {
+            self.main.tree.get(path) == Some(entry) && self.main.stat.get(path) == Some(&FileStat::of(meta))
         };
         let source = kito_lane::Source { root: &self.root, holds: &holds };
         let store = &self.store;
@@ -236,7 +236,6 @@ impl Repo {
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
-        self.save_lane(id)?;
         self.lane_info(id)
     }
 

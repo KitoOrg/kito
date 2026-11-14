@@ -100,7 +100,7 @@ fn files_already_on_disk_are_cloned_or_copied_and_stay_independent() {
     fs::remove_file(main.join("empty.txt")).unwrap();
 
     let dest = tmp.path().join("lane");
-    let holds = |path: &Path, _: &TreeEntry| path != Path::new("README.md");
+    let holds = |path: &Path, _: &TreeEntry, _: &fs::Metadata| path != Path::new("README.md");
     let source = Source { root: &main, holds: &holds };
     let done = materialize(&repo.tree, &dest, Some(&source), &|id| repo.blob(id)).unwrap();
     assert_eq!(done.files, 5);
@@ -114,6 +114,31 @@ fn files_already_on_disk_are_cloned_or_copied_and_stay_independent() {
     assert_eq!(fs::read(main.join("src/deep/er/main.rs")).unwrap(), b"fn main() {}\n");
     fs::write(main.join("scripts/run.sh"), "#!/bin/sh\necho changed\n").unwrap();
     assert_eq!(fs::read(dest.join("scripts/run.sh")).unwrap(), b"#!/bin/sh\necho hi\n");
+}
+
+#[test]
+fn a_source_that_changes_while_it_is_taken_is_not_used() {
+    let repo = sample();
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("main");
+    materialize(&repo.tree, &main, None, &|id| repo.blob(id)).unwrap();
+    // What the main directory has of this file is not what the tree says,
+    // and the source finds out only when asked again, after the copy.
+    fs::write(main.join("README.md"), "# Changed while the lane was being created\n").unwrap();
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let holds = |path: &Path, _: &TreeEntry, _: &fs::Metadata| {
+        path != Path::new("README.md") || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+    };
+    let source = Source { root: &main, holds: &holds };
+    let dest = tmp.path().join("lane");
+    let done = materialize(&repo.tree, &dest, Some(&source), &|id| repo.blob(id)).unwrap();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The other three regular files come from the main directory; this one
+    // and the link from the store.
+    assert_eq!(done.cloned + done.copied, 3, "{done:?}");
+    assert_eq!(done.written, 2, "{done:?}");
+    // The lane has what the tree says, not what happened to be on disk.
+    check(&repo, &dest);
 }
 
 #[test]

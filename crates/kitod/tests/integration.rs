@@ -161,8 +161,11 @@ fn a_lane_keeps_working_after_being_integrated_and_survives_a_restart() {
 
     write(&alice, "src/shop.ts", &SHOP.replace("let sum = 0;", "let sum = 0; // cents"));
     assert_eq!(repo.integrate(LaneId(1)).unwrap().result, Outcome::Integrated);
-    // Meanwhile someone saves on the main lane, without a checkpoint.
+    // Meanwhile someone saves on the main lane, without a checkpoint. An
+    // integration looks at the main directory only in the files involved:
+    // the rest is captured as it is saved (here, as the watcher would).
     write(&root, "README.md", "# Shop\n\nNow with cents.\n");
+    repo.scan().unwrap();
     // Second round of the same lane, on a function it creates now.
     let helper = "\nexport function cents(amount: number): string {\n  return `${amount} c`;\n}\n";
     write(&alice, "src/shop.ts", &(read(&alice, "src/shop.ts") + helper));

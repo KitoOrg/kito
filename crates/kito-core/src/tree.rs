@@ -6,8 +6,9 @@
 
 use crate::ids::BlobId;
 use crate::model::{FileMode, OpKind};
+use imbl::ordmap::DiffItem;
+use imbl::OrdMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,7 +31,10 @@ pub enum TreeError {
 /// File tree at a given point in the history.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tree {
-    files: BTreeMap<PathBuf, TreeEntry>,
+    // A persistent map: a copy shares everything with the original and
+    // costs nothing, whatever the number of files. A lane starts from a
+    // copy of the main tree, and gets a new one at every integration.
+    files: OrdMap<PathBuf, TreeEntry>,
 }
 
 impl Tree {
@@ -59,12 +63,23 @@ impl Tree {
         self.files.iter().map(|(p, e)| (p.as_path(), e))
     }
 
+    /// The paths at which this tree and `other` differ: a file with another
+    /// content or type, or one that only one of the two has. In path order.
+    /// What two trees share because one was copied from the other is not
+    /// even looked at: the cost follows the differences, not the files.
+    pub fn differences<'a>(&'a self, other: &'a Tree) -> impl Iterator<Item = &'a Path> {
+        self.files.diff(&other.files).map(|item| match item {
+            DiffItem::Add(path, _) | DiffItem::Remove(path, _) => path.as_path(),
+            DiffItem::Update { old: (path, _), .. } => path.as_path(),
+        })
+    }
+
     /// Files contained in the directory `dir` (at any depth).
     pub fn under<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = (&'a Path, &'a TreeEntry)> {
         // Paths are ordered by components: the descendants of `dir` are
         // contiguous and come right after `dir`.
         self.files
-            .range::<Path, _>((std::ops::Bound::Excluded(dir), std::ops::Bound::Unbounded))
+            .range::<_, Path>((std::ops::Bound::Excluded(dir), std::ops::Bound::Unbounded))
             .take_while(move |(p, _)| p.starts_with(dir))
             .map(|(p, e)| (p.as_path(), e))
     }
@@ -122,6 +137,24 @@ mod tests {
 
     fn add(path: &str, content: &str) -> OpKind {
         OpKind::FileAdd { path: path.into(), blob: blob(content), mode: FileMode::Regular }
+    }
+
+    #[test]
+    fn differences_between_two_trees() {
+        let tree = |files: &[(&str, &str)]| {
+            let mut tree = Tree::new();
+            files.iter().for_each(|(path, content)| tree.apply(&add(path, content)).unwrap());
+            tree
+        };
+        let one = tree(&[("a.txt", "1"), ("b/c.txt", "2"), ("b/d.txt", "3"), ("z.txt", "4")]);
+        let two = tree(&[("a.txt", "1"), ("b/c.txt", "changed"), ("b/e.txt", "5"), ("z.txt", "4")]);
+        let paths =
+            |a: &Tree, b: &Tree| a.differences(b).map(|p| p.display().to_string()).collect::<Vec<_>>();
+        assert_eq!(paths(&one, &two), ["b/c.txt", "b/d.txt", "b/e.txt"]);
+        assert_eq!(paths(&two, &one), ["b/c.txt", "b/d.txt", "b/e.txt"]);
+        assert!(paths(&one, &one).is_empty());
+        assert_eq!(paths(&one, &Tree::new()).len(), 4);
+        assert_eq!(paths(&Tree::new(), &two).len(), 4);
     }
 
     #[test]

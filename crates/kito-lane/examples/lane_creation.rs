@@ -51,20 +51,41 @@ fn main() {
         started.elapsed()
     );
 
-    let holds = |_: &Path, _: &TreeEntry| true;
+    let holds = |_: &Path, _: &TreeEntry, _: &std::fs::Metadata| true;
     let source = Source { root: &main, holds: &holds };
-    let mut best = None;
-    for round in 1..=3 {
+    // Lanes stay, as they do in a repository: with `--remove` each one is
+    // removed before the next is created.
+    let rounds: usize = value("--rounds").and_then(|v| v.parse().ok()).unwrap_or(5);
+    let keep = !args.iter().any(|a| a == "--remove");
+    let _ = std::process::Command::new("sync").status();
+    let mut times = Vec::new();
+    for round in 1..=rounds {
         let lane = root.join(format!("lane{round}"));
-        let started = Instant::now();
+        // What the round before left to write is flushed first: on a busy
+        // disk the measure would be of that.
+        let _ = std::process::Command::new("sync").status();
+        let (started, cpu) = (Instant::now(), cpu_seconds());
         let done = materialize(&tree, &lane, Some(&source), &read).unwrap();
-        let took = started.elapsed();
-        remove(&lane).unwrap();
+        let (took, cpu) = (started.elapsed(), cpu_seconds() - cpu);
+        if !keep {
+            remove(&lane).unwrap();
+        }
         println!(
-            "lane {round}: {:.2?}  ({} cloned without copying, {} copied, {} written from the store)",
+            "lane {round}: {:.2?}, {cpu:.2} s of processor  ({} cloned without copying, {} copied, {} written from the store)",
             took, done.cloned, done.copied, done.written
         );
-        best = Some(best.map_or(took, |b: std::time::Duration| b.min(took)));
+        times.push(took);
     }
-    println!("best: {:.2?} for {files} files", best.unwrap());
+    times.sort();
+    println!("median: {:.2?}, best: {:.2?} for {files} files", times[times.len() / 2], times[0]);
+}
+
+/// Processor time this process used so far, all threads together.
+fn cpu_seconds() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // After the command name, which may contain spaces: utime and stime
+    // are the 12th and 13th fields, in hundredths of a second.
+    let fields: Vec<&str> = stat.rsplit(')').next().unwrap_or("").split_whitespace().collect();
+    let ticks = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    (ticks(11) + ticks(12)) / 100.0
 }

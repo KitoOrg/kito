@@ -71,7 +71,15 @@ pub struct Input<'a> {
     pub blob: &'a dyn Fn(&BlobId) -> Option<Vec<u8>>,
     /// Decisions already taken: those conflicts are settled as told.
     pub resolutions: &'a HashMap<Subject, Choice>,
+    /// Parses a version of a file, given its path, the ID of its content
+    /// and the content: for a caller that keeps parsed files around.
+    /// `None`: every file is parsed here. The function returns `None` for
+    /// a file that is not to be read as a structure.
+    pub parse: Option<Parser<'a>>,
 }
+
+/// See [`Input::parse`].
+pub type Parser<'a> = &'a dyn Fn(&Path, &BlobId, &[u8]) -> Option<ParsedFile>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileOut {
@@ -233,7 +241,13 @@ fn unit_end(content: &[u8], sym_end: usize, limit: usize) -> usize {
 }
 
 impl View {
-    fn new(path: &Path, content: Vec<u8>, table: &SymbolTable) -> View {
+    fn new(
+        path: &Path,
+        blob: &BlobId,
+        content: Vec<u8>,
+        table: &SymbolTable,
+        parser: Option<Parser<'_>>,
+    ) -> View {
         let mut view = View {
             path: path.to_owned(),
             content,
@@ -246,7 +260,11 @@ impl View {
         if view.content.len() > MAX_PARSED_BYTES || is_binary(&view.content) {
             return view;
         }
-        let Some(parsed) = parse(dialect, &view.content) else { return view };
+        let parsed = match parser {
+            Some(parser) => parser(path, blob, &view.content),
+            None => parse(dialect, &view.content),
+        };
+        let Some(parsed) = parsed else { return view };
 
         // The symbols the history knows in this file, recognized as the
         // differ does: by parent, kind and name, namesakes in order.
@@ -467,34 +485,43 @@ struct Merger<'a> {
 /// Merges what the lane did since `base` into the main lane.
 pub fn merge(input: &Input<'_>) -> Outcome {
     let trees = [input.base.tree, input.main.tree, input.lane.tree];
-    let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
-    for side in [MAIN, LANE] {
-        for (path, entry) in trees[side].iter() {
-            if trees[BASE].get(path) != Some(entry) {
-                touched.insert(path.to_owned());
-            }
-        }
-        for (path, _) in trees[BASE].iter() {
-            if !trees[side].contains(path) {
-                touched.insert(path.to_owned());
-            }
-        }
-    }
-    let lane_did_something =
-        touched.iter().any(|p| trees[LANE].get(p) != trees[BASE].get(p)) || !input.resolutions.is_empty();
+    let tables = [input.base.symbols, input.main.symbols, input.lane.symbols];
     let mut merger =
         Merger { input, sides: Default::default(), changed: Default::default(), out: Outcome::default() };
-    if !lane_did_something {
+    let by_lane: BTreeSet<PathBuf> = trees[BASE].differences(trees[LANE]).map(Path::to_owned).collect();
+    if by_lane.is_empty() && input.resolutions.is_empty() {
         return merger.out;
     }
+    // A lane that stayed behind sees many files that only the main lane
+    // changed. They are as the main lane has them and are not even read,
+    // except the ones tied to the lane's work: a symbol went from one of
+    // them to a file the lane touched, or the other way round; or the main
+    // lane gave a new name to a file the lane touched.
+    let renamed_on_main = by_lane.iter().any(|p| trees[BASE].contains(p) && !trees[MAIN].contains(p));
+    let mut touched = by_lane.clone();
+    for path in trees[BASE].differences(trees[MAIN]) {
+        if by_lane.contains(path) {
+            continue;
+        }
+        let comes_from_the_lanes_files = |from: usize, to: usize| {
+            tables[from]
+                .in_file(path)
+                .any(|(id, _)| tables[to].get(id).is_some_and(|entry| by_lane.contains(&entry.file)))
+        };
+        if comes_from_the_lanes_files(MAIN, BASE)
+            || comes_from_the_lanes_files(BASE, MAIN)
+            || (renamed_on_main && !trees[BASE].contains(path))
+        {
+            touched.insert(path.to_owned());
+        }
+    }
 
-    // The three versions of every file either side touched.
-    let tables = [input.base.symbols, input.main.symbols, input.lane.symbols];
+    // The three versions of every file involved.
     for side in [BASE, MAIN, LANE] {
         for path in &touched {
             let Some(entry) = trees[side].get(path) else { continue };
             let content = (input.blob)(&entry.blob).unwrap_or_default();
-            let view = View::new(path, content, tables[side]);
+            let view = View::new(path, &entry.blob, content, tables[side], input.parse);
             let data = &mut merger.sides[side];
             if view.structural {
                 for (sym, id) in view.ids.iter().enumerate() {

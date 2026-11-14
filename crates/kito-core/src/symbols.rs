@@ -8,6 +8,7 @@
 
 use crate::ids::{LaneId, SymbolId};
 use crate::model::{Lang, OpKind, SymbolKind};
+use imbl::OrdMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,8 +37,10 @@ pub enum SymbolError {
 /// The symbols of a lane at a given point in the history.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolTable {
-    symbols: BTreeMap<SymbolId, SymbolEntry>,
-    by_file: BTreeMap<PathBuf, BTreeSet<SymbolId>>,
+    // Persistent maps, like the tree's: a copy of the table shares
+    // everything with the original and costs nothing.
+    symbols: OrdMap<SymbolId, SymbolEntry>,
+    by_file: OrdMap<PathBuf, BTreeSet<SymbolId>>,
     /// Per lane of origin, the next free counter for a new [`SymbolId`].
     next_seq: BTreeMap<LaneId, u64>,
 }

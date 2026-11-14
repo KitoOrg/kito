@@ -170,16 +170,44 @@ impl Repo {
         Ok(self.conflict_info(&conflict))
     }
 
-    fn merge_lane(&self, lane: LaneId, decisions: &HashMap<Subject, Choice>) -> Result<kito_merge::Outcome> {
+    fn merge_lane(
+        &mut self,
+        lane: LaneId,
+        decisions: &HashMap<Subject, Choice>,
+    ) -> Result<kito_merge::Outcome> {
+        // Files parsed for the merge stay parsed for the capture that
+        // records its result, and those the captures parsed are not parsed
+        // again here.
+        let cache = std::cell::RefCell::new(std::mem::take(&mut self.parse_cache));
+        let outcome = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane)).map(|at| {
+            let store = &self.store;
+            let parse = |path: &Path, blob: &BlobId, _: &[u8]| {
+                crate::semantic::load(store, Some(&mut cache.borrow_mut()), path, blob, None)
+                    .ok()
+                    .flatten()
+                    .map(|parsed| parsed.file.clone())
+            };
+            kito_merge::merge(&kito_merge::Input {
+                base: kito_merge::Side { tree: &at.base_tree, symbols: &at.base_symbols },
+                main: kito_merge::Side { tree: &self.main.tree, symbols: &self.main.symbols },
+                lane: kito_merge::Side { tree: &at.work.tree, symbols: &at.work.symbols },
+                blob: &|id| store.get_blob(id).ok().flatten(),
+                resolutions: decisions,
+                parse: Some(&parse),
+            })
+        });
+        self.parse_cache = cache.into_inner();
+        outcome
+    }
+
+    /// Captures what was saved on the main lane in the files a lane's work
+    /// touches: nothing unrecorded may be merged over, or written over.
+    /// Returns `true` if something was recorded.
+    fn capture_main_under(&mut self, lane: LaneId, also: &[PathBuf]) -> Result<bool> {
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
-        let store = &self.store;
-        Ok(kito_merge::merge(&kito_merge::Input {
-            base: kito_merge::Side { tree: &at.base_tree, symbols: &at.base_symbols },
-            main: kito_merge::Side { tree: &self.main.tree, symbols: &self.main.symbols },
-            lane: kito_merge::Side { tree: &at.work.tree, symbols: &at.work.symbols },
-            blob: &|id| store.get_blob(id).ok().flatten(),
-            resolutions: decisions,
-        }))
+        let mut paths: Vec<PathBuf> = at.work.tree.differences(&at.base_tree).map(Path::to_owned).collect();
+        paths.extend(also.iter().cloned());
+        Ok(!self.capture_lane(LaneId::MAIN, paths)?.is_empty())
     }
 
     /// Step 1: captures what is still unsaved on both sides and merges the
@@ -188,8 +216,11 @@ impl Repo {
         if lane.is_main() {
             return Err(Error::Other("the main lane is what lanes are integrated into".into()));
         }
+        // The lane is scanned whole: whatever its agent saved is part of
+        // what it asks to integrate. Of the main directory only the files
+        // involved are looked at: the rest is the watcher's business.
         self.scan_lane(lane)?;
-        self.scan()?;
+        self.capture_main_under(lane, &[])?;
         let open = self.open_conflicts(lane);
         let blob_of = |text: &Option<Vec<u8>>| text.as_ref().map(|t| BlobId::of(t));
         let same_texts = |conflict: &Conflict, found: &Found| {
@@ -200,7 +231,17 @@ impl Repo {
 
         // What conflicts as things are now, and which of those conflicts
         // already have a decision taken on these very texts.
-        let found = self.merge_lane(lane, &HashMap::new())?;
+        let mut found = self.merge_lane(lane, &HashMap::new())?;
+        // The merge may write files of the main lane the lane did not touch
+        // (a symbol moved there): if something unrecorded was in them, the
+        // merge is made again on what is there now.
+        for _ in 0..3 {
+            let written: Vec<PathBuf> = found.files.keys().cloned().collect();
+            if !self.capture_main_under(lane, &written)? {
+                break;
+            }
+            found = self.merge_lane(lane, &HashMap::new())?;
+        }
         let mut decisions: HashMap<Subject, Choice> = HashMap::new();
         let mut settled = Vec::new();
         for conflict in &found.conflicts {
@@ -378,8 +419,16 @@ impl Repo {
         verification: Option<VerificationReport>,
     ) -> Result<Option<IntegrationResult>> {
         let lane = prepared.lane;
-        self.scan_lane(lane)?;
-        self.scan()?;
+        // Nothing may have been saved meanwhile in the files about to be
+        // written: on the main lane those of the merge, in the lane's
+        // working copy those in which it differs from the result.
+        let written: Vec<PathBuf> = prepared.outcome.files.keys().cloned().collect();
+        self.capture_main_under(lane, &written)?;
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let mut rewritten: Vec<PathBuf> =
+            at.work.tree.differences(&self.main.tree).map(Path::to_owned).collect();
+        rewritten.extend(written);
+        self.capture_lane(lane, rewritten)?;
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         if self.main.head != prepared.main_head || at.work.ops != prepared.lane_ops {
             return Ok(None);
@@ -467,7 +516,6 @@ impl Repo {
                 self.store.put_conflict(&conflict)?;
             }
         }
-        self.save_state()?;
         if self.config.git.export_on_checkpoint {
             match self.export_git() {
                 Ok(_) => {
@@ -514,14 +562,10 @@ impl Repo {
         let workdir = at.work.root.clone();
         let mut write: Vec<(PathBuf, TreeEntry)> = Vec::new();
         let mut remove: Vec<PathBuf> = Vec::new();
-        for (path, entry) in tree.iter() {
-            if at.work.tree.get(path) != Some(entry) {
-                write.push((path.to_owned(), *entry));
-            }
-        }
-        for (path, _) in at.work.tree.iter() {
-            if !tree.contains(path) {
-                remove.push(path.to_owned());
+        for path in tree.differences(&at.work.tree) {
+            match tree.get(path) {
+                Some(entry) => write.push((path.to_owned(), *entry)),
+                None => remove.push(path.to_owned()),
             }
         }
         for path in &remove {
@@ -546,8 +590,9 @@ impl Repo {
         at.record.base = base;
         at.record.base_head = main_head;
         at.record.since = at.work.ops;
-        self.put_lane_state(lane, LaneState::Active)?;
-        self.save_lane(lane)
+        // The saved state of the lane is written when the repository is
+        // closed: until then the log has everything.
+        self.put_lane_state(lane, LaneState::Active)
     }
 
     /// The three steps in a row, running the verification commands in

@@ -31,7 +31,7 @@ pub(crate) struct ParseCache {
 }
 
 impl ParseCache {
-    const MAX_ENTRIES: usize = 64;
+    const MAX_ENTRIES: usize = 1024;
     const MAX_BYTES: usize = 16 << 20;
 
     fn get(&mut self, blob: &BlobId) -> Option<Side> {
@@ -62,7 +62,7 @@ impl ParseCache {
 
 /// Reads a version of a file from the store and parses it, reusing the tree
 /// of `previous` if given. `None`: not a language we parse, or too big.
-fn load(
+pub(crate) fn load(
     store: &Store,
     cache: Option<&mut ParseCache>,
     path: &Path,
