@@ -662,3 +662,57 @@ fn overloads_and_duplicates_are_all_kept_in_order() {
     let lines: Vec<u32> = file.symbols.iter().map(|s| s.line).collect();
     assert_eq!(lines, [1, 2, 3, 4, 4]);
 }
+
+mod incremental {
+    use super::*;
+    use kito_parse::parse_reusing;
+    use proptest::prelude::*;
+
+    /// A file is a list of lines taken from a small pool: enough to make
+    /// functions appear, disappear, break and heal.
+    const LINES: [&str; 10] = [
+        "export function alpha(a: number) {",
+        "  return a + 1;",
+        "}",
+        "export class Box {",
+        "  open(): void { this.lid = true; }",
+        "  // a comment",
+        "const answer = () => 42;",
+        "",
+        "  if (x) { return \"brace } in a string\"; }",
+        "interface Shape { area(): number }",
+    ];
+
+    fn render(lines: &[usize]) -> String {
+        lines.iter().map(|&i| format!("{}\n", LINES[i])).collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 200, ..ProptestConfig::default() })]
+
+        /// Parsing a new version from the tree of the old one gives exactly
+        /// what parsing it from scratch gives, whatever the two versions are.
+        #[test]
+        fn reusing_a_tree_changes_nothing(
+            versions in prop::collection::vec(prop::collection::vec(0usize..LINES.len(), 0..14), 2..6),
+        ) {
+            let mut previous = None;
+            for version in &versions {
+                let source = render(version);
+                let reused = parse_reusing(Dialect::TypeScript, source.as_bytes(), previous.as_ref()).unwrap();
+                let fresh = parse(Dialect::TypeScript, source.as_bytes()).unwrap();
+                prop_assert_eq!(&reused.file, &fresh);
+                prop_assert_eq!(reused.source(), source.as_bytes());
+                previous = Some(reused);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tree_of_another_language_is_ignored() {
+        let rust = parse_reusing(Dialect::Rust, b"fn main() {}\n", None).unwrap();
+        let ts = parse_reusing(Dialect::TypeScript, b"function main() {}\n", Some(&rust)).unwrap();
+        assert_eq!(outline(&ts.file), ["Function main"]);
+        assert_eq!(ts.file, parse(Dialect::TypeScript, b"function main() {}\n").unwrap());
+    }
+}

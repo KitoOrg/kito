@@ -252,11 +252,23 @@ fn renames_keep_the_id() {
 #[test]
 fn look_alikes_are_not_mistaken_for_renames() {
     let mut w = World::default();
-    // Tiny bodies say nothing about identity.
+    // A tiny body says little about identity. With the same signature, and
+    // nothing else that looks the same, it is still a rename...
     w.step(&[("a.ts", Some("export function one() { return 1; }\n"))]);
+    let id = w.id("a.ts", "one");
+    assert_eq!(w.step(&[("a.ts", Some("export function uno() { return 1; }\n"))]), ["Rename one -> uno"]);
+    assert_eq!(w.id("a.ts", "uno"), id);
+    // ...with another signature it is another function...
     assert_eq!(
-        w.step(&[("a.ts", Some("export function uno() { return 1; }\n"))]),
-        ["Remove one", "Add Function uno"]
+        w.step(&[("a.ts", Some("export function eins(scale: number) { return 1; }\n"))]),
+        ["Add Function eins", "Remove uno"]
+    );
+    // ...and so it is when two candidates look the same: no guessing.
+    let mut w = World::default();
+    w.step(&[("a.ts", Some("function one() { return 1; }\nfunction two() { return 1; }\n"))]);
+    assert_eq!(
+        w.step(&[("a.ts", Some("function uno() { return 1; }\nfunction due() { return 1; }\n"))]),
+        ["Add Function uno", "Add Function due", "Remove one", "Remove two"]
     );
 
     // A different function that merely has the same signature.
@@ -264,7 +276,7 @@ fn look_alikes_are_not_mistaken_for_renames() {
     let after = "export function names(items: Item[]): number {\n  const seen = new Set<string>();\n  items.forEach((item) => seen.add(item.name.toLowerCase()));\n  return seen.size;\n}\n";
     let mut w = World::default();
     w.step(&[("b.ts", Some(before))]);
-    assert_eq!(w.step(&[("b.ts", Some(after))]), ["Remove total", "Add Function names"]);
+    assert_eq!(w.step(&[("b.ts", Some(after))]), ["Add Function names", "Remove total"]);
 
     // Two identical functions renamed at once: ambiguous by body, but each
     // still pairs with one and keeps an ID.
@@ -309,7 +321,7 @@ fn a_function_moved_to_another_file_keeps_its_id_and_history() {
     let ops = w.step(&[("src/users.ts", None), ("src/people.ts", Some(&moved))]);
     assert_eq!(
         ops,
-        ["Rename fetchUser -> loadUser", "Move loadUser: src/users.ts -> src/people.ts", "Remove USERS"]
+        ["Move fetchUser: src/users.ts -> src/people.ts", "Rename fetchUser -> loadUser", "Remove USERS"]
     );
     assert_eq!(w.id("src/people.ts", "loadUser"), id);
 }
@@ -326,6 +338,156 @@ fn a_whole_class_moves_with_its_methods() {
         (w.id("src/session.ts", "Session"), w.id("src/session.ts", "Session.refresh")),
         (class, method)
     );
+}
+
+#[test]
+fn a_symbol_that_mentions_itself_is_renamed_with_its_references() {
+    let mut w = World::default();
+    // A recursive function, a parameter named like the function, a type that
+    // refers to a value of the same name: renaming changes the body too.
+    let before = "export function walk(node: Node, depth: number): number {\n  if (!node.next) {\n    return depth;\n  }\n  return walk(node.next, depth + 1);\n}\n\nexport function limit(limit: number) { return limit; }\n\nconst shape = z.object({});\ntype shape = z.infer<typeof shape>;\n";
+    w.step(&[("tree.ts", Some(before))]);
+    let ids = (w.id("tree.ts", "walk"), w.id("tree.ts", "limit"));
+
+    let after = before.replace("walk", "descend");
+    assert_eq!(w.step(&[("tree.ts", Some(&after))]), ["Rename walk -> descend"]);
+    let after = after.replace("limit", "atMost");
+    assert_eq!(w.step(&[("tree.ts", Some(&after))]), ["Rename limit -> atMost"]);
+    assert_eq!(ids, (w.id("tree.ts", "descend"), w.id("tree.ts", "atMost")));
+}
+
+const SHOP: &str = r#"
+namespace Shop
+{
+    public class Cart
+    {
+        private readonly List<Item> items = new List<Item>();
+
+        public void Add(Item item)
+        {
+            items.Add(item);
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+
+        public decimal Total()
+        {
+            return items.Sum(item => item.Price * item.Quantity);
+        }
+    }
+
+    public class Empty
+    {
+    }
+
+    public class Item
+    {
+        public decimal Price { get; set; }
+        public int Quantity { get; set; }
+        public string Describe()
+        {
+            return string.Format("{0} x {1}", Quantity, Price);
+        }
+    }
+}
+"#;
+
+/// Cuts out the text from `from` to the end of the first `to` after it.
+fn cut(text: &str, from: &str, to: &str) -> (String, String) {
+    let start = text.find(from).unwrap();
+    let end = start + text[start..].find(to).unwrap() + to.len();
+    (text[start..end].to_owned(), format!("{}{}", &text[..start], &text[end..]))
+}
+
+#[test]
+fn a_class_leaves_its_namespace_for_another_file() {
+    let mut w = World::default();
+    w.step(&[("Shop.cs", Some(SHOP))]);
+    let (cart, add) = (w.id("Shop.cs", "Shop.Cart"), w.id("Shop.cs", "Shop.Cart.Add"));
+    let (item, empty) = (w.id("Shop.cs", "Shop.Item"), w.id("Shop.cs", "Shop.Empty"));
+
+    // "Move type to its own file": the class goes into a namespace block of
+    // the same name in a new file. The namespace there is a new symbol; the
+    // class and its methods are the ones they were.
+    let (class, rest) = cut(SHOP, "    public class Item", "        }\n    }\n");
+    let own_file = format!("namespace Shop\n{{\n{class}}}\n");
+    assert_eq!(
+        w.step(&[("Shop.cs", Some(&rest)), ("Item.cs", Some(&own_file))]),
+        ["Add Module Shop", "Move Shop.Item: Shop.cs -> Item.cs"]
+    );
+    assert_eq!(w.id("Item.cs", "Shop.Item"), item);
+    assert_eq!(w.table.qualified_name(w.id("Item.cs", "Describe")).as_deref(), Some("Shop.Item.Describe"));
+    let namespace = w.id("Item.cs", "Shop");
+    assert_eq!(w.table.get(item).unwrap().parent, Some(namespace));
+    assert_ne!(namespace, w.id("Shop.cs", "Shop"));
+
+    // Even a class with nothing in it, when it lands in a namespace of the
+    // same name; and a class that moves out of every namespace.
+    let (hollow, rest) = cut(&rest, "    public class Empty", "    }\n");
+    let own_file = own_file.replacen("{\n", &format!("{{\n{hollow}"), 1);
+    let (class, rest) = cut(&rest, "    public class Cart", "        }\n    }\n");
+    assert_eq!(
+        w.step(&[("Shop.cs", Some(&rest)), ("Item.cs", Some(&own_file)), ("Cart.cs", Some(&class))]),
+        ["Move Cart: Shop.cs -> Cart.cs", "Move Shop.Empty: Shop.cs -> Item.cs"]
+    );
+    assert_eq!((w.id("Cart.cs", "Cart"), w.id("Cart.cs", "Cart.Add")), (cart, add));
+    assert_eq!(w.table.get(cart).unwrap().parent, None);
+    assert_eq!(w.id("Item.cs", "Shop.Empty"), empty);
+}
+
+#[test]
+fn a_file_split_in_two_keeps_every_symbol() {
+    let mut w = World::default();
+    w.step(&[("Shop.cs", Some(SHOP))]);
+    let ids =
+        (w.id("Shop.cs", "Shop.Cart"), w.id("Shop.cs", "Shop.Item"), w.id("Shop.cs", "Shop.Cart.Total"));
+    let (item, _) = cut(SHOP, "    public class Item", "        }\n    }\n");
+    let (cart, _) = cut(SHOP, "    public class Cart", "        }\n    }\n");
+    let cart_file = format!("namespace Shop\n{{\n{cart}}}\n");
+    let item_file = format!("namespace Shop\n{{\n{item}}}\n");
+
+    // The old file is gone; its namespace goes to one of the new files with
+    // the class found there, the other class joins the new namespace of the
+    // other file. Only the class nobody took is removed.
+    let ops = w.step(&[("Shop.cs", None), ("Cart.cs", Some(&cart_file)), ("Item.cs", Some(&item_file))]);
+    assert_eq!(
+        ops,
+        [
+            "Add Module Shop",
+            "Move Shop: Shop.cs -> Cart.cs",
+            "Move Shop.Item: Shop.cs -> Item.cs",
+            "Remove Shop.Empty"
+        ]
+    );
+    assert_eq!(ids, (w.id("Cart.cs", "Shop.Cart"), w.id("Item.cs", "Shop.Item"), w.id("Cart.cs", "Total")));
+}
+
+#[test]
+fn a_method_moves_to_another_class() {
+    let mut w = World::default();
+    let before = AUTH.replace("export class Session {", "export class Audit {}\n\nexport class Session {");
+    w.step(&[("src/auth.ts", Some(&before))]);
+    let refresh = w.id("src/auth.ts", "Session.refresh");
+
+    let (method, without) = cut(&before, "  refresh(now: number)", "  }\n");
+    let after = without.replace("export class Audit {}", &format!("export class Audit {{\n{method}}}"));
+    assert_eq!(w.step(&[("src/auth.ts", Some(&after))]), ["Move Audit.refresh: src/auth.ts -> src/auth.ts"]);
+    assert_eq!(w.id("src/auth.ts", "Audit.refresh"), refresh);
+    assert_eq!(w.table.get(refresh).unwrap().parent, Some(w.id("src/auth.ts", "Audit")));
+}
+
+#[test]
+fn nesting_turned_inside_out_still_applies() {
+    let mut w = World::default();
+    let before = "class Outer {\n  int outerField = computeOuter(1, 2, 3, 4);\n  static class Inner {\n    int innerField = computeInner(5, 6, 7, 8);\n  }\n}\n";
+    let after = "class Inner {\n  int innerField = computeInner(5, 6, 7, 8);\n  static class Outer {\n    int outerField = computeOuter(1, 2, 3, 4);\n  }\n}\n";
+    w.step(&[("Nest.java", Some(before))]);
+    let ids = (w.id("Nest.java", "Outer"), w.id("Nest.java", "Outer.Inner"));
+    // Each move finds its destination already in place.
+    assert_eq!(
+        w.step(&[("Nest.java", Some(after))]),
+        ["Move Inner: Nest.java -> Nest.java", "Move Inner.Outer: Nest.java -> Nest.java"]
+    );
+    assert_eq!(ids, (w.id("Nest.java", "Inner.Outer"), w.id("Nest.java", "Inner")));
 }
 
 #[test]

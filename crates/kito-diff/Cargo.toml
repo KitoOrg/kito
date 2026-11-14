@@ -13,7 +13,12 @@ kito-parse.workspace = true
 similar.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "symbols"
+harness = false

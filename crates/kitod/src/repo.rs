@@ -173,6 +173,8 @@ pub struct Repo {
     /// that parsed, to compare the next clean save with. A hint, not state:
     /// without it only the names of the symbols are compared.
     last_clean: HashMap<PathBuf, BlobId>,
+    /// Parsed versions of the files captured most recently.
+    parse_cache: semantic::ParseCache,
     head: Option<OpId>,
     /// Ops of the main lane.
     ops: u64,
@@ -227,6 +229,7 @@ impl Repo {
             tree: Tree::new(),
             symbols: SymbolTable::new(),
             last_clean: HashMap::new(),
+            parse_cache: semantic::ParseCache::default(),
             head: None,
             ops: 0,
             clock: HlcClock::new(),
@@ -503,6 +506,7 @@ impl Repo {
             LaneId::MAIN,
             &file_ops,
             &mut self.last_clean,
+            &mut self.parse_cache,
         )?;
         for blob in &symbolic.blobs {
             self.store.put_blob(blob)?;

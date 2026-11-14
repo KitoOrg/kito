@@ -29,6 +29,8 @@ pub enum SymbolError {
     Exists(SymbolId),
     #[error("symbol {0} does not exist")]
     Missing(SymbolId),
+    #[error("symbol {0} cannot be moved inside itself")]
+    Cycle(SymbolId),
 }
 
 /// The symbols of a lane at a given point in the history.
@@ -150,8 +152,16 @@ impl SymbolTable {
                 self.symbols.get_mut(id).ok_or(SymbolError::Missing(*id))?.name = to.clone();
             }
             // A moved container takes everything it contains along.
-            OpKind::Move { id, to, .. } => {
+            OpKind::Move { id, to, parent, .. } => {
                 let from = self.symbols.get(id).ok_or(SymbolError::Missing(*id))?.file.clone();
+                if let Some(parent) = parent {
+                    if !self.symbols.contains_key(parent) {
+                        return Err(SymbolError::Missing(*parent));
+                    }
+                    if self.is_inside(*parent, *id) {
+                        return Err(SymbolError::Cycle(*id));
+                    }
+                }
                 let moving: Vec<SymbolId> = self
                     .by_file
                     .get(&from)
@@ -166,6 +176,9 @@ impl SymbolTable {
                     }
                     self.unlink(&from, moved);
                     self.by_file.entry(to.file.clone()).or_default().insert(moved);
+                }
+                if let Some(entry) = self.symbols.get_mut(id) {
+                    entry.parent = *parent;
                 }
             }
             OpKind::ModifyBody { id, .. } | OpKind::ModifySignature { id, .. } => {
@@ -237,12 +250,12 @@ mod tests {
         assert!(t.find(Path::new("b.ts"), "start").is_empty());
 
         t.apply(&OpKind::Rename { id: id(1), from: "start".into(), to: "run".into() }).unwrap();
-        t.apply(&OpKind::Move { id: id(2), from: at("b.ts"), to: at("a.ts") }).unwrap();
+        t.apply(&OpKind::Move { id: id(2), from: at("b.ts"), to: at("a.ts"), parent: None }).unwrap();
         // A container moves with its members.
-        t.apply(&OpKind::Move { id: id(0), from: at("a.ts"), to: at("z.ts") }).unwrap();
+        t.apply(&OpKind::Move { id: id(0), from: at("a.ts"), to: at("z.ts"), parent: None }).unwrap();
         assert_eq!(t.in_file(Path::new("z.ts")).map(|(i, _)| i.seq()).collect::<Vec<_>>(), [0, 1]);
         assert_eq!(t.in_file(Path::new("a.ts")).map(|(i, _)| i.seq()).collect::<Vec<_>>(), [2]);
-        t.apply(&OpKind::Move { id: id(0), from: at("z.ts"), to: at("a.ts") }).unwrap();
+        t.apply(&OpKind::Move { id: id(0), from: at("z.ts"), to: at("a.ts"), parent: None }).unwrap();
         assert_eq!(
             t.in_file(Path::new("a.ts")).map(|(i, e)| (i.seq(), e.name.as_str())).collect::<Vec<_>>(),
             [(0, "Server"), (1, "run"), (2, "Other")]
@@ -266,6 +279,40 @@ mod tests {
     }
 
     #[test]
+    fn a_move_can_change_the_enclosing_symbol() {
+        let mut t = SymbolTable::new();
+        t.apply(&add(0, "Server", None, "a.ts")).unwrap();
+        t.apply(&add(1, "start", Some(0), "a.ts")).unwrap();
+        t.apply(&add(2, "Client", None, "b.ts")).unwrap();
+
+        // A method goes to another class, in another file.
+        t.apply(&OpKind::Move { id: id(1), from: at("a.ts"), to: at("b.ts"), parent: Some(id(2)) }).unwrap();
+        assert_eq!(t.qualified_name(id(1)).as_deref(), Some("Client.start"));
+        assert_eq!(t.in_file(Path::new("b.ts")).map(|(i, _)| i.seq()).collect::<Vec<_>>(), [1, 2]);
+        // The class it left moves on its own from now on.
+        t.apply(&OpKind::Move { id: id(0), from: at("a.ts"), to: at("z.ts"), parent: None }).unwrap();
+        assert_eq!(t.get(id(1)).unwrap().file, PathBuf::from("b.ts"));
+
+        // To the top level, staying in the same file.
+        t.apply(&OpKind::Move { id: id(1), from: at("b.ts"), to: at("b.ts"), parent: None }).unwrap();
+        assert_eq!(t.qualified_name(id(1)).as_deref(), Some("start"));
+        assert_eq!(t.in_file(Path::new("b.ts")).count(), 2);
+
+        // A symbol cannot end up inside itself, nor inside one that does not exist.
+        let before = t.clone();
+        t.apply(&OpKind::Move { id: id(1), from: at("b.ts"), to: at("b.ts"), parent: Some(id(2)) }).unwrap();
+        assert_eq!(
+            t.apply(&OpKind::Move { id: id(2), from: at("b.ts"), to: at("b.ts"), parent: Some(id(1)) }),
+            Err(SymbolError::Cycle(id(2)))
+        );
+        assert_eq!(
+            t.apply(&OpKind::Move { id: id(2), from: at("b.ts"), to: at("c.ts"), parent: Some(id(9)) }),
+            Err(SymbolError::Missing(id(9)))
+        );
+        assert_eq!(t.get(id(2)), before.get(id(2)));
+    }
+
+    #[test]
     fn inapplicable_ops_are_rejected_without_side_effects() {
         let mut t = SymbolTable::new();
         t.apply(&add(0, "Server", None, "a.ts")).unwrap();
@@ -274,7 +321,7 @@ mod tests {
         for op in [
             OpKind::RemoveSymbol { id: id(7) },
             OpKind::Rename { id: id(7), from: "a".into(), to: "b".into() },
-            OpKind::Move { id: id(7), from: at("a.ts"), to: at("b.ts") },
+            OpKind::Move { id: id(7), from: at("a.ts"), to: at("b.ts"), parent: None },
             OpKind::ModifySignature { id: id(7), before: BlobId::of(b"a"), after: BlobId::of(b"b") },
         ] {
             assert_eq!(t.apply(&op), Err(SymbolError::Missing(id(7))));

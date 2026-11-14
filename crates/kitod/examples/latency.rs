@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo build --release -p kitod
-//! cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
+//! cargo run --release -p kitod --example latency -- --saves 300 --lines 2000 [--shape dense]
 //! ```
 //!
 //! On each round it changes one line of a file of `--lines` lines, saves it
@@ -49,11 +49,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir.join("src"))?;
     Repo::init(&dir)?.close()?;
     let file = dir.join("src/module.ts");
-    let mut content: Vec<String> = (0..lines)
-        .map(|i| {
-            format!("export function handler{i}(input: Request): Response {{ return respond(input, {i}); }}")
-        })
-        .collect();
+    // `typical`: functions of a dozen lines, as in real code. `dense`: one
+    // function per line, the worst case for symbol extraction.
+    let dense =
+        args.iter().position(|a| a == "--shape").and_then(|i| args.get(i + 1)).is_some_and(|v| v == "dense");
+    let mut content: Vec<String> = Vec::with_capacity(lines);
+    // Lines that a save may change, and how to write them with a new value.
+    let mut editable: Vec<usize> = Vec::new();
+    let line_with = |k: usize, value: usize| {
+        if dense {
+            format!(
+                "export function handler{k}(input: Request): Response {{ return respond(input, {value}); }}"
+            )
+        } else {
+            format!("  const record = store.find(input.path, {value});")
+        }
+    };
+    let mut k = 0;
+    while content.len() < lines {
+        if dense {
+            editable.push(content.len());
+            content.push(line_with(k, k));
+        } else {
+            content
+                .push(format!("export function handler{k}(input: Request, options: Options): Response {{"));
+            content.push("  const started = clock.now();".to_owned());
+            content.push("  const user = sessions.lookup(input.token);".to_owned());
+            content.push("  if (!user) {".to_owned());
+            content.push("    return respond(input, 401);".to_owned());
+            content.push("  }".to_owned());
+            editable.push(content.len());
+            content.push(line_with(k, k));
+            content.push("  if (record === undefined) {".to_owned());
+            content.push("    return respond(input, 404);".to_owned());
+            content.push("  }".to_owned());
+            content.push(format!("  metrics.observe(\"handler{k}\", clock.now() - started);"));
+            content.push("  return respond(input, 200, record);".to_owned());
+            content.push("}".to_owned());
+            content.push(String::new());
+        }
+        k += 1;
+    }
+    let functions = k;
     std::fs::write(&file, content.join("\n") + "\n")?;
 
     let mut client = Client::connect_or_start(&dir)?;
@@ -62,11 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut seen_outside = Vec::with_capacity(saves);
     for i in 0..saves {
-        let line = (i * 7919) % lines;
-        content[line] = format!(
-            "export function handler{line}(input: Request): Response {{ return respond(input, {}); }}",
-            i + lines
-        );
+        let which = (i * 7919) % editable.len();
+        content[editable[which]] = line_with(which, i + lines);
         let text = content.join("\n") + "\n";
         let start = Instant::now();
         std::fs::write(&file, text)?;
@@ -91,7 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     seen_outside.sort_by(|a, b| a.total_cmp(b));
     let w = &status.watcher;
     let size = std::fs::metadata(&file)?.len();
-    println!("file of {lines} lines ({size} bytes), {saves} saves, debounce {} ms", status.debounce_ms);
+    println!(
+        "file of {} lines, {functions} functions ({size} bytes), {saves} saves, debounce {} ms",
+        content.len(),
+        status.debounce_ms
+    );
     println!();
     println!("| Measurement | p50 | p95 | max |");
     println!("| --- | --- | --- | --- |");

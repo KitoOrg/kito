@@ -197,6 +197,11 @@ pub enum OpKind {
         id: SymbolId,
         from: Location,
         to: Location,
+        /// The enclosing symbol after the move; `None`: top level. Absent
+        /// from the encoding when `None`, as in the ops written before the
+        /// field existed (which only moved top-level symbols).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<SymbolId>,
     },
     // Fallback: files that cannot be parsed and text outside symbols (imports, comments)
     TextEdit {

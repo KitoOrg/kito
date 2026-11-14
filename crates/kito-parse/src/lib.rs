@@ -12,5 +12,5 @@
 mod extract;
 pub mod lang;
 
-pub use extract::{parse, ParsedFile, ParsedSymbol, MINHASH_SIZE};
+pub use extract::{parse, parse_reusing, Parsed, ParsedFile, ParsedSymbol, MINHASH_SIZE};
 pub use lang::{dialect_for_path, lang_for_path, Dialect};

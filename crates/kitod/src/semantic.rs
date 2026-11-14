@@ -6,33 +6,88 @@ use crate::error::{Error, Result};
 use kito_core::{BlobId, FileMode, LaneId, OpKind, SymbolId, SymbolKind, SymbolTable, Tree};
 use kito_diff::ast::{diff_symbols, FileChange, SymbolOps, Version};
 use kito_diff::text;
-use kito_parse::{dialect_for_path, parse, ParsedFile};
+use kito_parse::{dialect_for_path, parse_reusing, Parsed};
 use kito_store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Files larger than this are tracked as text only: parsing them on every
 /// save would cost more than their symbols are worth.
 const MAX_PARSED_BYTES: usize = 2 << 20;
 
 /// One version of a file, read from the store and parsed.
-struct Side {
-    content: Vec<u8>,
-    parsed: ParsedFile,
+type Side = Arc<Parsed>;
+
+/// Parsed versions of the files captured most recently, by content. The old
+/// side of a save is almost always here (it was the new side of the save
+/// before), and its syntax tree lets the new side be parsed incrementally.
+#[derive(Default)]
+pub(crate) struct ParseCache {
+    entries: HashMap<BlobId, (Side, u64)>,
+    bytes: usize,
+    clock: u64,
 }
 
-fn load(store: &Store, path: &Path, blob: &BlobId) -> Result<Option<Side>> {
+impl ParseCache {
+    const MAX_ENTRIES: usize = 64;
+    const MAX_BYTES: usize = 16 << 20;
+
+    fn get(&mut self, blob: &BlobId) -> Option<Side> {
+        self.clock += 1;
+        let (side, used) = self.entries.get_mut(blob)?;
+        *used = self.clock;
+        Some(side.clone())
+    }
+
+    fn insert(&mut self, blob: BlobId, side: Side) {
+        self.clock += 1;
+        self.bytes += side.source().len();
+        if let Some((old, _)) = self.entries.insert(blob, (side, self.clock)) {
+            self.bytes -= old.source().len();
+        }
+        // The least recently used go first.
+        while self.entries.len() > Self::MAX_ENTRIES || self.bytes > Self::MAX_BYTES {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, (_, used))| *used).map(|(blob, _)| *blob)
+            else {
+                break;
+            };
+            if let Some((gone, _)) = self.entries.remove(&oldest) {
+                self.bytes -= gone.source().len();
+            }
+        }
+    }
+}
+
+/// Reads a version of a file from the store and parses it, reusing the tree
+/// of `previous` if given. `None`: not a language we parse, or too big.
+fn load(
+    store: &Store,
+    cache: Option<&mut ParseCache>,
+    path: &Path,
+    blob: &BlobId,
+    previous: Option<&Parsed>,
+) -> Result<Option<Side>> {
     let Some(dialect) = dialect_for_path(path) else { return Ok(None) };
+    let mut cache = cache;
+    if let Some(hit) = cache.as_mut().and_then(|c| c.get(blob)) {
+        return Ok(Some(hit));
+    }
     let Some(content) = store.get_blob(blob)? else { return Ok(None) };
     if content.len() > MAX_PARSED_BYTES {
         return Ok(None);
     }
-    Ok(parse(dialect, &content).map(|parsed| Side { content, parsed }))
+    let Some(parsed) = parse_reusing(dialect, &content, previous) else { return Ok(None) };
+    let side = Arc::new(parsed);
+    if let Some(cache) = cache {
+        cache.insert(*blob, side.clone());
+    }
+    Ok(Some(side))
 }
 
 fn version(side: &Option<Side>) -> Option<Version<'_>> {
-    side.as_ref().map(|s| Version { content: &s.content, parsed: &s.parsed })
+    side.as_ref().map(|s| Version { content: s.source(), parsed: &s.file })
 }
 
 fn diff(table: &SymbolTable, lane: LaneId, files: &[(PathBuf, Option<Side>, Option<Side>)]) -> SymbolOps {
@@ -57,6 +112,7 @@ pub(crate) fn symbol_ops(
     lane: LaneId,
     file_ops: &[OpKind],
     last_clean: &mut HashMap<PathBuf, BlobId>,
+    cache: &mut ParseCache,
 ) -> Result<SymbolOps> {
     // Old and new blob of every file whose content changed. A file that is
     // removed and added again in the same batch (a change of type, such as
@@ -95,9 +151,16 @@ pub(crate) fn symbol_ops(
         if dialect_for_path(path).is_none() {
             continue;
         }
+        // The old side is the last content that parsed; if even that has
+        // syntax errors, only what the history knows (the names) is left.
+        let old_blob = last_clean.get(path).copied().or(before);
+        let old = match old_blob {
+            Some(blob) => load(store, Some(cache), path, &blob, None)?,
+            None => None,
+        };
         let new = match after {
-            Some(blob) => match load(store, path, &blob)? {
-                Some(side) if !side.parsed.has_errors => Some(side),
+            Some(blob) => match load(store, Some(cache), path, &blob, old.as_deref())? {
+                Some(side) if !side.file.has_errors => Some(side),
                 _ => {
                     if let Some(before) = before {
                         last_clean.entry(path.clone()).or_insert(before);
@@ -107,13 +170,8 @@ pub(crate) fn symbol_ops(
             },
             None => None,
         };
-        // The old side is the last content that parsed; if even that has
-        // syntax errors, only what the history knows (the names) is left.
-        let old = match last_clean.remove(path).or(before) {
-            Some(blob) => load(store, path, &blob)?.filter(|side| !side.parsed.has_errors),
-            None => None,
-        };
-        files.push((path.clone(), old, new));
+        last_clean.remove(path);
+        files.push((path.clone(), old.filter(|side| !side.file.has_errors), new));
     }
     Ok(diff(table, lane, &files))
 }
@@ -131,7 +189,7 @@ pub(crate) fn analyze_unindexed(
         if entry.mode == FileMode::Symlink || table.in_file(path).next().is_some() {
             continue;
         }
-        if let Some(side) = load(store, path, &entry.blob)?.filter(|side| !side.parsed.has_errors) {
+        if let Some(side) = load(store, None, path, &entry.blob, None)?.filter(|side| !side.file.has_errors) {
             files.push((path.to_owned(), None, Some(side)));
         }
     }
@@ -188,6 +246,11 @@ pub(crate) fn describe_symbol_op(store: &Store, kind: &OpKind) -> Option<String>
         }
         OpKind::RemoveSymbol { .. } => "removed".to_owned(),
         OpKind::Rename { from, to, .. } => format!("renamed `{from}` → `{to}`"),
+        // Same file: the symbol changed enclosing symbol (a method that went
+        // to another class).
+        OpKind::Move { from, to, .. } if from.file == to.file => {
+            format!("moved within {} (line {} → {})", to.file.display(), from.line, to.line)
+        }
         OpKind::Move { from, to, .. } => {
             format!("moved from {} to {}", from.file.display(), to.file.display())
         }

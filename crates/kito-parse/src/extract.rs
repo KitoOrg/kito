@@ -5,7 +5,8 @@ use kito_core::{Fingerprint, Hash, Lang, SymbolKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use std::sync::{Arc, Mutex, OnceLock};
+use tree_sitter::{InputEdit, Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree};
 
 /// Number of hashes in a symbol's MinHash sketch.
 pub const MINHASH_SIZE: usize = 32;
@@ -13,6 +14,9 @@ pub const MINHASH_SIZE: usize = 32;
 const SHINGLE: usize = 3;
 /// Separator between tokens when hashing, so that `ab c` and `a bc` differ.
 const TOKEN_SEPARATOR: u8 = 0x1f;
+/// What a symbol's own name is hashed as inside its definition. Not a token
+/// any grammar produces.
+const SELF_NAME: &[u8] = b"\x00self";
 
 /// The symbols of one source file.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,8 +81,10 @@ enum Capture {
 }
 
 struct Compiled {
-    parser: Parser,
+    language: Language,
     query: Query,
+    /// Per node kind ID: is it a comment?
+    comments: Vec<bool>,
     captures: Vec<Capture>,
     /// Per pattern: the text that joins `@scope` and `@name`.
     joiners: Vec<String>,
@@ -105,10 +111,6 @@ fn kind_from_capture(name: &str) -> Option<SymbolKind> {
 impl Compiled {
     fn new(dialect: Dialect) -> Compiled {
         let language = dialect.language();
-        let mut parser = Parser::new();
-        parser
-            .set_language(&language)
-            .unwrap_or_else(|e| panic!("grammar for {dialect:?} is not loadable: {e}"));
         let query = Query::new(&language, dialect.symbols_query())
             .unwrap_or_else(|e| panic!("symbols query for {dialect:?} does not compile: {e}"));
         let captures = query
@@ -136,13 +138,24 @@ impl Compiled {
                     .to_owned()
             })
             .collect();
-        Compiled { parser, query, captures, joiners }
+        let comments = (0..language.node_kind_count())
+            .map(|id| language.node_kind_for_id(id as u16).is_some_and(|kind| kind.contains("comment")))
+            .collect();
+        Compiled { language, query, comments, captures, joiners }
     }
 }
 
+/// The compiled query of a grammar, built once per process: compiling one
+/// takes milliseconds, and the daemon parses from many threads.
+fn compiled(dialect: Dialect) -> Arc<Compiled> {
+    static CACHE: OnceLock<Mutex<HashMap<Dialect, Arc<Compiled>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    cache.entry(dialect).or_insert_with(|| Arc::new(Compiled::new(dialect))).clone()
+}
+
 thread_local! {
-    /// Parsers and compiled queries, built once per thread and grammar.
-    static COMPILED: RefCell<HashMap<Dialect, Compiled>> = RefCell::new(HashMap::new());
+    /// One parser per thread; it is pointed at a grammar on every use.
+    static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
 }
 
 /// A symbol as the query found it, before nesting and hashing.
@@ -157,14 +170,70 @@ struct Found {
     body: Option<Range<usize>>,
 }
 
+/// A parsed file kept around so that the next version of the same file can
+/// be parsed incrementally: only what changed is parsed again.
+pub struct Parsed {
+    pub file: ParsedFile,
+    dialect: Dialect,
+    tree: Tree,
+    source: Vec<u8>,
+}
+
+impl Parsed {
+    /// The content this was parsed from.
+    pub fn source(&self) -> &[u8] {
+        &self.source
+    }
+}
+
 /// Parses `source` and extracts its symbols. `None` only if the parser gives
 /// up entirely (it normally recovers from syntax errors and says so in
 /// [`ParsedFile::has_errors`]).
 pub fn parse(dialect: Dialect, source: &[u8]) -> Option<ParsedFile> {
-    COMPILED.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let compiled = cache.entry(dialect).or_insert_with(|| Compiled::new(dialect));
-        let tree = compiled.parser.parse(source, None)?;
+    parse_reusing(dialect, source, None).map(|parsed| parsed.file)
+}
+
+/// Row and column of a byte offset.
+fn point_at(source: &[u8], offset: usize) -> Point {
+    let before = &source[..offset];
+    let row = before.iter().filter(|&&b| b == b'\n').count();
+    let column = before.iter().rev().take_while(|&&b| b != b'\n').count();
+    Point { row, column }
+}
+
+/// The previous tree, told which bytes changed: the middle part that the
+/// two contents do not share.
+fn edited_tree(previous: &Parsed, source: &[u8]) -> Tree {
+    let old = &previous.source;
+    let prefix = old.iter().zip(source).take_while(|(a, b)| a == b).count();
+    let max_suffix = old.len().min(source.len()) - prefix;
+    let suffix =
+        old.iter().rev().zip(source.iter().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
+    let (old_end, new_end) = (old.len() - suffix, source.len() - suffix);
+    let mut tree = previous.tree.clone();
+    tree.edit(&InputEdit {
+        start_byte: prefix,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: point_at(old, prefix),
+        old_end_position: point_at(old, old_end),
+        new_end_position: point_at(source, new_end),
+    });
+    tree
+}
+
+/// Like [`parse`], reusing the tree of a previous version of the same file
+/// when there is one. The result is the same as parsing from scratch.
+pub fn parse_reusing(dialect: Dialect, source: &[u8], previous: Option<&Parsed>) -> Option<Parsed> {
+    let compiled = compiled(dialect);
+    let compiled = &*compiled;
+    {
+        let reusable = previous.filter(|p| p.dialect == dialect).map(|p| edited_tree(p, source));
+        let tree = PARSER.with(|parser| {
+            let mut parser = parser.borrow_mut();
+            parser.set_language(&compiled.language).ok()?;
+            parser.parse(source, reusable.as_ref())
+        })?;
         let root = tree.root_node();
 
         let mut found = find_symbols(compiled, root, source);
@@ -178,7 +247,7 @@ pub fn parse(dialect: Dialect, source: &[u8]) -> Option<ParsedFile> {
             ))
         });
         let parents = nest(&found);
-        let tokens = collect_tokens(root);
+        let tokens = collect_tokens(root, &compiled.comments);
 
         let mut children: Vec<Vec<Range<usize>>> = vec![Vec::new(); found.len()];
         for (i, parent) in parents.iter().enumerate() {
@@ -207,6 +276,11 @@ pub fn parse(dialect: Dialect, source: &[u8]) -> Option<ParsedFile> {
                     if f.kind == SymbolKind::Function && in_type { SymbolKind::Method } else { f.kind };
 
                 let own = |t: &Range<usize>| !children[i].iter().any(|c| within(t, c));
+                // The symbol's own name, wherever it appears in its definition
+                // (a recursive call, `typeof X`, a parameter with the same
+                // name), counts as a placeholder: renaming a symbol together
+                // with its references to itself leaves its hashes unchanged.
+                let own_name = &source[f.name.clone()];
                 let in_def = tokens_in(&tokens, &f.def);
                 let body: Vec<&Range<usize>> = match &f.body {
                     Some(body) => tokens_in(&tokens, body).iter().filter(|t| own(t)).collect(),
@@ -230,16 +304,17 @@ pub fn parse(dialect: Dialect, source: &[u8]) -> Option<ParsedFile> {
                     range: f.def.clone(),
                     header: f.def.start..f.body.as_ref().map_or(f.def.end, |b| b.start.max(f.def.start)),
                     line: f.line,
-                    signature: hash_tokens(source, &signature),
-                    body: hash_tokens(source, &body),
+                    signature: hash_tokens(source, own_name, &signature),
+                    body: hash_tokens(source, own_name, &body),
                     body_tokens: body.len(),
                     tokens: shape.len(),
-                    fingerprint: minhash(source, &shape),
+                    fingerprint: minhash(source, own_name, &shape),
                 }
             })
             .collect();
-        Some(ParsedFile { lang: dialect.lang(), has_errors: root.has_error(), symbols })
-    })
+        let file = ParsedFile { lang: dialect.lang(), has_errors: root.has_error(), symbols };
+        Some(Parsed { file, dialect, tree: tree.clone(), source: source.to_vec() })
+    }
 }
 
 /// Runs the symbols query. When several patterns capture the same name node
@@ -306,12 +381,12 @@ fn within(inner: &Range<usize>, outer: &Range<usize>) -> bool {
 /// The leaves of the syntax tree, comments excluded, in document order.
 /// Whitespace is not part of any leaf, so two formattings of the same code
 /// have the same tokens.
-fn collect_tokens(root: Node<'_>) -> Vec<Range<usize>> {
+fn collect_tokens(root: Node<'_>, comments: &[bool]) -> Vec<Range<usize>> {
     let mut tokens = Vec::new();
     let mut cursor = root.walk();
     loop {
         let node = cursor.node();
-        let comment = node.kind().contains("comment");
+        let comment = comments.get(node.kind_id() as usize).copied().unwrap_or(false);
         if !comment && node.child_count() == 0 && node.end_byte() > node.start_byte() {
             tokens.push(node.byte_range());
         }
@@ -336,24 +411,35 @@ fn tokens_in<'a>(tokens: &'a [Range<usize>], range: &Range<usize>) -> &'a [Range
     &tokens[start..end.max(start)]
 }
 
-fn hash_tokens(source: &[u8], tokens: &[&Range<usize>]) -> Hash {
+/// The bytes of a token as they are hashed: the symbol's own name becomes
+/// [`SELF_NAME`].
+fn token_bytes<'a>(source: &'a [u8], own_name: &[u8], token: &Range<usize>) -> &'a [u8] {
+    let bytes = &source[token.clone()];
+    if bytes == own_name {
+        SELF_NAME
+    } else {
+        bytes
+    }
+}
+
+fn hash_tokens(source: &[u8], own_name: &[u8], tokens: &[&Range<usize>]) -> Hash {
     let mut buffer = Vec::with_capacity(tokens.iter().map(|t| t.len() + 1).sum());
     for token in tokens {
-        buffer.extend_from_slice(&source[(*token).clone()]);
+        buffer.extend_from_slice(token_bytes(source, own_name, token));
         buffer.push(TOKEN_SEPARATOR);
     }
     Hash::of(&buffer)
 }
 
 /// FNV-1a over the tokens of one shingle.
-fn shingle_hash(source: &[u8], tokens: &[&Range<usize>]) -> u64 {
+fn shingle_hash(source: &[u8], own_name: &[u8], tokens: &[&Range<usize>]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |byte: u8| {
         h ^= u64::from(byte);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
     for token in tokens {
-        source[(*token).clone()].iter().copied().for_each(&mut feed);
+        token_bytes(source, own_name, token).iter().copied().for_each(&mut feed);
         feed(TOKEN_SEPARATOR);
     }
     h
@@ -369,14 +455,14 @@ fn mix(mut z: u64) -> u64 {
 /// MinHash sketch over the shingles of a token sequence: the share of equal
 /// positions in two sketches estimates the Jaccard similarity of the two
 /// shingle sets. No tokens, no sketch.
-fn minhash(source: &[u8], tokens: &[&Range<usize>]) -> Fingerprint {
+fn minhash(source: &[u8], own_name: &[u8], tokens: &[&Range<usize>]) -> Fingerprint {
     if tokens.is_empty() {
         return Fingerprint::default();
     }
     let mut sketch = [u64::MAX; MINHASH_SIZE];
     let width = SHINGLE.min(tokens.len());
     for shingle in tokens.windows(width) {
-        let h = shingle_hash(source, shingle);
+        let h = shingle_hash(source, own_name, shingle);
         for (i, slot) in sketch.iter_mut().enumerate() {
             let v = mix(h ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             *slot = (*slot).min(v);

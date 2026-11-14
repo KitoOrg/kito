@@ -89,11 +89,8 @@ fn arb_kind() -> impl Strategy<Value = OpKind> {
             after
         }),
         (arb_sym_id(), "[a-z]{1,8}", "[a-z]{1,8}").prop_map(|(id, from, to)| OpKind::Rename { id, from, to }),
-        (arb_sym_id(), arb_location(), arb_location()).prop_map(|(id, from, to)| OpKind::Move {
-            id,
-            from,
-            to
-        }),
+        (arb_sym_id(), arb_location(), arb_location(), proptest::option::of(arb_sym_id()))
+            .prop_map(|(id, from, to, parent)| OpKind::Move { id, from, to, parent }),
         (arb_path(), blob(), blob(), arb_edits())
             .prop_map(|(file, before, after, edits)| { OpKind::TextEdit { file, before, after, edits } }),
         (arb_path(), blob()).prop_map(|(path, blob)| OpKind::FileAdd { path, blob, mode: FileMode::Regular }),
@@ -210,6 +207,28 @@ fn absent_intent_is_not_encoded() {
     let mut with_intent = op.clone();
     with_intent.intent = Some(IntentId(Hash::of(b"i")));
     assert!(serde_json::to_value(&with_intent).unwrap().get("intent").is_some());
+}
+
+#[test]
+fn a_move_without_a_new_parent_is_encoded_as_before_the_field_existed() {
+    // The op as it was written before `parent` existed.
+    #[derive(serde::Serialize)]
+    enum Before {
+        Move { id: SymbolId, from: Location, to: Location },
+    }
+    let id = SymbolId::new(LaneId(1), 7);
+    let at = |file: &str| Location { file: file.into(), line: 3, start: 10, end: 90 };
+    let old = codec::to_vec(&Before::Move { id, from: at("a.rs"), to: at("b.rs") }).unwrap();
+
+    let top_level = OpKind::Move { id, from: at("a.rs"), to: at("b.rs"), parent: None };
+    assert_eq!(codec::to_vec(&top_level).unwrap(), old, "same bytes, so same op IDs");
+    assert_eq!(codec::from_slice::<OpKind>(&old).unwrap(), top_level);
+
+    let nested =
+        OpKind::Move { id, from: at("a.rs"), to: at("b.rs"), parent: Some(SymbolId::new(LaneId(1), 2)) };
+    let bytes = codec::to_vec(&nested).unwrap();
+    assert_ne!(bytes, old);
+    assert_eq!(codec::from_slice::<OpKind>(&bytes).unwrap(), nested);
 }
 
 #[test]
