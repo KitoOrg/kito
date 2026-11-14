@@ -33,6 +33,8 @@ pub struct ParsedSymbol {
     pub parent: Option<usize>,
     /// Bytes of the whole definition.
     pub range: Range<usize>,
+    /// Bytes of the definition up to its body: the part that declares it.
+    pub header: Range<usize>,
     /// Line of the definition, from 1.
     pub line: u32,
     /// Hash of the signature tokens.
@@ -42,8 +44,10 @@ pub struct ParsedSymbol {
     /// Number of tokens in the body: tiny bodies are too common to identify
     /// a symbol by.
     pub body_tokens: usize,
-    /// MinHash sketch of the definition, its own name and nested symbols
-    /// excluded: a renamed symbol keeps its fingerprint.
+    /// Number of tokens of the definition, its own name and nested symbols
+    /// excluded: the ones the fingerprint is computed on.
+    pub tokens: usize,
+    /// MinHash sketch of those tokens: a renamed symbol keeps its fingerprint.
     pub fingerprint: Fingerprint,
 }
 
@@ -224,10 +228,12 @@ pub fn parse(dialect: Dialect, source: &[u8]) -> Option<ParsedFile> {
                     name,
                     parent: parents[i],
                     range: f.def.clone(),
+                    header: f.def.start..f.body.as_ref().map_or(f.def.end, |b| b.start.max(f.def.start)),
                     line: f.line,
                     signature: hash_tokens(source, &signature),
                     body: hash_tokens(source, &body),
                     body_tokens: body.len(),
+                    tokens: shape.len(),
                     fingerprint: minhash(source, &shape),
                 }
             })

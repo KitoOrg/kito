@@ -19,6 +19,7 @@ pub mod hlc;
 pub mod ids;
 pub mod model;
 mod serde_helpers;
+pub mod symbols;
 pub mod tree;
 
 pub use codec::CodecError;
@@ -30,4 +31,5 @@ pub use model::{
     Author, AuthorKind, Checkpoint, Conflict, ConflictKind, FileMode, Fingerprint, Intent, Lane, LaneState,
     Lang, Location, Op, OpKind, RefSource, Reference, Symbol, SymbolKind, Verification,
 };
+pub use symbols::{SymbolEntry, SymbolError, SymbolTable};
 pub use tree::{Tree, TreeEntry, TreeError};
