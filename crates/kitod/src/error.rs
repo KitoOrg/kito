@@ -1,4 +1,4 @@
-//! Errori del daemon.
+//! Daemon errors.
 
 use std::path::PathBuf;
 
@@ -14,15 +14,15 @@ pub enum Error {
     Codec(#[from] kito_core::CodecError),
     #[error(transparent)]
     Git(#[from] kito_git::GitError),
-    #[error("configurazione: {0}")]
+    #[error("configuration: {0}")]
     Config(String),
-    #[error("I/O su {}: {source}", path.display())]
+    #[error("I/O on {}: {source}", path.display())]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("niente da salvare: nessuna modifica è stata ancora catturata")]
+    #[error("nothing to checkpoint: no change has been captured yet")]
     NothingToCheckpoint,
     #[error("{0}")]
     Other(String),

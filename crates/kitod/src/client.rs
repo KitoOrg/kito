@@ -1,4 +1,4 @@
-//! Client del daemon, usato dalla CLI e dal server MCP.
+//! Client of the daemon, used by the CLI and by the MCP server.
 
 use crate::rpc::{self, Request, Response, RpcError};
 use serde::de::DeserializeOwned;
@@ -12,21 +12,21 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("nessun repository Kito qui o nelle cartelle superiori (esegui `kito init`)")]
+    #[error("no Kito repository here or in any parent directory (run `kito init`)")]
     NoRepository,
-    #[error("impossibile contattare il daemon: {0}")]
+    #[error("cannot reach the daemon: {0}")]
     Connect(String),
-    #[error("impossibile avviare il daemon: {0}")]
+    #[error("cannot start the daemon: {0}")]
     Spawn(String),
-    #[error("comunicazione con il daemon: {0}")]
+    #[error("communication with the daemon: {0}")]
     Io(#[from] std::io::Error),
-    #[error("risposta del daemon non valida: {0}")]
+    #[error("invalid response from the daemon: {0}")]
     Protocol(String),
     #[error("{0}")]
     Rpc(#[from] RpcError),
 }
 
-/// Risale dalle cartelle di `start` fino a trovare quella che contiene `.kito/`.
+/// Walks up from `start` until it finds the directory that contains `.kito/`.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
     let start = start.canonicalize().ok()?;
     start.ancestors().find(|dir| dir.join(kito_store::STORE_DIR).join("format").is_file()).map(Path::to_owned)
@@ -38,7 +38,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Si collega al daemon del repository, se è in esecuzione.
+    /// Connects to the repository's daemon, if it is running.
     pub fn connect(root: &Path) -> Result<Client, ClientError> {
         let socket = rpc::socket_path(root);
         let stream = UnixStream::connect(&socket)
@@ -46,15 +46,15 @@ impl Client {
         Ok(Client { reader: BufReader::new(stream), next_id: 1 })
     }
 
-    /// Si collega e verifica che il daemon risponda davvero: un socket può
-    /// accettare la connessione anche mentre il suo processo sta morendo.
+    /// Connects and checks that the daemon really answers: a socket can
+    /// accept the connection even while its process is dying.
     fn connect_alive(root: &Path) -> Result<Client, ClientError> {
         let mut client = Client::connect(root)?;
         client.call_value("status", Value::Null)?;
         Ok(client)
     }
 
-    /// Si collega al daemon, avviandolo se non è già attivo.
+    /// Connects to the daemon, starting it if it is not already running.
     pub fn connect_or_start(root: &Path) -> Result<Client, ClientError> {
         if let Ok(client) = Client::connect_alive(root) {
             return Ok(client);
@@ -62,8 +62,8 @@ impl Client {
         let mut child = spawn_daemon(root)?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            // Se il daemon appena avviato è già uscito (per esempio perché
-            // quello precedente stava ancora chiudendo lo store), si riprova.
+            // If the daemon just started has already exited (for example
+            // because the previous one was still closing the store), try again.
             if matches!(child.try_wait(), Ok(Some(_))) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
                 child = spawn_daemon(root)?;
@@ -76,7 +76,7 @@ impl Client {
                     let tail: Vec<&str> = tail.lines().rev().take(5).collect();
                     let tail: Vec<&str> = tail.into_iter().rev().collect();
                     return Err(ClientError::Spawn(format!(
-                        "{e}\nultime righe di {}:\n{}",
+                        "{e}\nlast lines of {}:\n{}",
                         log.display(),
                         tail.join("\n")
                     )));
@@ -86,7 +86,7 @@ impl Client {
         }
     }
 
-    /// Chiama un metodo e deserializza il risultato.
+    /// Calls a method and deserializes the result.
     pub fn call<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> Result<T, ClientError> {
         let value = self.call_value(method, params)?;
         serde_json::from_value(value).map_err(|e| ClientError::Protocol(e.to_string()))
@@ -101,20 +101,20 @@ impl Client {
         self.reader.get_mut().write_all(&line)?;
         let mut answer = String::new();
         if self.reader.read_line(&mut answer)? == 0 {
-            return Err(ClientError::Protocol("il daemon ha chiuso la connessione".into()));
+            return Err(ClientError::Protocol("the daemon closed the connection".into()));
         }
         let response: Response =
             serde_json::from_str(&answer).map_err(|e| ClientError::Protocol(e.to_string()))?;
         match (response.result, response.error) {
             (_, Some(error)) => Err(ClientError::Rpc(error)),
             (Some(result), None) => Ok(result),
-            (None, None) => Err(ClientError::Protocol("risposta senza risultato".into())),
+            (None, None) => Err(ClientError::Protocol("response without a result".into())),
         }
     }
 }
 
-/// Eseguibile del daemon: `$KITOD_BIN`, poi `kitod` accanto all'eseguibile
-/// corrente, poi `kitod` nel PATH.
+/// Daemon executable: `$KITOD_BIN`, then `kitod` next to the current
+/// executable, then `kitod` on the PATH.
 fn daemon_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("KITOD_BIN") {
         return PathBuf::from(path);
@@ -143,7 +143,7 @@ fn spawn_daemon(root: &Path) -> Result<std::process::Child, ClientError> {
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(err)
-        // Gruppo di processi proprio: il daemon sopravvive al terminale della CLI.
+        // A process group of its own: the daemon outlives the CLI's terminal.
         .process_group(0)
         .spawn()
         .map_err(|e| ClientError::Spawn(format!("{}: {e}", binary.display())))

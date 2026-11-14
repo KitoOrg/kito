@@ -1,14 +1,14 @@
-//! Misura della latenza salvataggio → op nel log, con il daemon vero.
+//! Measures the latency from a save to the op in the log, with the real daemon.
 //!
 //! ```text
 //! cargo build --release -p kitod
 //! cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
 //! ```
 //!
-//! A ogni giro cambia una riga di un file di `--lines` righe, lo salva e
-//! aspetta che il daemon abbia registrato l'op, interrogandolo sul socket.
-//! Stampa la latenza vista da fuori e quella misurata dal daemon stesso,
-//! con e senza il debounce.
+//! On each round it changes one line of a file of `--lines` lines, saves it
+//! and waits until the daemon has recorded the op, querying it over the
+//! socket. It prints the latency seen from outside and the one measured by
+//! the daemon itself, with and without the debounce.
 
 use kitod::client::Client;
 use kitod::rpc::DaemonStatus;
@@ -34,14 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (saves, lines) = (flag("--saves", 300), flag("--lines", 2000));
 
     if std::env::var_os("KITOD_BIN").is_none() {
-        // target/<profilo>/examples/latency → target/<profilo>/kitod
+        // target/<profile>/examples/latency → target/<profile>/kitod
         let exe = std::env::current_exe()?;
         let candidate: PathBuf =
             exe.parent().and_then(|p| p.parent()).map(|p| p.join("kitod")).unwrap_or_default();
         if !candidate.is_file() {
-            return Err(
-                "kitod non trovato: esegui prima `cargo build --release -p kitod` o imposta KITOD_BIN".into(),
-            );
+            return Err("kitod not found: run `cargo build --release -p kitod` first or set KITOD_BIN".into());
         }
         std::env::set_var("KITOD_BIN", candidate);
     }
@@ -79,12 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             if start.elapsed() > Duration::from_secs(10) {
-                return Err("il daemon non ha registrato il salvataggio entro 10 s".into());
+                return Err("the daemon did not record the save within 10 s".into());
             }
             std::thread::sleep(Duration::from_micros(200));
         }
         seen_outside.push(start.elapsed().as_secs_f64() * 1000.0);
-        // Ogni salvataggio è un gruppo a sé.
+        // Each save is a batch of its own.
         std::thread::sleep(Duration::from_millis(30));
     }
 
@@ -93,23 +91,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     seen_outside.sort_by(|a, b| a.total_cmp(b));
     let w = &status.watcher;
     let size = std::fs::metadata(&file)?.len();
-    println!("file di {lines} righe ({size} byte), {saves} salvataggi, debounce {} ms", status.debounce_ms);
+    println!("file of {lines} lines ({size} bytes), {saves} saves, debounce {} ms", status.debounce_ms);
     println!();
-    println!("| Misura | p50 | p95 | massimo |");
+    println!("| Measurement | p50 | p95 | max |");
     println!("| --- | --- | --- | --- |");
     println!(
-        "| Salvataggio → op confermata, vista dal client | {:.1} ms | {:.1} ms | {:.1} ms |",
+        "| Save → confirmed op, as seen by the client | {:.1} ms | {:.1} ms | {:.1} ms |",
         percentile(&seen_outside, 0.50),
         percentile(&seen_outside, 0.95),
         seen_outside.last().copied().unwrap_or(0.0)
     );
     println!(
-        "| Primo evento → op confermata, misurata dal daemon | {:.1} ms | {:.1} ms | |",
+        "| First event → confirmed op, as measured by the daemon | {:.1} ms | {:.1} ms | |",
         w.latency_p50_ms.unwrap_or(0.0),
         w.latency_p95_ms.unwrap_or(0.0)
     );
     println!(
-        "| Sola elaborazione, dopo il debounce | {:.1} ms | {:.1} ms | |",
+        "| Processing only, after the debounce | {:.1} ms | {:.1} ms | |",
         w.capture_p50_ms.unwrap_or(0.0),
         w.capture_p95_ms.unwrap_or(0.0)
     );

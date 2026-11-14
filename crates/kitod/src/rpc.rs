@@ -1,5 +1,5 @@
-//! Protocollo tra daemon e client: JSON-RPC 2.0, un messaggio per riga, su
-//! socket Unix.
+//! Protocol between daemon and clients: JSON-RPC 2.0, one message per line,
+//! over a Unix socket.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,11 +57,11 @@ impl Response {
     }
 }
 
-/// Percorso del socket del daemon di un repository.
+/// Path of the socket of a repository's daemon.
 ///
-/// Di norma `.kito/kitod.sock`; se il percorso supera il limite dei socket
-/// Unix (circa 100 byte) si ripiega su un nome nella cartella temporanea,
-/// derivato dalla radice del repository.
+/// Normally `.kito/kitod.sock`; if the path exceeds the limit of Unix sockets
+/// (about 100 bytes) it falls back to a name in the temporary directory,
+/// derived from the repository root.
 pub fn socket_path(root: &Path) -> PathBuf {
     let preferred = root.join(kito_store::STORE_DIR).join("kitod.sock");
     if preferred.as_os_str().len() <= 100 {
@@ -71,34 +71,34 @@ pub fn socket_path(root: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("kito-{}.sock", digest.short()))
 }
 
-/// Statistiche del watcher restituite da `status`.
+/// Watcher statistics returned by `status`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WatcherStatus {
-    /// Eventi ricevuti dal sistema operativo (esclusi `.kito` e `.git`).
+    /// Events received from the operating system (excluding `.kito` and `.git`).
     pub events: u64,
-    /// Gruppi di eventi elaborati dopo il debounce.
+    /// Batches of events processed after the debounce.
     pub batches: u64,
-    /// Scansioni complete di riconciliazione.
+    /// Full reconciliation scans.
     pub rescans: u64,
-    /// `false` se il watcher è disattivato dalla configurazione.
+    /// `false` if the watcher is disabled by the configuration.
     #[serde(default)]
     pub watching: bool,
-    /// Tipo del file system del repository, se noto.
+    /// Type of the repository's file system, if known.
     #[serde(default)]
     pub filesystem: Option<String>,
-    /// Gli eventi non sono affidabili qui: il daemon scansiona spesso.
+    /// Events are unreliable here: the daemon scans often.
     #[serde(default)]
     pub events_unreliable: bool,
-    /// Modifiche trovate dalla scansione senza che il watcher le avesse segnalate.
+    /// Changes found by the scan without the watcher having reported them.
     #[serde(default)]
     pub missed_by_watcher: u64,
-    /// Intervallo attuale tra due scansioni di riconciliazione.
+    /// Current interval between two reconciliation scans.
     #[serde(default)]
     pub rescan_interval_ms: u64,
-    /// Tempo di elaborazione di un gruppo (dopo il debounce), in millisecondi.
+    /// Processing time of a batch (after the debounce), in milliseconds.
     pub capture_p50_ms: Option<f64>,
     pub capture_p95_ms: Option<f64>,
-    /// Tempo dal primo evento del gruppo all'op confermata, debounce compreso.
+    /// Time from the first event of the batch to the confirmed op, debounce included.
     pub latency_p50_ms: Option<f64>,
     pub latency_p95_ms: Option<f64>,
     pub last_error: Option<String>,

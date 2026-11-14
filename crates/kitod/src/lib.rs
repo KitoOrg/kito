@@ -1,7 +1,7 @@
-//! `kitod`: il daemon di un repository Kito.
+//! `kitod`: the daemon of a Kito repository.
 //!
-//! Possiede lo store ed è l'unico a scriverci. La CLI e il server MCP sono
-//! client sottili che gli parlano tramite socket Unix (JSON-RPC).
+//! It owns the store and is the only one that writes to it. The CLI and the
+//! MCP server are thin clients that talk to it over a Unix socket (JSON-RPC).
 
 pub mod client;
 pub mod config;

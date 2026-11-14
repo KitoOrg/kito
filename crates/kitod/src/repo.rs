@@ -1,7 +1,7 @@
-//! Il motore di cattura: dalla cartella di lavoro alle op nel log.
+//! The capture engine: from the working directory to the ops in the log.
 //!
-//! È codice sincrono e non sa nulla di watcher e socket: il daemon lo guida,
-//! e i test lo usano direttamente.
+//! It is synchronous code and knows nothing about watchers and sockets: the
+//! daemon drives it, and the tests use it directly.
 
 use crate::config::{Config, CONFIG_FILE, DEFAULT_CONFIG};
 use crate::error::{Error, Result};
@@ -22,13 +22,13 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Un file modificato da meno di così non entra nella cache degli stat: una
-/// seconda scrittura nello stesso istante potrebbe non cambiarne dimensione
-/// e data, e sfuggirebbe alla scansione.
+/// A file modified less than this long ago does not enter the stat cache: a
+/// second write in the same instant might not change its size and
+/// modification time, and would escape the scan.
 const RACY_WINDOW: Duration = Duration::from_millis(100);
 
-/// Dimensione, data di modifica e permessi di un file all'ultima cattura:
-/// se non sono cambiati, la scansione non lo rilegge.
+/// Size, modification time and permissions of a file at the last capture:
+/// if they have not changed, the scan does not reread it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FileStat {
     size: u64,
@@ -46,11 +46,11 @@ impl FileStat {
     }
 }
 
-/// Stato della linea principale salvato su disco per ripartire in fretta:
-/// si può sempre ricostruire riapplicando le op.
+/// State of the main lane saved to disk for a quick restart: it can always
+/// be rebuilt by reapplying the ops.
 #[derive(Serialize, Deserialize)]
 struct SavedState {
-    /// Op della linea principale già applicate a `tree`.
+    /// Ops of the main lane already applied to `tree`.
     ops: u64,
     head: Option<OpId>,
     tree: Tree,
@@ -60,7 +60,7 @@ struct SavedState {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counters {
-    /// Batch di cattura che hanno prodotto almeno un'op.
+    /// Capture batches that produced at least one op.
     pub captures: u64,
     pub ops: u64,
     pub scans: u64,
@@ -71,7 +71,7 @@ pub struct Counters {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub root: PathBuf,
-    /// `Nome <email>` di chi firma le modifiche.
+    /// `Name <email>` of whoever signs the changes.
     pub author: String,
     pub identity: Identity,
     pub head: Option<String>,
@@ -79,14 +79,14 @@ pub struct Status {
     pub files: usize,
     pub checkpoints: usize,
     pub last_checkpoint: Option<String>,
-    /// Checkpoint non ancora esportati su git.
+    /// Checkpoints not yet exported to git.
     pub unexported: usize,
-    /// Op registrate dopo l'ultimo checkpoint.
+    /// Ops recorded after the last checkpoint.
     pub ops_since_checkpoint: u64,
     pub counters: Counters,
 }
 
-/// Una riga di `kito log`.
+/// One line of `kito log`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogItem {
@@ -100,7 +100,7 @@ pub enum LogItem {
         detail: Option<String>,
         lines_added: Option<usize>,
         lines_removed: Option<usize>,
-        /// Il "perché" dell'operazione, se dichiarato.
+        /// The "why" of the operation, if declared.
         #[serde(default)]
         intent: Option<String>,
     },
@@ -119,28 +119,28 @@ pub struct CheckpointResult {
     pub label: String,
     pub head: String,
     pub git_commit: Option<String>,
-    /// Perché l'export su git non è riuscito, se è stato tentato.
+    /// Why the export to git failed, if it was attempted.
     pub git_error: Option<String>,
 }
 
-/// Una voce di ciò che un rollback cambia nella cartella di lavoro.
+/// One entry of what a rollback changes in the working directory.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RollbackChange {
     pub path: String,
-    /// `ripristina`, `ricrea` oppure `rimuove`.
+    /// `restore`, `recreate` or `remove`.
     pub action: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RollbackResult {
-    /// Il punto a cui si torna, in parole.
+    /// The point being returned to, in words.
     pub target: String,
     pub changes: Vec<RollbackChange>,
-    /// `false` per una prova a vuoto (`--dry-run`).
+    /// `false` for a dry run (`--dry-run`).
     pub applied: bool,
-    /// Op registrate dal rollback.
+    /// Ops recorded by the rollback.
     pub ops: usize,
-    /// Punto a cui tornare per annullare questo rollback.
+    /// Point to return to in order to undo this rollback.
     pub undo: Option<String>,
 }
 
@@ -153,7 +153,7 @@ pub struct Repo {
     ignore: IgnoreRules,
     tree: Tree,
     head: Option<OpId>,
-    /// Op della linea principale.
+    /// Ops of the main lane.
     ops: u64,
     clock: HlcClock,
     stat: HashMap<PathBuf, FileStat>,
@@ -168,8 +168,15 @@ fn now_ns() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
 }
 
+fn operations(n: u64) -> String {
+    match n {
+        1 => "1 operation".to_owned(),
+        n => format!("{n} operations"),
+    }
+}
+
 impl Repo {
-    /// Crea `.kito/` in `root` con uno store vuoto e la configurazione di default.
+    /// Creates `.kito/` in `root` with an empty store and the default configuration.
     pub fn init(root: &Path) -> Result<Repo> {
         let store_dir = root.join(STORE_DIR);
         drop(Store::init(&store_dir)?);
@@ -180,7 +187,7 @@ impl Repo {
         Repo::open(root)
     }
 
-    /// Apre il repository in `root` e ricostruisce lo stato della linea principale.
+    /// Opens the repository in `root` and rebuilds the state of the main lane.
     pub fn open(root: &Path) -> Result<Repo> {
         let root = root.canonicalize().map_err(Error::io(root))?;
         let store_dir = root.join(STORE_DIR);
@@ -219,13 +226,13 @@ impl Repo {
         &self.config
     }
 
-    /// Chi firma le modifiche catturate in questo repository.
+    /// Who signs the changes captured in this repository.
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
 
-    /// Rilegge `config.toml`: identità e regole di ignore hanno effetto da
-    /// subito, senza riavviare il daemon.
+    /// Rereads `config.toml`: identity and ignore rules take effect right
+    /// away, without restarting the daemon.
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
         self.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
@@ -242,7 +249,7 @@ impl Repo {
         &mut self.store
     }
 
-    /// Stato della linea principale: percorso → blob.
+    /// State of the main lane: path → blob.
     pub fn tree(&self) -> &Tree {
         &self.tree
     }
@@ -255,8 +262,8 @@ impl Repo {
         self.root.join(STORE_DIR).join("lanes").join("main").join("state")
     }
 
-    /// Carica lo stato salvato, se corrisponde ancora al log, e riapplica le
-    /// op successive. Senza stato salvato riapplica tutto dall'inizio.
+    /// Loads the saved state, if it still matches the log, and reapplies the
+    /// later ops. Without a saved state it reapplies everything from the start.
     fn load_state(&mut self) -> Result<()> {
         let total = self.store.lane_len(LaneId::MAIN)?;
         let saved =
@@ -292,7 +299,7 @@ impl Repo {
         Ok(())
     }
 
-    /// Salva lo stato della linea principale per la prossima apertura.
+    /// Saves the state of the main lane for the next open.
     pub fn save_state(&self) -> Result<()> {
         let saved = SavedState {
             ops: self.ops,
@@ -308,14 +315,14 @@ impl Repo {
         atomic_write(&path, &codec::to_vec(&saved)?).map_err(Error::io(&path))
     }
 
-    /// Percorso relativo alla radice, se `path` è dentro il repository.
+    /// Path relative to the root, if `path` is inside the repository.
     pub fn relative(&self, path: &Path) -> Option<PathBuf> {
         path.strip_prefix(&self.root).ok().map(Path::to_owned)
     }
 
-    /// Scansione completa: confronta la cartella di lavoro con l'albero e
-    /// cattura ogni differenza. È anche la barriera di `sync`: quando
-    /// ritorna, tutto ciò che era su disco è nel log.
+    /// Full scan: compares the working directory with the tree and captures
+    /// every difference. It is also the barrier of `sync`: when it returns,
+    /// everything that was on disk is in the log.
     pub fn scan(&mut self) -> Result<Vec<Op>> {
         self.counters.scans += 1;
         let mut found = Vec::new();
@@ -329,8 +336,8 @@ impl Repo {
             }
             seen.insert(rel);
         }
-        // File dell'albero che la visita non ha incontrato: rimossi, oppure
-        // finiti sotto una regola di ignore (e allora restano tracciati).
+        // Files of the tree that the walk did not come across: removed, or
+        // now covered by an ignore rule (in which case they stay tracked).
         for (path, _) in self.tree.iter() {
             if !seen.contains(path) {
                 candidates.insert(path.to_owned());
@@ -339,7 +346,7 @@ impl Repo {
         self.capture(candidates)
     }
 
-    /// File e link non ignorati sotto `dir`, senza seguire i link.
+    /// Non-ignored files and links under `dir`, without following links.
     fn walk(&self, dir: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) {
         let Ok(entries) = fs::read_dir(self.root.join(dir)) else { return };
         for entry in entries.flatten() {
@@ -357,20 +364,20 @@ impl Repo {
         }
     }
 
-    /// Cattura lo stato attuale dei percorsi dati (relativi alla radice) e
-    /// registra le op che ne derivano. Una cartella vale per tutto ciò che
-    /// contiene. Restituisce le op registrate, già confermate.
+    /// Captures the current state of the given paths (relative to the root)
+    /// and records the resulting ops. A directory stands for everything it
+    /// contains. Returns the recorded ops, already confirmed.
     pub fn capture(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Result<Vec<Op>> {
         self.capture_as(paths, None)
     }
 
-    /// Come [`Repo::capture`], dichiarando il "perché" delle op registrate.
+    /// Like [`Repo::capture`], declaring the "why" of the recorded ops.
     fn capture_as(
         &mut self,
         paths: impl IntoIterator<Item = PathBuf>,
         intent: Option<IntentId>,
     ) -> Result<Vec<Op>> {
-        // 1. Dai percorsi segnalati ai singoli file da guardare.
+        // 1. From the reported paths to the individual files to look at.
         let mut files: BTreeSet<PathBuf> = BTreeSet::new();
         for rel in paths {
             if rel.file_name().is_some_and(|n| n == ".gitignore" || n == ".kitoignore") {
@@ -385,7 +392,7 @@ impl Repo {
                         files.extend(found.into_iter().map(|(p, _)| p));
                     }
                     files.extend(tracked_below);
-                    // Un file sostituito da una cartella con lo stesso nome.
+                    // A file replaced by a directory with the same name.
                     if self.tree.contains(&rel) {
                         files.insert(rel);
                     }
@@ -399,7 +406,7 @@ impl Repo {
             }
         }
 
-        // 2. Stato su disco di ogni file.
+        // 2. On-disk state of each file.
         let mut changes: BTreeMap<PathBuf, Option<Snapshot>> = BTreeMap::new();
         let mut stats: Vec<(PathBuf, Option<FileStat>)> = Vec::new();
         for rel in files {
@@ -422,13 +429,13 @@ impl Repo {
                     } else {
                         FileMode::Regular
                     };
-                    // Se il file sparisce tra lo stat e la lettura, è una rimozione.
+                    // If the file disappears between the stat and the read, it is a removal.
                     fs::read(&abs).ok().map(|content| (content, mode, meta))
                 }
                 Ok(meta) if meta.file_type().is_symlink() => fs::read_link(&abs).ok().map(|target| {
                     (target.to_string_lossy().into_owned().into_bytes(), FileMode::Symlink, meta)
                 }),
-                // Cartelle, socket, fifo: non sono file dell'albero.
+                // Directories, sockets, fifos: they are not files of the tree.
                 _ => None,
             };
             match on_disk {
@@ -455,7 +462,7 @@ impl Repo {
             }
         }
 
-        // 3. Op, in un ordine applicabile all'albero, concatenate alla testa.
+        // 3. Ops, in an order that can be applied to the tree, chained to the head.
         let store = &self.store;
         let kinds = ops_for_changes(&self.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
         let mut ops = Vec::with_capacity(kinds.len());
@@ -481,8 +488,8 @@ impl Repo {
         Ok(ops)
     }
 
-    /// Crea un checkpoint sullo stato attuale della cartella di lavoro e, se
-    /// configurato, lo esporta su git.
+    /// Creates a checkpoint on the current state of the working directory
+    /// and, if configured, exports it to git.
     pub fn checkpoint(&mut self, label: &str) -> Result<CheckpointResult> {
         self.scan()?;
         let head = self.head.ok_or(Error::NothingToCheckpoint)?;
@@ -515,13 +522,13 @@ impl Repo {
         Ok(result)
     }
 
-    /// Esporta su git i checkpoint non ancora esportati.
+    /// Exports the checkpoints not yet exported to git.
     pub fn export_git(&mut self) -> Result<Vec<(String, String)>> {
         let done = kito_git::export(&mut self.store, &self.root, &self.config.export_options())?;
         Ok(done.into_iter().map(|e| (e.checkpoint.to_string(), hex20(&e.commit))).collect())
     }
 
-    /// Importa la storia del repository git in `root` (store vuoto).
+    /// Imports the history of the git repository in `root` (empty store).
     pub fn import_git(&mut self) -> Result<kito_git::Imported> {
         let report = kito_git::import(&mut self.store, &self.root, &mut self.clock)?;
         self.tree = Tree::new();
@@ -539,7 +546,7 @@ impl Repo {
         let ops_since_checkpoint = match last {
             Some(ck) if Some(ck.head) == self.head => 0,
             Some(ck) => {
-                // Posizione dell'op del checkpoint nella lane: si cerca dalla coda.
+                // Position of the checkpoint's op in the lane: search from the tail.
                 let mut since = 0u64;
                 let mut end = self.ops;
                 'search: while end > 0 {
@@ -572,8 +579,8 @@ impl Repo {
         })
     }
 
-    /// Le ultime `limit` op della linea principale, dalla più recente, con i
-    /// checkpoint intercalati. Con `path`, solo le op che toccano quel file.
+    /// The last `limit` ops of the main lane, most recent first, with the
+    /// checkpoints interleaved. With `path`, only the ops that touch that file.
     pub fn log(&self, limit: usize, path: Option<&Path>) -> Result<Vec<LogItem>> {
         let mut by_head: HashMap<OpId, Vec<&Checkpoint>> = HashMap::new();
         for ck in self.store.checkpoints() {
@@ -617,24 +624,24 @@ impl Repo {
             OpKind::FileAdd { path, mode, .. } => {
                 let detail = match mode {
                     FileMode::Regular => None,
-                    FileMode::Executable => Some("eseguibile".to_owned()),
-                    FileMode::Symlink => Some("link simbolico".to_owned()),
+                    FileMode::Executable => Some("executable".to_owned()),
+                    FileMode::Symlink => Some("symbolic link".to_owned()),
                 };
                 (Some(display(path)), detail, None)
             }
             OpKind::FileRemove { path } => (Some(display(path)), None, None),
             OpKind::FileRename { from, to } => {
-                (Some(display(to)), Some(format!("da {}", display(from))), None)
+                (Some(display(to)), Some(format!("from {}", display(from))), None)
             }
             OpKind::TextEdit { file, before, edits, .. } => {
                 if edits.is_empty() {
-                    (Some(display(file)), Some("binario o modifica estesa".to_owned()), None)
+                    (Some(display(file)), Some("binary or extensive change".to_owned()), None)
                 } else {
                     let old = self.store.get_blob(before).ok().flatten().unwrap_or_default();
                     (Some(display(file)), None, Some(text::stat(&old, edits)))
                 }
             }
-            other => (None, other.symbol().map(|s| format!("simbolo {s}")), None),
+            other => (None, other.symbol().map(|s| format!("symbol {s}")), None),
         };
         LogItem::Op {
             id: op.id.to_string(),
@@ -652,8 +659,8 @@ impl Repo {
 
     // ------------------------------------------------------------ rollback
 
-    /// Op della linea principale che soddisfano `matches`, con la loro
-    /// posizione (da 0), dalla più recente.
+    /// Ops of the main lane that satisfy `matches`, with their position
+    /// (from 0), most recent first.
     fn positions_of(&self, matches: impl Fn(&Op) -> bool) -> Result<Vec<(u64, OpId)>> {
         let mut found = Vec::new();
         let mut end = self.ops;
@@ -670,21 +677,22 @@ impl Repo {
         Ok(found)
     }
 
-    /// Traduce un punto della storia nel numero di op che lo precedono (lo
-    /// stato "dopo le prime k op") e in una descrizione leggibile.
+    /// Translates a point in the history into the number of ops that precede
+    /// it (the state "after the first k ops") and into a readable description.
     ///
-    /// Forme accettate: `ckpt#3`, `#3` o `3` (un checkpoint); `~2` (due op
-    /// fa); un prefisso di almeno 6 cifre dell'ID di un'op (lo stato subito
-    /// dopo quell'op).
+    /// Accepted forms: `ckpt#3`, `#3` or `3` (a checkpoint); `~2` (two ops
+    /// ago); a prefix of at least 6 digits of an op's ID (the state right
+    /// after that op).
     fn resolve_point(&self, spec: &str) -> Result<(u64, String)> {
         let spec = spec.trim();
         let invalid = |why: &str| Error::Other(format!("{spec:?}: {why}"));
         if let Some(back) = spec.strip_prefix('~') {
-            let back: u64 = back.parse().map_err(|_| invalid("dopo ~ serve un numero di operazioni"))?;
+            let back: u64 =
+                back.parse().map_err(|_| invalid("~ must be followed by a number of operations"))?;
             if back > self.ops {
-                return Err(invalid(&format!("la storia ha solo {} operazioni", self.ops)));
+                return Err(invalid(&format!("the history has only {}", operations(self.ops))));
             }
-            return Ok((self.ops - back, format!("{back} operazioni fa")));
+            return Ok((self.ops - back, format!("{} ago", operations(back))));
         }
         let number = spec.strip_prefix("ckpt#").or_else(|| spec.strip_prefix('#')).unwrap_or(spec);
         let looks_like_checkpoint = number.len() != spec.len() || number.len() < 6;
@@ -693,11 +701,11 @@ impl Repo {
                 let ck = self
                     .store
                     .checkpoint(CheckpointId(n))
-                    .ok_or_else(|| invalid("questo checkpoint non esiste (vedi `kito log`)"))?;
+                    .ok_or_else(|| invalid("this checkpoint does not exist (see `kito log`)"))?;
                 let head = ck.head;
                 let found = self.positions_of(|op| op.id == head)?;
                 let (index, _) =
-                    found.first().ok_or_else(|| invalid("il checkpoint non è sulla linea principale"))?;
+                    found.first().ok_or_else(|| invalid("the checkpoint is not on the main lane"))?;
                 let label = if ck.label.is_empty() { String::new() } else { format!(" ({})", ck.label) };
                 return Ok((index + 1, format!("{}{label}", ck.id)));
             }
@@ -706,15 +714,17 @@ impl Repo {
             let prefix = spec.to_ascii_lowercase();
             let found = self.positions_of(|op| op.id.to_string().starts_with(&prefix))?;
             return match found.as_slice() {
-                [(index, id)] => Ok((index + 1, format!("l'operazione {}", id.hash().short()))),
-                [] => Err(invalid("nessuna operazione con questo ID (vedi `kito log`)")),
-                _ => Err(invalid("più operazioni iniziano così: aggiungi qualche cifra")),
+                [(index, id)] => Ok((index + 1, format!("operation {}", id.hash().short()))),
+                [] => Err(invalid("no operation with this ID (see `kito log`)")),
+                _ => Err(invalid("several operations start like this: add a few more digits")),
             };
         }
-        Err(invalid("punto non riconosciuto: usa un checkpoint (ckpt#3), le prime cifre dell'ID di un'operazione, o ~N"))
+        Err(invalid(
+            "unrecognized point: use a checkpoint (ckpt#3), the first digits of an operation ID, or ~N",
+        ))
     }
 
-    /// L'albero della linea principale dopo le prime `k` op.
+    /// The tree of the main lane after the first `k` ops.
     fn tree_at(&self, k: u64) -> Result<Tree> {
         let mut tree = Tree::new();
         let mut applied = 0u64;
@@ -731,27 +741,27 @@ impl Repo {
         Ok(tree)
     }
 
-    /// Riporta la cartella di lavoro allo stato che aveva in un punto della
-    /// storia (vedi [`Repo::resolve_point`]), per tutti i file o solo per
-    /// quelli sotto `paths`.
+    /// Brings the working directory back to the state it had at a point in
+    /// the history (see [`Repo::resolve_point`]), for all files or only for
+    /// those under `paths`.
     ///
-    /// La storia non si riscrive: lo stato attuale viene prima catturato, e
-    /// il ritorno indietro è registrato come nuove op. Per questo un rollback
-    /// si può sempre annullare tornando al punto indicato in `undo`.
+    /// History is not rewritten: the current state is captured first, and
+    /// going back is recorded as new ops. This is why a rollback can always
+    /// be undone by returning to the point given in `undo`.
     pub fn rollback(&mut self, spec: &str, paths: &[PathBuf], dry_run: bool) -> Result<RollbackResult> {
         self.scan()?;
         let (k, description) = self.resolve_point(spec)?;
         let target = self.tree_at(k)?;
         let selected = |path: &Path| paths.is_empty() || paths.iter().any(|p| path.starts_with(p));
 
-        // Cosa cambia: file da riscrivere (con il contenuto di allora) e da togliere.
+        // What changes: files to rewrite (with the content they had then) and files to remove.
         let mut restore: Vec<(PathBuf, TreeEntry, &str)> = Vec::new();
         let mut remove: Vec<PathBuf> = Vec::new();
         for (path, entry) in target.iter().filter(|(p, _)| selected(p)) {
             match self.tree.get(path) {
                 Some(current) if current == entry => {}
-                Some(_) => restore.push((path.to_owned(), *entry, "ripristina")),
-                None => restore.push((path.to_owned(), *entry, "ricrea")),
+                Some(_) => restore.push((path.to_owned(), *entry, "restore")),
+                None => restore.push((path.to_owned(), *entry, "recreate")),
             }
         }
         for (path, _) in self.tree.iter().filter(|(p, _)| selected(p)) {
@@ -768,7 +778,7 @@ impl Repo {
             .chain(
                 remove
                     .iter()
-                    .map(|p| RollbackChange { path: p.display().to_string(), action: "rimuove".to_owned() }),
+                    .map(|p| RollbackChange { path: p.display().to_string(), action: "remove".to_owned() }),
             )
             .collect();
         changes.sort_by(|a, b| a.path.cmp(&b.path));
@@ -777,19 +787,20 @@ impl Repo {
             return Ok(RollbackResult { target: description, changes, applied: false, ops: 0, undo: None });
         }
 
-        // Un file non tracciato (perché ignorato) nel posto in cui va ricreato
-        // un file: il suo contenuto non è nel log e non va sovrascritto.
+        // An untracked file (because it is ignored) in the place where a file
+        // must be recreated: its content is not in the log and must not be
+        // overwritten.
         for (path, _, _) in &restore {
             if !self.tree.contains(path) && fs::symlink_metadata(self.root.join(path)).is_ok() {
                 return Err(Error::Other(format!(
-                    "{}: esiste ma non è tracciato; spostalo prima di fare il rollback",
+                    "{}: exists but is not tracked; move it away before rolling back",
                     path.display()
                 )));
             }
         }
 
-        // Prima le rimozioni (un file può lasciare il posto a una cartella e
-        // viceversa), poi le scritture.
+        // Removals first (a file can give way to a directory and vice versa),
+        // then the writes.
         for path in &remove {
             let abs = self.root.join(path);
             match fs::remove_file(&abs) {
@@ -797,7 +808,7 @@ impl Repo {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Error::io(&abs)(e)),
             }
-            // Le cartelle rimaste vuote se ne vanno con l'ultimo file.
+            // Directories left empty go away with their last file.
             let mut dir = path.parent();
             while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
                 if fs::remove_dir(self.root.join(d)).is_err() {
@@ -810,7 +821,7 @@ impl Repo {
             self.write_file(path, entry)?;
         }
 
-        let intent = Intent::new(format!("rollback a {description}"), None, None)?;
+        let intent = Intent::new(format!("rollback to {description}"), None, None)?;
         self.store.put_intent(&intent)?;
         let touched: Vec<PathBuf> = restore.into_iter().map(|(p, _, _)| p).chain(remove).collect();
         let ops = self.capture_as(touched, Some(intent.id))?;
@@ -818,7 +829,7 @@ impl Repo {
         Ok(RollbackResult { target: description, changes, applied: true, ops: ops.len(), undo })
     }
 
-    /// Scrive nella cartella di lavoro un file con il contenuto e il tipo dati.
+    /// Writes into the working directory a file with the given content and type.
     fn write_file(&self, rel: &Path, entry: &TreeEntry) -> Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let abs = self.root.join(rel);
@@ -826,14 +837,14 @@ impl Repo {
             fs::create_dir_all(dir).map_err(Error::io(dir))?;
         }
         let content = self.store.get_blob(&entry.blob)?.ok_or_else(|| {
-            Error::Other(format!("{}: il contenuto {} non è nello store", rel.display(), entry.blob))
+            Error::Other(format!("{}: content {} is not in the store", rel.display(), entry.blob))
         })?;
         if entry.mode == FileMode::Symlink {
             let _ = fs::remove_file(&abs);
             return std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&content), &abs)
                 .map_err(Error::io(&abs));
         }
-        // Scrittura su file temporaneo e rename: chi legge non vede mai un file a metà.
+        // Write to a temporary file, then rename: readers never see a half-written file.
         let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let tmp = abs.with_file_name(format!(".{name}.kito-tmp"));
         fs::write(&tmp, &content).map_err(Error::io(&tmp))?;
@@ -845,7 +856,7 @@ impl Repo {
         })
     }
 
-    /// Chiude il repository salvando lo stato e lasciando gli indici durevoli.
+    /// Closes the repository, saving the state and leaving the indexes durable.
     pub fn close(self) -> Result<()> {
         self.save_state()?;
         self.store.close()?;
@@ -853,7 +864,7 @@ impl Repo {
     }
 }
 
-/// Tempo impiegato da una cattura, per le statistiche del daemon.
+/// Time taken by a capture, for the daemon's statistics.
 pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let start = Instant::now();
     let value = f();

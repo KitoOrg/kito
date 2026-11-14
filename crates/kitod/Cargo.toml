@@ -1,6 +1,6 @@
 [package]
 name = "kitod"
-description = "Kito: daemon per repository (watcher, cattura, socket JSON-RPC)"
+description = "Kito: per-repository daemon (watcher, capture, JSON-RPC socket)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

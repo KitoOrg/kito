@@ -1,6 +1,6 @@
 [package]
 name = "kito-cli"
-description = "Kito: interfaccia a riga di comando (binario `kito`)"
+description = "Kito: command-line interface (`kito` binary)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

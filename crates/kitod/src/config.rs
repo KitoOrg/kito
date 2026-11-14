@@ -1,44 +1,44 @@
-//! Configurazione del repository: `.kito/config.toml`.
+//! Repository configuration: `.kito/config.toml`.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const CONFIG_FILE: &str = "config.toml";
 
-/// Configurazione scritta da `kito init`.
-pub const DEFAULT_CONFIG: &str = r#"# Configurazione di Kito per questo repository.
+/// Configuration written by `kito init`.
+pub const DEFAULT_CONFIG: &str = r#"# Kito configuration for this repository.
 
 [author]
-# Chi firma le modifiche catturate nella cartella di lavoro principale.
-# Si imposta con `kito identity --name ... --email ...`. Se manca valgono,
-# nell'ordine: $KITO_AUTHOR e $KITO_EMAIL, la configurazione personale
-# (~/.config/kito/config.toml), l'identità di git, $USER.
-# name = "Francesco"
-# email = "francesco@example.com"
-# kind = "human"        # oppure "agent"
+# Who signs the changes captured in the main working directory.
+# Set it with `kito identity --name ... --email ...`. If it is missing, these
+# apply, in order: $KITO_AUTHOR and $KITO_EMAIL, the personal configuration
+# (~/.config/kito/config.toml), the git identity, $USER.
+# name = "Ada"
+# email = "ada@example.com"
+# kind = "human"        # or "agent"
 
 [capture]
-# Attesa di quiete dopo l'ultimo evento del watcher, in millisecondi.
+# How long to wait for quiet after the last watcher event, in milliseconds.
 debounce_ms = 50
-# Ogni quanti secondi una scansione completa riconcilia gli eventi persi.
-# Se il daemon si accorge che gli eventi non arrivano (per esempio su /mnt/c
-# sotto WSL, o su una cartella di rete) scansiona da sé molto più spesso.
+# How often, in seconds, a full scan reconciles the missed events.
+# If the daemon notices that events are not arriving (for example on /mnt/c
+# under WSL, or on a network directory) it scans much more often by itself.
 rescan_secs = 60
-# Usa gli eventi del sistema operativo. Con `false` il daemon si affida solo
-# alla scansione frequente.
+# Use the operating system's events. With `false` the daemon relies only on
+# frequent scanning.
 watch = true
-# Percorsi da ignorare, con la sintassi di .gitignore. Si aggiungono a
-# .gitignore, .git/info/exclude e .kitoignore. `.git` e `.kito` sono sempre ignorati.
+# Paths to ignore, in .gitignore syntax. They are added to .gitignore,
+# .git/info/exclude and .kitoignore. `.git` and `.kito` are always ignored.
 ignore = []
-# I file più grandi di così non vengono catturati.
+# Files larger than this are not captured.
 max_file_bytes = 268435456
 
 [git]
-# Esporta ogni checkpoint come commit git appena viene creato.
+# Export every checkpoint as a git commit as soon as it is created.
 export_on_checkpoint = true
-# Ramo da far avanzare. Se manca: il ramo a cui punta HEAD.
+# Branch to advance. If it is missing: the branch HEAD points to.
 # branch = "main"
-# Dominio degli indirizzi email dei commit esportati.
+# Domain of the email addresses of the exported commits.
 email_domain = "kito.invalid"
 "#;
 
@@ -103,8 +103,8 @@ impl Default for GitConfig {
 }
 
 impl Config {
-    /// Legge `config.toml` dalla cartella dello store. Se il file manca
-    /// valgono i default.
+    /// Reads `config.toml` from the store directory. If the file is missing
+    /// the defaults apply.
     pub fn load(store_dir: &Path) -> Result<Config, String> {
         let path = store_dir.join(CONFIG_FILE);
         match std::fs::read_to_string(&path) {
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn partial_files_and_unknown_keys_are_accepted() {
         let parsed: Config = toml::from_str(
-            "[author]\nname = \"ada\"\nkind = \"agent\"\n[capture]\ndebounce_ms = 10\n[futuro]\nx = 1\n",
+            "[author]\nname = \"ada\"\nkind = \"agent\"\n[capture]\ndebounce_ms = 10\n[future]\nx = 1\n",
         )
         .unwrap();
         assert_eq!(parsed.author.name.as_deref(), Some("ada"));
