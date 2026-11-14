@@ -413,6 +413,10 @@ pub struct Lane {
     /// The intent the next captured ops are recorded with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<IntentId>,
+    /// The counter of the symbol IDs the lane creates never goes below
+    /// this: IDs are not reused, even those of symbols that no longer exist.
+    #[serde(default)]
+    pub next_symbol: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

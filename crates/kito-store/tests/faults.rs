@@ -174,6 +174,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 since: 0,
                 task: None,
                 intent: None,
+                next_symbol: 0,
             })
             .unwrap();
         store

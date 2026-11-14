@@ -74,6 +74,16 @@ impl SymbolTable {
         self.next_seq.get(&lane).copied().unwrap_or(0)
     }
 
+    /// Makes sure the next symbol `lane` creates gets a counter of at least
+    /// `seq`: for a table rebuilt from a point that has not seen every ID
+    /// the lane already used.
+    pub fn reserve(&mut self, lane: LaneId, seq: u64) {
+        if seq > 0 {
+            let next = self.next_seq.entry(lane).or_insert(0);
+            *next = (*next).max(seq);
+        }
+    }
+
     /// Name of a symbol qualified by its enclosing symbols: `Server.start`.
     pub fn qualified_name(&self, id: SymbolId) -> Option<String> {
         let mut parts = Vec::new();
@@ -276,6 +286,12 @@ mod tests {
         // IDs are never reused.
         assert_eq!(t.next_seq(LaneId(3)), 3);
         assert_eq!(t.next_seq(LaneId(9)), 0);
+        // Nor are the ones a lane used where this table could not see them.
+        t.reserve(LaneId(3), 2);
+        assert_eq!(t.next_seq(LaneId(3)), 3);
+        t.reserve(LaneId(3), 10);
+        t.apply(&add(10, "Later", None, "a.ts")).unwrap();
+        assert_eq!(t.next_seq(LaneId(3)), 11);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The AST differ: symbol IDs stay stable across edits, renames and moves.
 
 use kito_core::*;
-use kito_diff::ast::{diff_symbols, FileChange, Version};
+use kito_diff::ast::{diff_symbols_with, FileChange, Identities, Version};
 use kito_parse::{dialect_for_path, parse, ParsedFile};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +27,16 @@ impl World {
     }
 
     fn step_with(&mut self, changes: &[(&str, Option<&str>)], old_is_readable: bool) -> Vec<String> {
+        self.step_knowing(changes, old_is_readable, &Identities::new())
+    }
+
+    /// Like [`World::step`], with identities known in advance.
+    fn step_knowing(
+        &mut self,
+        changes: &[(&str, Option<&str>)],
+        old_is_readable: bool,
+        identities: &Identities,
+    ) -> Vec<String> {
         let paths: Vec<PathBuf> = changes.iter().map(|(p, _)| PathBuf::from(p)).collect();
         let old: Vec<Option<(String, ParsedFile)>> = paths
             .iter()
@@ -44,7 +54,7 @@ impl World {
             })
             .collect();
 
-        let result = diff_symbols(&self.table, LaneId::MAIN, &file_changes);
+        let result = diff_symbols_with(&self.table, LaneId::MAIN, &file_changes, identities);
         for blob in &result.blobs {
             self.blobs.insert(BlobId::of(blob), blob.clone());
         }
@@ -488,6 +498,72 @@ fn nesting_turned_inside_out_still_applies() {
         ["Move Inner: Nest.java -> Nest.java", "Move Inner.Outer: Nest.java -> Nest.java"]
     );
     assert_eq!(ids, (w.id("Nest.java", "Inner.Outer"), w.id("Nest.java", "Inner")));
+}
+
+#[test]
+fn identities_known_in_advance_overrule_the_heuristics() {
+    let total = "export function total(items: Item[]): number {\n  let sum = 0;\n  for (const item of items) {\n    sum += item.price * item.quantity;\n  }\n  return sum;\n}\n";
+    let names = "export function names(items: Item[]): number {\n  const seen = new Set<string>();\n  items.forEach((item) => seen.add(item.name.toLowerCase()));\n  return seen.size;\n}\n";
+    // Where the definition of `name` starts, as the parser sees it.
+    let start = |file: &str, content: &str, name: &str| {
+        let file = parsed(Path::new(file), content);
+        file.symbols.iter().find(|s| s.name == name).unwrap().range.start
+    };
+    let known = |file: &str, content: &str, name: &str, id: SymbolId| {
+        let mut identities = Identities::new();
+        identities.insert(Path::new(file), start(file, content, name), id);
+        identities
+    };
+
+    // Nothing in common but the signature: on its own the differ sees one
+    // function go and another come. Told that they are the same symbol (a
+    // merge knows, an explicit rename knows), it records what changed.
+    let mut w = World::default();
+    w.step(&[("a.ts", Some(total))]);
+    let id = w.id("a.ts", "total");
+    assert_eq!(
+        w.step_knowing(&[("a.ts", Some(names))], true, &known("a.ts", names, "names", id)),
+        ["Rename total -> names", "ModifyBody names"]
+    );
+    assert_eq!(w.id("a.ts", "names"), id);
+
+    // Known to be a symbol from another file: a move, whatever it looks like now.
+    let both = format!("{names}\n{total}");
+    w.step(&[("a.ts", Some(&both))]);
+    let other = w.id("a.ts", "total");
+    let moved = total.replace("sum", "amount").replace("total", "grandTotal");
+    let ops = w.step_knowing(
+        &[("a.ts", Some(names)), ("b.ts", Some(&moved))],
+        true,
+        &known("b.ts", &moved, "grandTotal", other),
+    );
+    assert_eq!(ops, ["Move total: a.ts -> b.ts", "Rename total -> grandTotal", "ModifyBody grandTotal"]);
+    assert_eq!(w.id("b.ts", "grandTotal"), other);
+
+    // Known to be a symbol this history has never seen (born in another
+    // lane): it arrives with the ID it was born with. What nobody vouches
+    // for gets the next ID of this lane, never one below the given floor.
+    let foreign = SymbolId::new(LaneId(7), 3);
+    let two = format!("{names}\nexport function extra() {{ return 1; }}\n\n{total}");
+    let mut identities = known("c.ts", &two, "total", foreign);
+    identities.start_new_ids_at(40);
+    assert_eq!(
+        w.step_knowing(&[("c.ts", Some(&two))], true, &identities),
+        ["Add Function names", "Add Function extra", "Add Function total"]
+    );
+    assert_eq!(w.id("c.ts", "total"), foreign);
+    assert_eq!(w.id("c.ts", "names"), SymbolId::new(LaneId::MAIN, 40));
+    assert_eq!(w.id("c.ts", "extra"), SymbolId::new(LaneId::MAIN, 41));
+    assert_eq!(w.table.next_seq(LaneId(7)), 4);
+
+    // The same identity cannot be given twice, and one already somewhere
+    // else in the table is not added again.
+    let twice = format!("{total}\n{}", total.replace("total", "copy"));
+    let mut identities = known("d.ts", &twice, "total", foreign);
+    identities.insert(Path::new("d.ts"), start("d.ts", &twice, "copy"), foreign);
+    let ops = w.step_knowing(&[("d.ts", Some(&twice))], true, &identities);
+    assert_eq!(ops, ["Add Function total", "Add Function copy"]);
+    assert_ne!(w.id("d.ts", "total"), foreign);
 }
 
 #[test]

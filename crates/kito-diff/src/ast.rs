@@ -23,7 +23,7 @@ use crate::fileops::inline_edits;
 use kito_core::{BlobId, LaneId, Location, OpKind, Symbol, SymbolEntry, SymbolId, SymbolTable};
 use kito_parse::{ParsedFile, ParsedSymbol};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A body with fewer tokens than this is too common to identify a symbol
 /// (`{}`, `pass`, `return x;`).
@@ -65,6 +65,42 @@ pub struct SymbolOps {
     pub blobs: Vec<Vec<u8>>,
 }
 
+/// Identities known in advance, which no heuristic may contradict: the
+/// symbol that starts at a given byte of a file's new content is the symbol
+/// with a given ID. A merge knows which symbol each piece of its result
+/// came from; an explicit rename knows what it renamed.
+#[derive(Clone, Debug, Default)]
+pub struct Identities {
+    by_start: HashMap<(PathBuf, usize), SymbolId>,
+    first_new: u64,
+}
+
+impl Identities {
+    pub fn new() -> Identities {
+        Identities::default()
+    }
+
+    /// The symbol whose definition starts at byte `start` of `file` is `id`.
+    pub fn insert(&mut self, file: &Path, start: usize, id: SymbolId) {
+        self.by_start.insert((file.to_owned(), start), id);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_start.is_empty()
+    }
+
+    /// The counter of the IDs given to new symbols starts at least here.
+    /// For a lane whose state is being rebuilt on another base: the table
+    /// it is compared with has not seen the IDs the lane already used.
+    pub fn start_new_ids_at(&mut self, seq: u64) {
+        self.first_new = self.first_new.max(seq);
+    }
+
+    fn get(&self, file: &Path, start: usize) -> Option<SymbolId> {
+        self.by_start.get(&(file.to_owned(), start)).copied()
+    }
+}
+
 /// A symbol the history knows, with what the old content says about it (if
 /// the old content could be parsed and still contains it).
 struct Old<'a> {
@@ -86,8 +122,16 @@ struct New<'a> {
 }
 
 struct Differ<'a> {
+    table: &'a SymbolTable,
     olds: Vec<Old<'a>>,
     news: Vec<New<'a>>,
+    /// Where each loaded old symbol is in `olds`.
+    old_at: HashMap<SymbolId, usize>,
+    /// Per new symbol: the identity known in advance, if any.
+    known: Vec<Option<SymbolId>>,
+    /// Old symbols some new symbol is known to be: no heuristic may give
+    /// them to another one.
+    claimed: HashSet<SymbolId>,
     /// Per old symbol: a new symbol was recognized as the same one.
     matched: Vec<bool>,
     /// ID given to each new symbol: the matched old one, or a fresh one.
@@ -106,9 +150,25 @@ struct Differ<'a> {
 /// the symbolic ops that lead from one to the other. New symbols get IDs
 /// from `lane`'s counter.
 pub fn diff_symbols(table: &SymbolTable, lane: LaneId, changes: &[FileChange<'_>]) -> SymbolOps {
+    diff_symbols_with(table, lane, changes, &Identities::default())
+}
+
+/// Like [`diff_symbols`], with some identities known in advance: those
+/// symbols are paired as told (or added with the ID told, if the table does
+/// not know it yet), and the heuristics only see the rest.
+pub fn diff_symbols_with(
+    table: &SymbolTable,
+    lane: LaneId,
+    changes: &[FileChange<'_>],
+    identities: &Identities,
+) -> SymbolOps {
     let mut differ = Differ {
+        table,
         olds: Vec::new(),
         news: Vec::new(),
+        old_at: HashMap::new(),
+        known: Vec::new(),
+        claimed: HashSet::new(),
         matched: Vec::new(),
         assigned: Vec::new(),
         leftover_old: Vec::new(),
@@ -123,9 +183,11 @@ pub fn diff_symbols(table: &SymbolTable, lane: LaneId, changes: &[FileChange<'_>
     let mut scopes: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
     for change in changes {
         let old_roots = differ.load_old(table, change);
-        let new_roots = differ.load_new(change);
+        let new_roots = differ.load_new(change, identities);
         scopes.push((old_roots, new_roots));
     }
+    differ.claimed =
+        differ.known.iter().flatten().copied().filter(|id| differ.old_at.contains_key(id)).collect();
     for (old_roots, new_roots) in scopes {
         differ.match_scope(old_roots, new_roots);
     }
@@ -133,7 +195,9 @@ pub fn diff_symbols(table: &SymbolTable, lane: LaneId, changes: &[FileChange<'_>
 
     // Whatever is still unmatched is added or removed, with all it contains.
     let mut ops = Vec::new();
-    let mut next = table.next_seq(lane);
+    let mut next = table.next_seq(lane).max(identities.first_new);
+    // In the order of the files: new IDs follow the text.
+    differ.leftover_new.sort_unstable();
     for root in std::mem::take(&mut differ.leftover_new) {
         if differ.assigned[root].is_none() {
             differ.add(root, lane, &mut next, &mut ops);
@@ -205,6 +269,7 @@ impl<'a> Differ<'a> {
             entries.iter().enumerate().map(|(i, (id, _))| (*id, base + i)).collect();
         for (id, entry) in &entries {
             let parent = entry.parent.and_then(|p| index.get(&p).copied());
+            self.old_at.insert(*id, self.olds.len());
             self.olds.push(Old { id: *id, entry, seen: seen.get(id).copied(), parent, children: Vec::new() });
             self.matched.push(false);
         }
@@ -219,7 +284,7 @@ impl<'a> Differ<'a> {
     }
 
     /// Loads the symbols of the new content. Returns the top-level ones.
-    fn load_new(&mut self, change: &FileChange<'a>) -> Vec<usize> {
+    fn load_new(&mut self, change: &FileChange<'a>, identities: &Identities) -> Vec<usize> {
         let Some(new) = change.new else { return Vec::new() };
         let base = self.news.len();
         let mut roots = Vec::new();
@@ -234,6 +299,10 @@ impl<'a> Differ<'a> {
                 children: Vec::new(),
             });
             self.assigned.push(None);
+            // An identity can be given once: a second claim to it is ignored.
+            let known =
+                identities.get(change.path, sym.range.start).filter(|id| !self.known.contains(&Some(*id)));
+            self.known.push(known);
             match parent {
                 Some(p) => self.news[p].children.push(base + i),
                 None => roots.push(base + i),
@@ -282,6 +351,26 @@ impl<'a> Differ<'a> {
         let mut free_old = olds;
         let mut free_new = news;
         let mut pairs: Vec<(usize, usize)> = Vec::new();
+
+        // Pass 0: identities known in advance. A new symbol known to be an
+        // old one of this scope is that one; known to be one from elsewhere,
+        // or one the table has never seen, it waits for the moves and the
+        // additions. An old symbol claimed from elsewhere waits too.
+        free_new.retain(|&n| {
+            let Some(id) = self.known[n] else { return true };
+            match self.old_at.get(&id).and_then(|o| free_old.iter().position(|x| x == o)) {
+                Some(at) => pairs.push((free_old.remove(at), n)),
+                None => self.leftover_new.push(n),
+            }
+            false
+        });
+        free_old.retain(|&o| {
+            let claimed = self.claimed.contains(&self.olds[o].id);
+            if claimed {
+                self.leftover_old.push(o);
+            }
+            !claimed
+        });
 
         // Pass 1: same name and kind. Among namesakes (overloads) the ones
         // that did not change pair up first, then the ones that changed only
@@ -492,11 +581,26 @@ impl<'a> Differ<'a> {
     /// what they contain, so that a namespace that moved takes its classes
     /// along instead of losing them one by one.
     fn match_moves(&mut self) {
+        // First the identities known in advance, outermost first: a known
+        // container settles what it contains through its own scope.
+        let mut known: Vec<(usize, usize, usize)> = (0..self.news.len())
+            .filter_map(|n| {
+                let o = *self.old_at.get(&self.known[n]?)?;
+                Some((self.old_depth(o) + self.new_depth(n), o, n))
+            })
+            .collect();
+        known.sort_unstable();
+        for (_, o, n) in known {
+            if !self.matched[o] && self.assigned[n].is_none() {
+                self.pair(o, n, self.scope_changed(o, n));
+            }
+        }
+
         // New symbols by what could identify them.
         let mut by_body: HashMap<kito_core::Hash, Vec<usize>> = HashMap::new();
         let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
         for (n, new) in self.news.iter().enumerate() {
-            if self.assigned[n].is_some() {
+            if self.assigned[n].is_some() || self.known[n].is_some() {
                 continue;
             }
             if new.sym.body_tokens >= MIN_BODY_TOKENS {
@@ -508,7 +612,7 @@ impl<'a> Differ<'a> {
         let mut candidates: Vec<(usize, f32, usize, usize)> = Vec::new();
         for (o, old) in self.olds.iter().enumerate() {
             let Some((seen, _)) = old.seen else { continue };
-            if self.matched[o] {
+            if self.matched[o] || self.claimed.contains(&old.id) {
                 continue;
             }
             let same_body = by_body.get(&seen.body).into_iter().flatten();
@@ -559,8 +663,15 @@ impl<'a> Differ<'a> {
 
     /// `AddSymbol` for a symbol and everything new it contains, container first.
     fn add(&mut self, new: usize, lane: LaneId, next: &mut u64, ops: &mut Vec<OpKind>) {
-        let id = SymbolId::new(lane, *next);
-        *next += 1;
+        // A symbol known in advance keeps the ID it was born with (in
+        // another lane); any other gets the next one of this lane.
+        let id = match self.known[new].filter(|id| self.table.get(*id).is_none()) {
+            Some(id) => id,
+            None => {
+                *next += 1;
+                SymbolId::new(lane, *next - 1)
+            }
+        };
         self.assigned[new] = Some(id);
         let (file, sym, content, lang) =
             (self.news[new].file, self.news[new].sym, self.news[new].content, self.news[new].parsed.lang);
