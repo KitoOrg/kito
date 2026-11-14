@@ -51,11 +51,15 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
         return Ok(Vec::new());
     }
 
-    let repo = match gix::open(root) {
+    let mut repo = match gix::open(root) {
         Ok(repo) => repo,
         Err(_) if !root.join(".git").exists() => gix::init(root).map_err(git_err)?,
         Err(e) => return Err(git_err(e)),
     };
+    // Il reflog del ramo vuole un'identità: se git non ne ha una configurata
+    // (macchina nuova, CI) se ne usa una di ripiego invece di fallire.
+    repo.committer_or_set_fallback("Kito", format!("kito@{}", opts.email_domain).as_str())
+        .map_err(git_err)?;
     let branch = match &opts.branch {
         Some(name) if name.starts_with("refs/") => name.clone(),
         Some(name) => format!("refs/heads/{name}"),
