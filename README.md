@@ -16,7 +16,7 @@ runnable demo.
 | 1 | Continuous textual capture: `kitod`, CLI, git export/import | done |
 | 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | done |
 | 3 | Lanes and integration, MCP server | done |
-| 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | to do |
+| 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | done |
 | 5 | Coverage and performance | to do |
 
 ## Crates
@@ -28,6 +28,7 @@ runnable demo.
 | `kito-parse` | tree-sitter grammars and symbol queries for the ten languages, normalized hashes |
 | `kito-diff` | Textual diff, file ops, and the AST differ that keeps symbol IDs stable |
 | `kito-merge` | The semantic rebase: three states composed symbol by symbol, conflicts |
+| `kito-semantic` | Who uses a symbol: from the syntax, or from a language server |
 | `kito-lane` | Working copies of the lanes, cloned copy-on-write where the file system allows |
 | `kito-integrate` | Integration queue, verifier, the result an agent reads |
 | `kito-git` | Export of checkpoints as git commits, import from a git repository |
@@ -125,6 +126,21 @@ kito conflicts
 kito resolve conflict#1 --lane
 ```
 
+A rename made in one lane reaches the uses another lane added meanwhile
+under the old name. With a language server installed
+(`typescript-language-server` and `gopls` are looked for by default; others
+go in `[semantic.servers]` of the configuration) that happens by itself;
+without one Kito reads the syntax and asks before it touches a use it is
+not sure of:
+
+```bash
+kito rename src/auth.ts:getUser fetchUser --lane lane/1
+```
+
+```bash
+kito resolve conflict#1 --rewrite
+```
+
 Agents do all this through the MCP server, `kito-mcp`, which offers
 `kito.open_lane`, `kito.sync`, `kito.status`, `kito.log`, `kito.set_intent`,
 `kito.rename_symbol`, `kito.request_integration`, `kito.integration_result`,
@@ -154,6 +170,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 4 demo: a function renamed in one lane and newly used in another; git
+merges them into something that does not compile, Kito carries the rename
+to the new use (needs `tsc`, `node` and, for the automatic part,
+`typescript-language-server`).
+
+```bash
+scripts/demo-phase4.sh
 ```
 
 Phase 3 demo: two agents on the same file, a real conflict decided, then a

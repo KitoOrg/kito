@@ -112,6 +112,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             took * 100.0 / recorded as f64
         );
     }
+    // 3. Level 2 with the syntax alone: who uses a function, in a lane.
+    if args.iter().any(|a| a == "--rename") {
+        std::fs::write(
+            root.join(".kito/config.toml"),
+            "[git]\nexport_on_checkpoint = false\n[semantic]\nservers = {}\n",
+        )?;
+        repo.reload_config()?;
+        let lane = repo.open_lane("renamer", None, None)?.id;
+        let lane: LaneId = lane.parse().map_err(|_| "lane id")?;
+        let started = Instant::now();
+        let done = repo.rename_symbol(lane, &format!("{}:compute7_2", path(7)), "renamed7_2")?;
+        println!(
+            "\nexplicit rename in a lane, uses looked for in the syntax of {files} files: {:.0} ms ({} listed)",
+            started.elapsed().as_secs_f64() * 1000.0,
+            done.possible_references.len()
+        );
+        let started = Instant::now();
+        let result = repo.integrate(lane)?;
+        println!(
+            "integrating the rename (two questions to the provider): {:.0} ms, {:?}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            result.result
+        );
+    }
     let verified = repo.store().verify()?;
     println!("\nstore: {} ops, verified: {}", verified.ops, verified.is_ok());
     repo.close()?;

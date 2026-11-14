@@ -554,13 +554,14 @@ tests.
 
 ### Known limitations
 
-- **No `SemanticRef` yet** (phase 4): a lane that renames a function does
-  not update the calls another lane adds meanwhile, and two lanes that add
-  a function with the same name both keep theirs. Neither is a conflict
-  for Kito at this level: it is the verifier (a type checker) that stops
-  the integration.
+- **No `SemanticRef` in this phase** (it came with phase 4): a lane that
+  renames a function does not update the calls another lane adds
+  meanwhile. Two lanes that add a function with the same name both keep
+  theirs, then as now: it is the verifier (a type checker) that stops the
+  integration.
 - An explicit rename changes the definition and the uses inside the symbol
-  itself; the other places where the name appears are listed, not edited.
+  itself; the other places where the name appears are listed, not edited
+  (until phase 4).
 - A conflict is about a whole symbol (or a whole file, for text): it is
   decided by choosing a side or giving the new text, not hunk by hunk.
 - A reordering is not an op: when both sides changed a file, its symbols
@@ -575,6 +576,174 @@ tests.
   is lost, but every lane rereads its files once (D-048).
 - One integration at a time: with slow verification commands, lanes wait.
 
-## Phase 4 · level 2 semantics — to do
+## Phase 4 · level 2 semantics — done
+
+`kito-semantic` with the `SemanticProvider` trait, the provider that reads
+the syntax and the one that asks a language server (tried with TypeScript
+and Go); `SemanticRef` conflicts; renames that reach the uses of the symbol.
+
+### What is there
+
+- **References between symbols** (`kito-semantic`): a provider answers two
+  questions about a state of the repository — which references leave the
+  symbols of a file, and who uses a symbol — and every answer carries how
+  sure it is and where it comes from.
+  - `TreeSitterHeuristic` is always there and reads only the syntax: the
+    uses in the file that defines the symbol, and the ones that reach it
+    through an explicit import (JavaScript and TypeScript, Python, Go). It
+    is never sure: 0.5 to 0.8.
+  - `LspProvider` asks a language server, and is as sure as the server.
+    One server per language runs in the main directory, started the first
+    time it is needed; a lane is shown to it as open documents, closed
+    again after the question. It is configured in `.kito/config.toml`,
+    `[semantic.servers.<name>]`; `typescript-language-server` and `gopls`
+    are the defaults, and a server that is not installed is skipped.
+- **A rename reaches the uses the other side has.** When a lane is
+  integrated and one of the two sides renamed a symbol the other still
+  calls by its old name, the providers are asked who uses it. The uses a
+  provider is sure of take the new name: the new ones another lane added,
+  and the old ones the author of the rename forgot. The integration result
+  says so (`rename_propagation`, with the places), and the verifier runs on
+  the result as always.
+- **`semantic_ref` conflicts.** A use that only the syntax suspects, and
+  that is new on its side, is not touched: it is a conflict, with the
+  rename on one side and the list of the uses on the other. It is decided
+  with `kito resolve <conflict> --rewrite` (they are uses of the symbol:
+  they take the new name) or `--keep` (they are something else), or the
+  same choices through `kito.resolve_conflict`.
+- **`kito rename` takes the uses along**: the ones a provider vouches for
+  are renamed in the lane with the definition, the others are listed as
+  before.
+- A language server that fails, or does not answer in time, is stopped and
+  said so in the result; the syntax answers in its place.
+
+### Demo
+
+The scenario of the plan: alice renames `getUser` to `fetchUser`; bob, in
+another lane, adds a file that calls `getUser`. With git the two merge
+without a conflict and the result does not compile. With Kito and a
+language server, bob's call is renamed when his lane is integrated, and the
+type checker and the tests pass before anything reaches the main lane.
+Without a language server Kito asks, and applies the answer.
+
+```bash
+cargo build --release -p kitod -p kito-cli
+```
+
+```bash
+scripts/demo-phase4.sh
+```
+
+It needs `tsc` and `node`; the second part also needs
+`typescript-language-server`. Output of the run of 14 November 2026 in
+[`demo/phase4-demo.txt`](demo/phase4-demo.txt). The heart of it:
+
+```text
+$ git merge --no-edit bob
+Merge made by the 'ort' strategy.
+
+$ tsc --noEmit -p .
+src/billing.ts(1,10): error TS2305: Module '"./auth"' has no exported member 'getUser'.
+```
+
+```text
+$ kito rename src/auth.ts:getUser fetchUser --lane lane/1
+`getUser` is now `fetchUser` in src/auth.ts (symbol 0#0).
+Its uses took the new name:
+  src/web.ts:1
+  src/web.ts:4
+
+$ kito integrate lane/1
+lane/1: integrated as ckpt#2 (git e4cd595d93), verified in 2.4 s
+
+$ kito integrate lane/2
+lane/2: integrated as ckpt#3 (git 420722a3a6), verified in 2.4 s
+  rename followed: ts/auth.getUser#0 is now `fetchUser` also in src/billing.ts:1, src/billing.ts:4
+```
+
+and, without a language server:
+
+```text
+$ kito integrate lane/2
+lane/2: 1 conflict
+  conflict#1   lane/2   semantic_ref   getUser  (src/auth.ts)  [to decide]
+
+$ kito conflicts conflict#1
+--- on the main lane
+renamed: getUser → fetchUser
+
+--- on lane/2
+uses of `getUser` that may be of this symbol:
+src/billing.ts:1: import { getUser } from "./auth";
+src/billing.ts:4: return "invoice for " + getUser(id);
+
+$ kito resolve conflict#1 --rewrite
+$ kito integrate lane/2
+lane/2: integrated as ckpt#3 (git 5cd39ec641), verified in 2.3 s
+  rename followed: ts/auth.getUser#0 is now `fetchUser` also in src/billing.ts:1, src/billing.ts:4
+```
+
+### Acceptance criteria rechecked
+
+**0 fake conflicts.** The swarm of phase 3, run again on this code: 40
+integrations out of 40, no conflict that is not one of the 3 staged. A new
+kind of fake conflict was found and removed while writing this phase: a
+line one side changed and the other only renamed a symbol in. The three
+states are now made to agree on the name before they are merged (D-060).
+
+**Integration under 200 ms per 100 ops.** An integration in which nothing
+was renamed asks nothing and costs what it did: 87 ms for 100 ops on 50,000
+files, 425 ms for 1,000. One that has to ask pays for the answers:
+
+| Who answers | Explicit rename in a lane | Integrating a lane that renamed |
+| --- | --- | --- |
+| TypeScript server, first question (it starts and loads 41 files) | 1,060 ms | — |
+| TypeScript server, later questions | 224–240 ms | — |
+| The syntax alone, 5,000 files | 109 ms | 122 ms |
+| The syntax alone, 50,000 files | 817–893 ms | 756–773 ms |
+
+**Latency of a save.** Unchanged: processing p50 14.9 ms, p95 19.9 ms on
+the ordinary file. Level 2 is not on the path of a save.
+
+### Tests
+
+226 in the workspace. New in this phase:
+
+- Names and imports read from the syntax, in TypeScript, Python and Go.
+- The heuristic: same file, named and namespace imports, a namesake from
+  another module left alone, methods, Python and Go packages; references
+  leaving a file.
+- The language-server provider against a server written for the tests:
+  lanes as open documents, a server that hangs, one that dies, one that is
+  not installed; and against the real `typescript-language-server` and
+  `gopls`, which run where they are installed (they say when they are
+  skipped, and `KITO_TEST_REQUIRE_SERVERS=1` forbids it).
+- Integrations: a rename meets a new use, in a new file and on a line the
+  rename touched too; a rename reaches what the main lane got meanwhile
+  and what its author forgot; a doubtful use asked about, rewritten, kept;
+  an explicit rename with and without a provider that is sure.
+
+### Known limitations
+
+- **No reference index.** The plan has level 2 fill an index in the
+  background; here the providers are asked when a rename needs them, and
+  nothing is stored (D-059). An index is for phase 5, with the SCIP import.
+- **TypeScript and Go** are the languages tried with a language server.
+  The provider is generic and takes any server from the configuration; the
+  other eight languages are phase 5.
+- `typescript-language-server` 6 does not work with TypeScript 7 (which has
+  no `tsserver`): Kito says so and falls back to the syntax. `gopls` does
+  not look into directories whose name starts with a dot.
+- The syntax follows imports in JavaScript, TypeScript, Python and Go, and
+  only relative module paths and names imported one by one or through a
+  namespace; in the other languages it sees the same file only.
+- A use its author forgot is reached where its line is still exactly as it
+  was; one on a line that was reformatted is left to the verifier.
+- Only renames travel. A symbol removed on one side and newly used on the
+  other, or a signature changed while a call was added, are still for the
+  verifier to catch.
+- The first question to a language server waits for it to load the project:
+  a second on a small project, longer on a large one, within the time limit
+  of the configuration (60 s by default).
 
 ## Phase 5 · coverage and performance — to do

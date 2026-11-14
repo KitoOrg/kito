@@ -14,9 +14,10 @@
 //!
 //! Who uses a symbol is a question for the providers of `kito-semantic`,
 //! and a language server may take seconds to answer: the question is
-//! prepared while the repository is held ([`Repo::plan_references`]), asked
-//! without holding it ([`answer`]), and its answers are applied by the merge
-//! only if both lanes are still where they were.
+//! prepared while the repository is held (a merge that finds a rename asks
+//! before it goes on), asked without holding it ([`answer`]), and its
+//! answers are applied by the merge only if both lanes are still where
+//! they were.
 //!
 //! A use the provider is sure of (a language server's answer) is rewritten.
 //! One it only suspects (the syntax alone) is rewritten only if it is new on
@@ -240,15 +241,11 @@ impl Repo {
         Ok(RenamePlan { ops: work.ops, symbol, state: self.frozen(&work.tree, &work.symbols)? })
     }
 
-    /// What level 2 has to find out before `lane` is merged. `None`: neither
-    /// side renamed anything the other still calls by its old name, which is
-    /// almost always.
-    pub fn plan_references(&mut self, lane: LaneId) -> Result<Option<RefPlan>> {
-        if lane.is_main() {
-            return Ok(None);
-        }
-        self.scan_lane(lane)?;
-        self.capture_main_under(lane, &[])?;
+    /// What level 2 has to find out before `lane` is merged, the lanes
+    /// being as the last captures left them. `None`: neither side renamed
+    /// anything the other still calls by its old name, which is almost
+    /// always.
+    pub(crate) fn reference_plan(&self, lane: LaneId) -> Result<Option<RefPlan>> {
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let renames = renames(&at.base_symbols, &self.main.symbols, &at.work.symbols);
         if renames.is_empty() {
@@ -263,12 +260,15 @@ impl Repo {
         }))
     }
 
-    /// `true` if one side renamed something the other still calls by its
-    /// old name: the providers have to be asked before merging.
-    pub(crate) fn has_renames(&self, lane: LaneId) -> bool {
-        self.lanes
-            .get(&lane)
-            .is_some_and(|at| !renames(&at.base_symbols, &self.main.symbols, &at.work.symbols).is_empty())
+    /// The same, after capturing what was saved in the lane and in the files
+    /// of the main directory its work touches.
+    pub fn plan_references(&mut self, lane: LaneId) -> Result<Option<RefPlan>> {
+        if lane.is_main() {
+            return Ok(None);
+        }
+        self.scan_lane(lane)?;
+        self.capture_main_under(lane, &[])?;
+        self.reference_plan(lane)
     }
 
     /// `true` if these answers were given for the lanes as they are now.

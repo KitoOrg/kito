@@ -544,37 +544,31 @@ async fn rescan_loop(daemon: Arc<Daemon>) {
 /// merging and while recording: the verification runs with it free.
 async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
     let failed = |message: String| IntegrationResult::failed(lane.to_string(), message);
-    for _ in 0..4 {
-        // Level 2: who uses what one of the two sides renamed. Asked
-        // without holding the repository: a language server takes its time.
+    let mut answers: Option<crate::refs::RefAnswers> = None;
+    for _ in 0..6 {
         let worker = daemon.clone();
-        let plan = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| Ok((repo.plan_references(lane)?, repo.semantic())))
-        })
-        .await;
-        let answers = match plan {
-            Ok(Ok((Some(plan), semantic))) => Some(crate::refs::answer(&plan, &semantic).await),
-            Ok(Ok((None, _))) => None,
-            Ok(Err(e)) => return failed(e.to_string()),
-            Err(e) => return failed(e.to_string()),
-        };
-        let worker = daemon.clone();
+        let given = answers.take();
         let prepared = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| match repo.prepare_integration(lane, answers.as_ref())? {
-                Preparation::Done(result) => Ok(Some(Err(result))),
+            worker.with_repo(|repo| match repo.prepare_integration(lane, given.as_ref())? {
+                Preparation::Done(result) => Ok(Ok(Err(result))),
                 Preparation::Ready(prepared) => {
                     let copy = repo.verification_copy(&prepared)?;
-                    Ok(Some(Ok((prepared, copy))))
+                    Ok(Ok(Ok((prepared, copy))))
                 }
-                Preparation::Stale => Ok(None),
+                Preparation::Ask(plan) => Ok(Err((plan, repo.semantic()))),
             })
         })
         .await;
         let (prepared, copy) = match prepared {
-            Ok(Ok(Some(Ok(ready)))) => ready,
-            Ok(Ok(Some(Err(result)))) => return *result,
-            // A lane moved while the providers were answering: ask again.
-            Ok(Ok(None)) => continue,
+            Ok(Ok(Ok(Ok(ready)))) => ready,
+            Ok(Ok(Ok(Err(result)))) => return *result,
+            // Level 2: who uses what one of the two sides renamed. Asked
+            // without holding the repository: a language server takes its
+            // time. Then the merge is prepared again, with the answers.
+            Ok(Ok(Err((plan, semantic)))) => {
+                answers = Some(crate::refs::answer(&plan, &semantic).await);
+                continue;
+            }
             Ok(Err(e)) => return failed(e.to_string()),
             Err(e) => return failed(e.to_string()),
         };

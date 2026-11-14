@@ -484,3 +484,99 @@ not kept: the parse cache is for files being edited.
 The development profile keeps only line tables for the workspace's crates
 and builds without incremental caches (D-054 was not enough: every test
 binary links everything, and `target/` passed 20 GB a second time).
+
+## Phase 4
+
+### D-058 · What a provider answers with
+The plan's trait returns `Reference`s, which go from a symbol to a symbol.
+A use of a symbol is not always inside one: an import, a statement at the
+top of a file. So "who uses this symbol" returns `Usage`s (file, bytes,
+confidence, source), and a `Reference` is made from a usage where there is
+a symbol to make it from. The data model is untouched. A language server
+is as sure as it gets (1.0); the heuristic gives 0.8 to a plain name in the
+file that defines it and to an import that leads there, 0.7 to the uses of
+an imported name and to a member used inside its own type, 0.6 where the
+file has namesakes or the module is matched by the end of its path, 0.5 to
+a member used elsewhere. The threshold to act without asking is the
+plan's: 0.9.
+
+### D-059 · Level 2 is asked when it is needed
+The plan describes level 2 as a background task that enriches an index
+with the references between files. Nothing here needs every reference of
+the repository: what is needed is who uses one symbol, when it has been
+renamed. So there is no index: the providers are asked at that moment,
+and nothing is stored. An index is needed to answer fast on a repository
+where no language server is running, and belongs with the SCIP import of
+phase 5. `references` (what leaves the symbols of a file) is implemented
+by both providers and used by nothing yet.
+
+### D-060 · The three states agree on the name before they are merged
+The rule of the plan — a rename on the main lane and a new use on the lane:
+the use is rewritten — was first done by rewriting the uses on the side
+that had not renamed. A line that side had changed, and the other only
+renamed a symbol in, then conflicted: two different changes to one line.
+Now the uses the provider is sure of are rewritten on copies of all three
+states: at the common starting point and on the side that did not rename,
+where the provider finds them; on the side that renamed, where a line of
+the starting point with a use is still exactly as it was (the provider
+cannot be asked there: the old name no longer means anything). The merge
+sees three states in which the rename has already happened everywhere, and
+only what each side really did is left to compose. A use the author of a
+rename forgot is renamed by the same means.
+
+### D-061 · `semantic_ref` conflicts
+A doubtful use is asked about only if it is new on its side (its line was
+not in the file at the starting point): the ones that were there are the
+renamer's business, and asking about every old suspect would bury the real
+question. The conflict is about the renamed symbol; its three texts are the
+old name, `renamed: a → b` on the side that renamed, and the list of the
+suspected uses on the other. Its decision is one of the two the model
+already has: taking the side that renamed means rewriting the uses, taking
+the other means keeping them, and `--rewrite` and `--keep` are those two
+said in a way that does not need to know which side is which. A new text is
+refused. While it is undecided the same line may also raise an ordinary
+conflict, since without a provider that is sure the states are not made to
+agree.
+
+### D-062 · Language servers
+One server per language, in the main working directory, started at the
+first question and kept. A state that is not on disk there (a lane, the
+starting point of a merge) is shown as open documents with their whole
+text, a file the state does not have as an empty document, and all of them
+are closed after the question: the server is back to the disk, and no
+question depends on the one before. A server is driven by a thread of its
+own with blocking I/O: the provider does not depend on which async runtime
+calls it, and the daemon and the library both use it. A server that fails
+or passes its time limit is killed and started again by the next question;
+one whose program is not installed is found out once and left alone. In
+each case the heuristic answers and the result says what happened.
+
+### D-063 · A server is asked when it has finished loading
+A server asked right after it starts answers with what it has loaded: the
+TypeScript server returned the uses in the open file only. The client says
+it follows progress reports, and before a question it waits until the
+server has no work in progress, giving it a moment to say it began: up to
+3 seconds for the first question after a start, 150 ms afterwards, never
+more than half of the question's time limit.
+
+### D-064 · No `lsp-types`
+The plan lists `lsp-types` among the dependencies of this crate. The
+client sends seven kinds of message and reads places from two answers:
+they are written with `serde_json`, and a crate of some thousand types was
+not added for them.
+
+### D-065 · Asking does not hold the repository
+A question to a language server takes from a fraction of a second to
+minutes. A merge that finds a rename returns the question instead of a
+result; it is asked with the repository free, so that saves keep being
+recorded; the merge is then prepared again with the answers, which are
+used only if both lanes are where they were when the question was made.
+An explicit rename does the same.
+
+### D-066 · Tests of real servers
+The tests that need `typescript-language-server` or `gopls` run where they
+are installed and say so when they are skipped; with
+`KITO_TEST_REQUIRE_SERVERS=1` a missing server is a failure. They were
+first written to skip in silence, and for a while they did nothing: the
+TypeScript on the path had no `tsserver`, and `gopls` was probed with a
+flag it does not have.

@@ -51,9 +51,10 @@ pub enum Preparation {
     Done(Box<IntegrationResult>),
     /// The merge composed: verify it, then finish.
     Ready(Box<Prepared>),
-    /// The lanes moved since the references were asked about (or they were
-    /// not asked about at all): plan and ask again.
-    Stale,
+    /// One side renamed something the other still calls by its old name:
+    /// ask the providers of level 2 who uses it ([`crate::refs::answer`]),
+    /// then prepare again with their answers.
+    Ask(Box<crate::refs::RefPlan>),
 }
 
 /// A decision on a conflict, as a client gives it.
@@ -281,10 +282,9 @@ impl Repo {
     /// Step 1: captures what is still unsaved on both sides and merges the
     /// lane into the main lane.
     ///
-    /// `answers`: what [`Repo::plan_references`] asked and the providers
-    /// answered. Without them the merge is made as if nothing had been
-    /// renamed, unless something was: then it asks for them, with
-    /// [`Preparation::Stale`].
+    /// `answers`: what the providers of level 2 answered to the questions
+    /// of a [`Preparation::Ask`]. It is given none the first time; it asks
+    /// only if something was renamed, and again if the lanes moved since.
     pub fn prepare_integration(&mut self, lane: LaneId, answers: Option<&RefAnswers>) -> Result<Preparation> {
         if lane.is_main() {
             return Err(Error::Other("the main lane is what lanes are integrated into".into()));
@@ -294,12 +294,11 @@ impl Repo {
         // involved are looked at: the rest is the watcher's business.
         self.scan_lane(lane)?;
         self.capture_main_under(lane, &[])?;
-        let asked = match answers {
-            Some(answers) => self.answers_hold(lane, answers),
-            None => !self.has_renames(lane),
-        };
-        if !asked {
-            return Ok(Preparation::Stale);
+        let answers = answers.filter(|answers| self.answers_hold(lane, answers));
+        if answers.is_none() {
+            if let Some(plan) = self.reference_plan(lane)? {
+                return Ok(Preparation::Ask(Box::new(plan)));
+            }
         }
         let open = self.open_conflicts(lane);
         let blob_of = |text: &Option<Vec<u8>>| text.as_ref().map(|t| BlobId::of(t));
@@ -322,10 +321,10 @@ impl Repo {
                 break;
             }
             // The main lane moved: what was asked about it is no longer so.
-            if answers.is_some() {
-                return Ok(Preparation::Stale);
+            if let Some(plan) = self.reference_plan(lane)? {
+                return Ok(Preparation::Ask(Box::new(plan)));
             }
-            (found, propagated) = self.merge_lane(lane, &HashMap::new(), answers, &no_uses)?;
+            (found, propagated) = self.merge_lane(lane, &HashMap::new(), None, &no_uses)?;
         }
         let mut decisions: HashMap<Subject, Choice> = HashMap::new();
         let mut uses: HashMap<SymbolId, bool> = HashMap::new();
@@ -717,19 +716,17 @@ impl Repo {
             .enable_all()
             .build()
             .map_err(|e| Error::Other(format!("starting the verifier: {e}")))?;
-        for _ in 0..4 {
-            // What the providers say of the uses of what was renamed.
-            let answers = match self.plan_references(lane)? {
-                Some(plan) => {
-                    let semantic = self.semantic();
-                    Some(runtime.block_on(crate::refs::answer(&plan, &semantic)))
-                }
-                None => None,
-            };
+        let mut answers = None;
+        for _ in 0..6 {
             let prepared = match self.prepare_integration(lane, answers.as_ref())? {
                 Preparation::Done(result) => return Ok(*result),
                 Preparation::Ready(prepared) => *prepared,
-                Preparation::Stale => continue,
+                // What the providers say of the uses of what was renamed.
+                Preparation::Ask(plan) => {
+                    let semantic = self.semantic();
+                    answers = Some(runtime.block_on(crate::refs::answer(&plan, &semantic)));
+                    continue;
+                }
             };
             let verification = self.verification_copy(&prepared)?.map(|(dir, commands, timeout)| {
                 runtime.block_on(kito_integrate::verify(&dir, &commands, timeout))

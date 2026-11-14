@@ -219,3 +219,29 @@ working copies, `git add -A && git commit` in the worktree and
 git does not parse anything, which is the whole difference in the first row.
 The comparison says nothing about what git cannot do at any speed: the two
 agents of the phase 3 demo conflict in git and do not in Kito.
+
+## Phase 4 · what a question to level 2 costs
+
+An integration in which neither side renamed anything asks nothing: finding
+that out is a comparison of the two symbol tables that looks only at what
+differs. On 50,000 files, after this phase: 87 ms for 100 ops, 425 ms for
+1,000 (the first version of the phase scanned the lane twice, 60 ms more;
+the question is now made by the merge itself, after its one scan).
+
+```bash
+cargo run --release -p kitod --example scale -- --files 50000 --rename
+```
+
+| Who answers | Explicit rename in a lane | Integrating a lane that renamed |
+| --- | --- | --- |
+| The syntax alone, 5,000 files | 109 ms | 122 ms |
+| The syntax alone, 50,000 files | 817–893 ms | 756–773 ms |
+
+The syntax-only provider reads every file of the language to see whether
+the name is written in it, and parses the ones where it is: that is the
+whole cost, and it grows with the repository.
+
+With `typescript-language-server` on a project of 41 files, an explicit
+rename that updates 80 uses in 40 files takes 1,060 ms the first time (the
+server starts and loads the project) and 224–240 ms afterwards, 150 ms of
+which are the wait of D-063.

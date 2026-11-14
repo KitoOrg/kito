@@ -260,6 +260,6 @@ fn a_merge_asks_for_the_references_it_was_not_given() {
     assert!(repo.plan_references(LaneId(2)).unwrap().is_none());
     assert!(matches!(repo.prepare_integration(LaneId(2), None).unwrap(), Preparation::Ready(_)));
     // Alice's rename has to be asked about before her lane is merged.
-    assert!(matches!(repo.prepare_integration(LaneId(1), None).unwrap(), Preparation::Stale));
+    assert!(matches!(repo.prepare_integration(LaneId(1), None).unwrap(), Preparation::Ask(_)));
     assert!(repo.plan_references(LaneId(1)).unwrap().is_some());
 }
