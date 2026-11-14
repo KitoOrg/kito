@@ -193,3 +193,72 @@ fn killed_daemon_loses_nothing_that_was_captured() {
         assert_eq!(repo.store().get_blob(&entry.blob).unwrap().unwrap(), format!("{i} bis\n").as_bytes());
     }
 }
+
+/// Modifica un file del repository senza che il watcher possa accorgersene:
+/// scrive attraverso un hard link che sta fuori dalla cartella osservata.
+/// È ciò che succede, per esempio, su `/mnt/c` sotto WSL quando il file lo
+/// cambia un programma Windows.
+fn modify_behind_the_watcher(file: &Path, outside: &Path, content: &str) {
+    let link = outside.join("link");
+    let _ = fs::remove_file(&link);
+    fs::hard_link(file, &link).unwrap();
+    fs::write(&link, content).unwrap();
+}
+
+#[test]
+fn changes_the_watcher_cannot_see_are_found_by_scanning() {
+    let tmp = new_repo();
+    let root = tmp.path();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(root.join(".kito/config.toml"), "[capture]\nrescan_secs = 60\n").unwrap();
+    let mut client = start(root);
+
+    fs::write(root.join("a.txt"), "uno\n").unwrap();
+    wait_until("la cattura di a.txt", || status(&mut client).repo.ops == 1);
+    let before = status(&mut client).watcher;
+    assert!(
+        before.watching && !before.events_unreliable && before.rescan_interval_ms == 60_000,
+        "{before:?}"
+    );
+
+    // Il watcher tace; la modifica arriva "da fuori".
+    std::thread::sleep(Duration::from_millis(1200));
+    modify_behind_the_watcher(&root.join("a.txt"), outside.path(), "uno\nmodificato senza eventi\n");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(status(&mut client).repo.ops, 1, "nessun evento: il watcher da solo non la vede");
+
+    // La barriera la trova, e il daemon ne prende atto: da qui scansiona spesso.
+    let found: Value = client.call("sync", json!({})).unwrap();
+    assert_eq!(found["ops"], 1);
+    let after = status(&mut client).watcher;
+    assert!(after.events_unreliable && after.missed_by_watcher == 1, "{after:?}");
+    assert_eq!(after.rescan_interval_ms, 1000);
+
+    // Le modifiche successive arrivano da sole, senza eventi e senza sync.
+    std::thread::sleep(Duration::from_millis(1200));
+    modify_behind_the_watcher(&root.join("a.txt"), outside.path(), "uno\nmodificato di nuovo\n");
+    wait_until("la scansione frequente", || status(&mut client).repo.ops == 3);
+    stop(root, &mut client);
+
+    let repo = Repo::open(root).unwrap();
+    let entry = repo.tree().get(Path::new("a.txt")).unwrap();
+    assert_eq!(repo.store().get_blob(&entry.blob).unwrap().unwrap(), b"uno\nmodificato di nuovo\n");
+}
+
+#[test]
+fn without_a_watcher_the_daemon_polls() {
+    let tmp = new_repo();
+    let root = tmp.path();
+    fs::write(root.join(".kito/config.toml"), "[capture]\nwatch = false\n").unwrap();
+    let mut client = start(root);
+    let w = status(&mut client).watcher;
+    assert!(!w.watching && w.events_unreliable && w.rescan_interval_ms == 1000, "{w:?}");
+
+    fs::write(root.join("a.txt"), "uno\n").unwrap();
+    wait_until("la cattura per scansione", || status(&mut client).repo.ops == 1);
+    fs::write(root.join("a.txt"), "uno\ndue\n").unwrap();
+    wait_until("la cattura della modifica", || status(&mut client).repo.ops == 2);
+    let w = status(&mut client).watcher;
+    assert_eq!((w.events, w.missed_by_watcher), (0, 0), "senza watcher non ci sono eventi né eventi persi");
+    stop(root, &mut client);
+}

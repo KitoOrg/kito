@@ -7,6 +7,7 @@ use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -17,6 +18,23 @@ use tokio::sync::{mpsc, Notify};
 const SAMPLES: usize = 1024;
 /// Un gruppo di eventi non aspetta la quiete più di tante volte il debounce.
 const MAX_WAIT_FACTOR: u32 = 10;
+/// Quando gli eventi non sono affidabili si scansiona di continuo, ma
+/// spendendo in scansioni al più un ventesimo del tempo…
+const FAST_SCAN_FACTOR: u32 = 20;
+/// …e mai più di una volta al secondo.
+const FAST_SCAN_MIN: Duration = Duration::from_secs(1);
+/// Una scansione che trova modifiche quando il watcher tace da così tanto
+/// ha trovato modifiche che il watcher non ha segnalato.
+const QUIET: Duration = Duration::from_secs(1);
+
+/// Contatori aggiornati dal callback del watcher.
+#[derive(Default)]
+struct Signals {
+    /// Eventi ricevuti (esclusi quelli interni).
+    events: AtomicU64,
+    /// Millisecondi dall'avvio del daemon all'ultimo evento.
+    last_event_ms: AtomicU64,
+}
 
 #[derive(Default)]
 struct WatchStats {
@@ -43,8 +61,18 @@ struct Daemon {
     /// `None` dopo lo spegnimento.
     repo: Mutex<Option<Repo>>,
     stats: Mutex<WatchStats>,
-    /// Eventi contati dal callback del watcher.
-    events: Arc<std::sync::atomic::AtomicU64>,
+    signals: Arc<Signals>,
+    /// `false` se il watcher è disattivato dalla configurazione.
+    watching: bool,
+    filesystem: Option<String>,
+    /// Gli eventi non sono affidabili: scansione frequente.
+    fast: AtomicBool,
+    fast_changed: Notify,
+    /// Modifiche trovate dalla scansione e mai segnalate dal watcher.
+    missed: AtomicU64,
+    /// Durata dell'ultima scansione, in microsecondi.
+    last_scan_us: AtomicU64,
+    rescan_every: Duration,
     started: Instant,
     debounce: Duration,
     shutdown: Notify,
@@ -69,9 +97,14 @@ impl Daemon {
             socket: self.socket.clone(),
             debounce_ms: self.debounce.as_millis() as u64,
             watcher: WatcherStatus {
-                events: self.events.load(std::sync::atomic::Ordering::Relaxed),
+                events: self.signals.events.load(Ordering::Relaxed),
                 batches: stats.batches,
                 rescans: stats.rescans,
+                watching: self.watching,
+                filesystem: self.filesystem.clone(),
+                events_unreliable: self.fast.load(Ordering::Relaxed),
+                missed_by_watcher: self.missed.load(Ordering::Relaxed),
+                rescan_interval_ms: self.rescan_interval().as_millis() as u64,
                 capture_p50_ms: percentile(&stats.capture_ms, 0.50),
                 capture_p95_ms: percentile(&stats.capture_ms, 0.95),
                 latency_p50_ms: percentile(&stats.latency_ms, 0.50),
@@ -80,6 +113,46 @@ impl Daemon {
             },
             repo,
         })
+    }
+
+    /// Tempo trascorso dall'ultimo evento del watcher (`None`: mai arrivato uno).
+    fn since_last_event(&self) -> Option<Duration> {
+        if self.signals.events.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let last = Duration::from_millis(self.signals.last_event_ms.load(Ordering::Relaxed));
+        Some(self.started.elapsed().saturating_sub(last))
+    }
+
+    /// Scansione completa di riconciliazione. Se trova modifiche mentre il
+    /// watcher tace, vuol dire che qui gli eventi non arrivano tutti: da quel
+    /// momento il daemon scansiona spesso invece di fidarsi del watcher.
+    fn reconcile(&self) -> Result<usize> {
+        let quiet = self.since_last_event().is_none_or(|t| t >= QUIET);
+        let start = Instant::now();
+        let ops = self.with_repo(|repo| repo.scan())?;
+        self.last_scan_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).rescans += 1;
+        if !ops.is_empty() && quiet && self.watching {
+            self.missed.fetch_add(ops.len() as u64, Ordering::Relaxed);
+            if !self.fast.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "kitod: {} modifiche non segnalate dal watcher: da ora la cartella viene scansionata spesso",
+                    ops.len()
+                );
+                self.fast_changed.notify_one();
+            }
+        }
+        Ok(ops.len())
+    }
+
+    /// Intervallo tra due scansioni periodiche.
+    fn rescan_interval(&self) -> Duration {
+        if !self.fast.load(Ordering::Relaxed) {
+            return self.rescan_every;
+        }
+        let last_scan = Duration::from_micros(self.last_scan_us.load(Ordering::Relaxed));
+        (last_scan * FAST_SCAN_FACTOR).max(FAST_SCAN_MIN).min(self.rescan_every)
     }
 
     /// Esegue una richiesta. È codice bloccante: va chiamato fuori dal runtime.
@@ -94,8 +167,8 @@ impl Daemon {
             match request.method.as_str() {
                 "status" => to_json(serde_json::to_value(self.status().map_err(internal)?)),
                 "sync" => {
-                    let ops = self.with_repo(|repo| repo.scan()).map_err(internal)?;
-                    Ok(json!({ "ops": ops.len() }))
+                    let ops = self.reconcile().map_err(internal)?;
+                    Ok(json!({ "ops": ops }))
                 }
                 "log" => {
                     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
@@ -214,16 +287,15 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
 }
 
 /// Scansione periodica: recupera gli eventi che il watcher ha perso.
-async fn rescan_loop(daemon: Arc<Daemon>, every: Duration) {
-    let mut ticker = tokio::time::interval(every);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await; // il primo scatta subito: la scansione iniziale è già fatta
+async fn rescan_loop(daemon: Arc<Daemon>) {
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = tokio::time::sleep(daemon.rescan_interval()) => {}
+            // È appena scattata la scansione frequente: l'attesa si ricalcola.
+            _ = daemon.fast_changed.notified() => continue,
+        }
         let worker = daemon.clone();
-        let outcome = tokio::task::spawn_blocking(move || worker.with_repo(|repo| repo.scan())).await;
-        daemon.stats.lock().unwrap_or_else(|e| e.into_inner()).rescans += 1;
-        match outcome {
+        match tokio::task::spawn_blocking(move || worker.reconcile()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => eprintln!("kitod: scansione periodica: {e}"),
             Err(_) => return,
@@ -265,38 +337,52 @@ pub async fn serve(root: &Path) -> Result<()> {
     let debounce = Duration::from_millis(repo.config().capture.debounce_ms.max(1));
     let rescan_every = Duration::from_secs(repo.config().capture.rescan_secs.max(1));
 
+    let watching = repo.config().capture.watch;
+    let filesystem = crate::fsinfo::filesystem_type(&root);
+    let unreliable = filesystem.as_deref().is_some_and(crate::fsinfo::events_are_unreliable);
+    let started = Instant::now();
+
     // Il watcher parte prima della scansione iniziale: così nessuna modifica
     // può cadere nell'intervallo tra le due.
     let (tx, rx) = mpsc::unbounded_channel::<WatchMsg>();
-    let watch_root = root.clone();
-    let stats_events = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let counter = stats_events.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let msg = match event {
-            Ok(event) if event.need_rescan() => WatchMsg::Rescan("il watcher ha perso degli eventi".into()),
-            Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
-            Ok(event) => {
-                let paths: Vec<PathBuf> = event
-                    .paths
-                    .iter()
-                    .filter_map(|p| p.strip_prefix(&watch_root).ok())
-                    .filter(|rel| !rel.as_os_str().is_empty() && !is_internal(rel))
-                    .map(Path::to_owned)
-                    .collect();
-                if paths.is_empty() {
-                    return;
+    let signals = Arc::new(Signals::default());
+    let watcher = if watching {
+        let watch_root = root.clone();
+        let seen = signals.clone();
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let msg = match event {
+                Ok(event) if event.need_rescan() => {
+                    WatchMsg::Rescan("il watcher ha perso degli eventi".into())
                 }
-                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                WatchMsg::Paths(paths)
-            }
-            Err(e) => WatchMsg::Rescan(format!("errore del watcher: {e}")),
-        };
-        let _ = tx.send(msg);
-    })
-    .map_err(|e| Error::Other(format!("avvio del watcher: {e}")))?;
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(|e| Error::Other(format!("watcher su {}: {e}", root.display())))?;
+                Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
+                Ok(event) => {
+                    let paths: Vec<PathBuf> = event
+                        .paths
+                        .iter()
+                        .filter_map(|p| p.strip_prefix(&watch_root).ok())
+                        .filter(|rel| !rel.as_os_str().is_empty() && !is_internal(rel))
+                        .map(Path::to_owned)
+                        .collect();
+                    if paths.is_empty() {
+                        return;
+                    }
+                    seen.last_event_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    seen.events.fetch_add(1, Ordering::Relaxed);
+                    WatchMsg::Paths(paths)
+                }
+                Err(e) => WatchMsg::Rescan(format!("errore del watcher: {e}")),
+            };
+            let _ = tx.send(msg);
+        })
+        .map_err(|e| Error::Other(format!("avvio del watcher: {e}")))?;
+        watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(|e| Error::Other(format!("watcher su {}: {e}", root.display())))?;
+        Some(watcher)
+    } else {
+        drop(tx);
+        None
+    };
 
     repo.scan()?;
 
@@ -309,15 +395,30 @@ pub async fn serve(root: &Path) -> Result<()> {
         socket: socket.clone(),
         repo: Mutex::new(Some(repo)),
         stats: Mutex::new(WatchStats::default()),
-        events: stats_events,
-        started: Instant::now(),
+        signals,
+        watching,
+        filesystem,
+        fast: AtomicBool::new(!watching || unreliable),
+        fast_changed: Notify::new(),
+        missed: AtomicU64::new(0),
+        last_scan_us: AtomicU64::new(0),
+        rescan_every,
+        started,
         debounce,
         shutdown: Notify::new(),
     });
     eprintln!("kitod: in ascolto su {} per {}", socket.display(), daemon.root.display());
+    if !watching {
+        eprintln!("kitod: watcher disattivato dalla configurazione: la cartella viene scansionata spesso");
+    } else if unreliable {
+        eprintln!(
+            "kitod: file system {}: gli eventi non sono affidabili, la cartella viene scansionata spesso",
+            daemon.filesystem.as_deref().unwrap_or("?")
+        );
+    }
 
     let debouncer = tokio::spawn(debounce_loop(daemon.clone(), rx));
-    let rescanner = tokio::spawn(rescan_loop(daemon.clone(), rescan_every));
+    let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| Error::Other(format!("gestione dei segnali: {e}")))?;
 

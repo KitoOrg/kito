@@ -19,7 +19,12 @@ pub const DEFAULT_CONFIG: &str = r#"# Configurazione di Kito per questo reposito
 # Attesa di quiete dopo l'ultimo evento del watcher, in millisecondi.
 debounce_ms = 50
 # Ogni quanti secondi una scansione completa riconcilia gli eventi persi.
+# Se il daemon si accorge che gli eventi non arrivano (per esempio su /mnt/c
+# sotto WSL, o su una cartella di rete) scansiona da sé molto più spesso.
 rescan_secs = 60
+# Usa gli eventi del sistema operativo. Con `false` il daemon si affida solo
+# alla scansione frequente.
+watch = true
 # Percorsi da ignorare, con la sintassi di .gitignore. Si aggiungono a
 # .gitignore, .git/info/exclude e .kitoignore. `.git` e `.kito` sono sempre ignorati.
 ignore = []
@@ -63,13 +68,20 @@ pub enum AuthorKindConfig {
 pub struct CaptureConfig {
     pub debounce_ms: u64,
     pub rescan_secs: u64,
+    pub watch: bool,
     pub ignore: Vec<String>,
     pub max_file_bytes: u64,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        CaptureConfig { debounce_ms: 50, rescan_secs: 60, ignore: Vec::new(), max_file_bytes: 256 << 20 }
+        CaptureConfig {
+            debounce_ms: 50,
+            rescan_secs: 60,
+            watch: true,
+            ignore: Vec::new(),
+            max_file_bytes: 256 << 20,
+        }
     }
 }
 

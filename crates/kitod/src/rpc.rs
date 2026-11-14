@@ -80,6 +80,21 @@ pub struct WatcherStatus {
     pub batches: u64,
     /// Scansioni complete di riconciliazione.
     pub rescans: u64,
+    /// `false` se il watcher è disattivato dalla configurazione.
+    #[serde(default)]
+    pub watching: bool,
+    /// Tipo del file system del repository, se noto.
+    #[serde(default)]
+    pub filesystem: Option<String>,
+    /// Gli eventi non sono affidabili qui: il daemon scansiona spesso.
+    #[serde(default)]
+    pub events_unreliable: bool,
+    /// Modifiche trovate dalla scansione senza che il watcher le avesse segnalate.
+    #[serde(default)]
+    pub missed_by_watcher: u64,
+    /// Intervallo attuale tra due scansioni di riconciliazione.
+    #[serde(default)]
+    pub rescan_interval_ms: u64,
     /// Tempo di elaborazione di un gruppo (dopo il debounce), in millisecondi.
     pub capture_p50_ms: Option<f64>,
     pub capture_p95_ms: Option<f64>,

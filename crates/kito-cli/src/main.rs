@@ -143,12 +143,13 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool) -> Outcome {
     let root = repo.root().to_owned();
     repo.close().map_err(fail)?;
     // La cattura è continua da subito: il daemon parte con il repository.
-    Client::connect_or_start(&root).map_err(fail)?;
+    let mut client = Client::connect_or_start(&root).map_err(fail)?;
     if cli.json {
         print_json(&json!({ "root": root }));
     } else {
         println!("Repository Kito creato in {}", root.join(".kito").display());
         println!("Il daemon è attivo: da ora ogni salvataggio viene registrato.");
+        warn_if_events_unreliable(&mut client);
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
     let report = repo.import_git().map_err(fail)?;
     let captured = repo.scan().map_err(fail)?;
     repo.close().map_err(fail)?;
-    Client::connect_or_start(&root).map_err(fail)?;
+    let mut client = Client::connect_or_start(&root).map_err(fail)?;
     if cli.json {
         print_json(&json!({
             "commits": report.commits,
@@ -185,6 +186,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
             println!("Catturate {} modifiche non ancora presenti in git.", captured.len());
         }
         println!("Il daemon è attivo: da ora ogni salvataggio viene registrato.");
+        warn_if_events_unreliable(&mut client);
     }
     Ok(())
 }
@@ -200,8 +202,11 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
         }
         None => None,
     };
-    let items: Vec<LogItem> =
-        daemon(cli)?.call("log", json!({ "limit": limit, "path": rel })).map_err(fail)?;
+    let mut client = daemon(cli)?;
+    // Prima di mostrare il log ci si assicura che contenga tutto ciò che è
+    // su disco, anche se il watcher avesse perso qualche evento.
+    client.call_value("sync", json!({})).map_err(fail)?;
+    let items: Vec<LogItem> = client.call("log", json!({ "limit": limit, "path": rel })).map_err(fail)?;
     if cli.json {
         print_json(&items);
         return Ok(());
@@ -315,12 +320,63 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
         if let Some(error) = &w.last_error {
             println!("Ultimo avviso ..... {error}");
         }
+        println!("Riconciliazione ... scansione completa ogni {}", seconds(w.rescan_interval_ms));
+        if let Some(why) = unreliable_events(status) {
+            println!("                    {why}");
+        }
         println!("Language server ... nessuno (arrivano con la fase 4)");
     }
 }
 
+fn seconds(ms: u64) -> String {
+    if ms.is_multiple_of(1000) {
+        format!("{} s", ms / 1000)
+    } else {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
+}
+
+/// Se in questo repository gli eventi dei file non bastano, spiega perché e
+/// cosa fa Kito al loro posto.
+fn unreliable_events(status: &DaemonStatus) -> Option<String> {
+    let w = &status.watcher;
+    if !w.events_unreliable {
+        return None;
+    }
+    let cause = if !w.watching {
+        "il watcher è disattivato in .kito/config.toml".to_owned()
+    } else if w.missed_by_watcher > 0 {
+        format!("{} modifiche non sono state segnalate dal sistema operativo", w.missed_by_watcher)
+    } else {
+        format!(
+            "sul file system {} gli eventi dei file non sono affidabili",
+            w.filesystem.as_deref().unwrap_or("di questa cartella")
+        )
+    };
+    Some(format!(
+        "{cause}: le modifiche vengono trovate dalla scansione, entro {} circa",
+        seconds(w.rescan_interval_ms)
+    ))
+}
+
+/// Dopo `init` e `import`: avvisa se qui la cattura non sarà immediata.
+fn warn_if_events_unreliable(client: &mut Client) {
+    let Ok(status) = client.call::<DaemonStatus>("status", json!({})) else { return };
+    if let Some(why) = unreliable_events(&status) {
+        println!("Nota: {why}.");
+        if status.watcher.filesystem.as_deref() == Some("9p") {
+            println!("      Sotto WSL conviene tenere il progetto nel file system di Linux (per esempio in ~/progetti).");
+        }
+    }
+}
+
 fn cmd_status(cli: &Cli, with_daemon: bool) -> Outcome {
-    let status: DaemonStatus = daemon(cli)?.call("status", json!({})).map_err(fail)?;
+    let mut client = daemon(cli)?;
+    if !with_daemon {
+        // Lo stato del repository deve riflettere ciò che è su disco adesso.
+        client.call_value("sync", json!({})).map_err(fail)?;
+    }
+    let status: DaemonStatus = client.call("status", json!({})).map_err(fail)?;
     if cli.json {
         print_json(&status);
     } else {

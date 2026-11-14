@@ -176,6 +176,9 @@ cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
 - Gli intent (il "perché" delle op) arrivano con la fase 3, insieme al tool
   MCP che li imposta.
 - Solo Linux e macOS, come da default del piano; provato su Linux.
+- Dove gli eventi dei file non arrivano (per esempio `/mnt/c` sotto WSL) la
+  cattura passa per la scansione: completa, ma con circa un secondo di
+  ritardo e senza i salvataggi intermedi (D-025).
 
 ## Fase 2 · semantica livello 1 — da fare
 

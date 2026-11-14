@@ -6,6 +6,7 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod fsinfo;
 pub mod ignore;
 pub mod repo;
 pub mod rpc;

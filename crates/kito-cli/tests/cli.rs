@@ -184,3 +184,27 @@ fn errors_are_clear_and_json_stays_json() {
     assert!(!out.status.success(), "init due volte");
     ok(tmp.path(), &["daemon", "stop"]);
 }
+
+#[test]
+fn log_is_up_to_date_even_when_file_events_are_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let outside = tempfile::tempdir().unwrap();
+    ok(root, &["init"]);
+    fs::write(root.join("nota.txt"), "prima\n").unwrap();
+    assert_eq!(ok(root, &["log"]).lines().count(), 1);
+
+    // Una modifica che il watcher non può vedere: passa da un hard link
+    // fuori dalla cartella osservata (come un programma Windows su /mnt/c).
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let link = outside.path().join("link");
+    fs::hard_link(root.join("nota.txt"), &link).unwrap();
+    fs::write(&link, "prima\ndopo\n").unwrap();
+
+    let log = ok(root, &["log"]);
+    assert!(log.lines().next().unwrap().contains("TextEdit"), "kito log deve mostrarla subito:\n{log}");
+    let status = ok(root, &["daemon", "status"]);
+    assert!(status.contains("non sono state segnalate dal sistema operativo"), "{status}");
+    assert!(status.contains("scansione completa ogni 1 s"), "{status}");
+    ok(root, &["daemon", "stop"]);
+}

@@ -167,3 +167,23 @@ In una cartella che è già un repository git `init` si rifiuta e indica
 `.kito/lanes/main/state` contiene l'albero e la cache degli stat per
 ripartire in fretta. È un derivato: se manca, è illeggibile o non corrisponde
 al log, si riapplicano le op.
+
+### D-025 · Quando gli eventi dei file non arrivano
+Su alcuni file system il sistema operativo non segnala tutte le modifiche:
+il caso tipico è `/mnt/c` sotto WSL, dove ciò che cambia un programma Windows
+non genera eventi in Linux, ma vale anche per le cartelle di rete. Tre misure:
+
+- `kito log` e `kito status` eseguono la barriera (`sync`) prima di
+  rispondere: ciò che mostrano riflette sempre il disco, a prescindere dal
+  watcher.
+- Se una scansione trova modifiche mentre il watcher tace da più di un
+  secondo, il daemon conclude che lì gli eventi non bastano e passa alla
+  scansione frequente: al più una al secondo, e spendendo in scansioni non
+  più di un ventesimo del tempo. Parte direttamente così sui file system noti
+  per questo problema (9p, drvfs, cifs, nfs…) e con `capture.watch = false`.
+- `kito daemon status` dice quale intervallo è in uso e perché; `init` e
+  `import` avvisano subito.
+
+Con la scansione al posto degli eventi la cattura resta completa ma meno
+fine: i salvataggi tra una scansione e l'altra si fondono in una sola op, e
+l'ora registrata è quella della scansione.
