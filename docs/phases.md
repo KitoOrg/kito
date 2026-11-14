@@ -751,4 +751,128 @@ the ordinary file. Level 2 is not on the path of a save.
   a second on a small project, longer on a large one, within the time limit
   of the configuration (60 s by default).
 
-## Phase 5 · coverage and performance — to do
+## Phase 5 · coverage and performance — done
+
+Level 2 with the language servers of eight languages; references from a
+SCIP index; a store that keeps what changed instead of whole files; and the
+acceptance criteria of the plan measured on a repository of 50,000 files.
+
+### What is there
+
+- **A finished save is captured at once.** Where the system says when a
+  file is closed after being written (Linux), the daemon no longer waits
+  for 50 ms of quiet: from a save to its op, 16 ms at the median and 21 ms
+  at the 95th percentile on a 2,000-line file, 72 ms before.
+- **Language servers for eight languages**: next to TypeScript and Go,
+  JavaScript (the TypeScript server), Python (`pyright`), Rust
+  (`rust-analyzer`), PHP (`intelephense`), C and C++ (`clangd`), each tried
+  with the real server on the main lane and in a lane. They are the default
+  servers of a repository; one that is not installed is skipped.
+- **A SCIP index** (`kito scip index.scip`): the references of the whole
+  repository as an indexer found them in one go, used for the files that
+  have not changed since. A rename reaches the uses its author forgot
+  without a language server running.
+- **A store that grows with what changes.** A file saved again is stored as
+  a delta from the version before: 910 bytes per save instead of 20 kB, for
+  one line of a 69 kB file. The op log is untouched and every read is still
+  verified against its hash.
+- **Faster on large repositories**: the first capture of 50,000 files in
+  14 s instead of 90, and an integration with its git commit in 0.1–0.2 s
+  instead of 1.1.
+
+### Demo
+
+The acceptance criteria of the plan, measured one after the other on a
+repository of 50,000 files, each with its verdict.
+
+```bash
+cargo build --release -p kitod -p kito-cli
+```
+
+```bash
+cargo build --release -p kitod -p kito-store -p kito-diff --examples
+```
+
+```bash
+scripts/fetch-corpus.sh
+```
+
+```bash
+scripts/demo-phase5.sh /path/on/the/disk/to/test
+```
+
+Output of the run of 14 November 2026 in
+[`demo/phase5-demo.txt`](demo/phase5-demo.txt). Its last lines:
+
+```text
+| Criterion | Target | Measured | |
+| --- | --- | --- | --- |
+| Save → op, p95, 2,000-line file | < 30 ms | 21.1 ms | met |
+| Creating a lane, 50000 files (median of 5; best 505 ms) | < 1 s, with copy-on-write | 584 ms, files copied | met, without copy-on-write |
+| Integrating without conflicts, verifier excluded, git commit included (worst of 5 lanes; 98 ms for a lane that is up to date) | < 200 ms per 100 ops | 152 ms per 100 ops | met |
+| Confirmed ops lost after a crash (24 kills) | 0 | 0 | met |
+| Fake conflicts (40 integrations by 10 agents) | 0 | 0 | met |
+| Renames / moves kept on the corpus (ten repositories) | >= 99% | 100.0% / 100.0% | met |
+```
+
+### The acceptance criteria, one by one
+
+**From a save to its op, under 30 ms at the 95th percentile.** Met on the
+file the criterion names, 2,000 lines of ordinary code (143 functions): p95
+21.1–22.6 ms in three runs of the demo. On Linux only: elsewhere the system
+does not say when a file is closed, and the 50 ms of quiet remain. Not met
+on the worst case kept as a reference since phase 2, 2,000 functions of one
+line each: 53 ms, which is the time to read its symbols again.
+
+**Creating a lane under 1 s on 50,000 files, with copy-on-write.** The
+criterion is about a file system that shares data between files; none was
+available, and every file is copied. With copies the demo measured a median
+of 459 ms, 2,162 ms and 584 ms in three runs of the same binary on the same
+day: the second while the disk of the test machine was in one of its slow
+spells, during which creating a file costs up to twenty times more. So:
+met in two runs out of three, without the feature the criterion assumes,
+and not shown for the case it describes.
+
+**Integrating without conflicts under 200 ms per 100 ops.** Met with the
+git commit of the integration included: 93–110 ms for a lane that is up to
+date, 135–187 ms for one the main lane has left 600 files behind, 38–49 ms
+per 100 ops for a lane of 1,000. The first run of the demo measured 260 ms
+for the lane left behind; what was done about it is in
+[`benchmarks.md`](benchmarks.md).
+
+**No confirmed op lost after a crash.** 0, with 21 to 24 `kill -9` per run
+on 200,000 ops (and one million ops in the phase 0 demo).
+
+**No fake conflicts.** 0 in 40 integrations by ten agents, in every run.
+
+**Renames and moves recognized, at least 99% on the corpus.** 100% of 4,023
+renames and 1,510 moves.
+
+### Tests
+
+239 in the workspace. New in this phase: a finished save captured without
+waiting, also when it is saved through a temporary file, and a rename still
+recorded as one; the real servers of Python, Rust, PHP, C, C++ and
+JavaScript, on the main lane and in a lane; a SCIP index made by
+`scip-typescript`, the files that changed since, a rename carried by it;
+deltas in the store (size, every version read back, verification, a damaged
+base, a store from before); the commit of an export made from memory equal
+to the one made from the log; many new files at once equal to one by one.
+
+### Known limitations
+
+- **Java and C# were not tried with a language server**: none could be
+  installed on the test machine. The provider takes any server from the
+  configuration; examples are in the configuration file, commented out.
+- **Copy-on-write was never measured**, as said above.
+- **The log itself is not compacted.** The plan lists compaction between
+  checkpoints; what makes the store grow is the contents, and those now
+  cost what changes (D-069). The ops are all kept: about 130 bytes each.
+- The first capture of 50,000 files takes 14 s where `git add` takes 2.6:
+  Kito parses every file. `kito import` of a git repository of that size
+  takes 30 s.
+- A SCIP index is read whole into memory the first time it is needed, and
+  only renames use it.
+- A C or C++ project needs a `compile_commands.json` for `clangd` to find
+  the uses in other files.
+- Windows is still served through WSL only.

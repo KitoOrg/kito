@@ -17,7 +17,7 @@ runnable demo.
 | 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | done |
 | 3 | Lanes and integration, MCP server | done |
 | 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | done |
-| 5 | Coverage and performance | to do |
+| 5 | Coverage and performance | done |
 
 ## Crates
 
@@ -35,8 +35,6 @@ runnable demo.
 | `kitod` | Daemon: watcher, capture on every lane, integration, JSON-RPC socket |
 | `kito-cli` | The `kito` binary |
 | `kito-mcp` | The MCP server agents talk to |
-
-The other crates in the plan are created with the phase that fills them.
 
 ## Trying it out
 
@@ -127,11 +125,13 @@ kito resolve conflict#1 --lane
 ```
 
 A rename made in one lane reaches the uses another lane added meanwhile
-under the old name. With a language server installed
-(`typescript-language-server` and `gopls` are looked for by default; others
-go in `[semantic.servers]` of the configuration) that happens by itself;
-without one Kito reads the syntax and asks before it touches a use it is
-not sure of:
+under the old name. With a language server installed that happens by
+itself: `typescript-language-server`, `gopls`, `pyright`, `rust-analyzer`,
+`intelephense` and `clangd` are looked for by default, others go in
+`[semantic.servers]` of the configuration. An index made by a SCIP indexer
+over the whole repository does the same for the files that have not changed
+since (`kito scip index.scip`). Without either, Kito reads the syntax and
+asks before it touches a use it is not sure of:
 
 ```bash
 kito rename src/auth.ts:getUser fetchUser --lane lane/1
@@ -170,6 +170,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 5 demo: the acceptance criteria of the plan measured on a repository
+of 50,000 files, each with its verdict.
+
+```bash
+cargo build --release -p kitod -p kito-store -p kito-diff --examples
+```
+
+```bash
+scripts/demo-phase5.sh
 ```
 
 Phase 4 demo: a function renamed in one lane and newly used in another; git

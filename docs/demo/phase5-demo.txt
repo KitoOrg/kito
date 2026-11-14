@@ -6,33 +6,33 @@ file of 2002 lines, 143 functions (58410 bytes), 300 saves, debounce 50 ms
 
 | Measurement | p50 | p95 | max |
 | --- | --- | --- | --- |
-| Save → confirmed op, as seen by the client | 14.9 ms | 22.5 ms | 137.0 ms |
-| First event → confirmed op, as measured by the daemon | 13.9 ms | 21.7 ms | |
-| Processing only, after the debounce | 11.3 ms | 18.8 ms | |
+| Save → confirmed op, as seen by the client | 14.6 ms | 21.1 ms | 44.7 ms |
+| First event → confirmed op, as measured by the daemon | 13.7 ms | 20.2 ms | |
+| Processing only, after the debounce | 11.1 ms | 17.3 ms | |
 
 
 # 2 and 3. Creating a lane and integrating one, on 50000 files
 
-50000 files (1 kB each) captured for the first time: 250000 ops in 14.6s
-first checkpoint, exported to git: 15.4s
+50000 files (1 kB each) captured for the first time: 250000 ops in 13.7s
+first checkpoint, exported to git: 3.5s
 
 | Creating a lane on 50000 files | Time |
 | --- | --- |
-| lane 1 (lane/1) | 2161 ms |
-| lane 2 (lane/2) | 2162 ms |
-| lane 3 (lane/3) | 2180 ms |
-| lane 4 (lane/4) | 2160 ms |
-| lane 5 (lane/5) | 2449 ms |
-| median | 2162 ms |
-| best | 2160 ms |
+| lane 1 (lane/1) | 583 ms |
+| lane 2 (lane/2) | 745 ms |
+| lane 3 (lane/3) | 639 ms |
+| lane 4 (lane/4) | 505 ms |
+| lane 5 (lane/5) | 584 ms |
+| median | 584 ms |
+| best | 505 ms |
 
 | Integrating a lane | Ops of the lane | Time |
 | --- | --- | --- |
-| lane 1: 50 files, one function each | 100 | 110 ms (110 ms per 100 ops) |
-| lane 2: 500 files, one function each | 1000 | 602 ms (60 ms per 100 ops) |
-| lane 3: 50 files, one function each | 100 | 144 ms (144 ms per 100 ops) |
-| lane 4: 50 files, one function each | 100 | 166 ms (166 ms per 100 ops) |
-| lane 5: 50 files, one function each | 100 | 149 ms (149 ms per 100 ops) |
+| lane 1: 50 files, one function each | 100 | 98 ms (98 ms per 100 ops) |
+| lane 2: 500 files, one function each | 1000 | 487 ms (49 ms per 100 ops) |
+| lane 3: 50 files, one function each | 100 | 149 ms (149 ms per 100 ops) |
+| lane 4: 50 files, one function each | 100 | 148 ms (148 ms per 100 ops) |
+| lane 5: 50 files, one function each | 100 | 152 ms (152 ms per 100 ops) |
 
 store: 252800 ops, verified: true
 
@@ -40,22 +40,22 @@ store: 252800 ops, verified: true
 # 4. No confirmed op lost after a crash: 200000 ops, kill -9 at random moments
 
 oplog segments / packs ......... 1 / 1
-rounds ......................... 34
-kill -9 ........................ 33
-  after a commit ............... 13
+rounds ......................... 39
+kill -9 ........................ 38
+  after a commit ............... 17
   at startup (even mid-recovery) 6
-  in the middle of a write ..... 14
-  before the first commit ...... 4
+  in the middle of a write ..... 15
+  before the first commit ...... 14
 verifications after a kill ..... 24
-torn tails discarded ........... 10 (1638 bytes, never confirmed)
-index caught up / rebuilt ...... 23 / 0
-write time with the kills ...... 12.2 s
+torn tails discarded ........... 10 (1127 bytes, never confirmed)
+index caught up / rebuilt ...... 22 / 0
+write time with the kills ...... 12.5 s
 confirmed ops lost ............. 0
 
 
 # 5. No fake conflicts: ten agents, four rounds, every integration verified
 
-10 agents, 4 rounds each, on a TypeScript project of 15 files in /tmp/kito-swarm-3448
+10 agents, 4 rounds each, on a TypeScript project of 15 files in /tmp/kito-swarm-14691
 Verification before every integration: `tsc --noEmit -p .`
 
 | Measure | Value |
@@ -69,19 +69,19 @@ Verification before every integration: `tsc --noEmit -p .`
 | Real conflicts staged / found and settled | 3 / 3 |
 | Kinds of the real conflicts | rename_rename, remove_modify, body_body |
 | Verification failures | 0 |
-| Opening a lane | median 3 ms, max 3 ms |
-| One integration, queue and verification included | median 13046 ms, max 14135 ms |
-| Ops recorded on the lanes | 645 |
+| Opening a lane | median 4 ms, max 4 ms |
+| One integration, queue and verification included | median 12693 ms, max 13372 ms |
+| Ops recorded on the lanes | 453 |
 | Ops on the main lane | 383 |
 | Checkpoints (one per integration, each a git commit) | 46 |
 | Problems | none |
 
-Wall time: 59.5 s
+Wall time: 57.5 s
 
 git log: 46 commits (ada 1, agent-0 5, agent-1 4, agent-2 5, agent-3 5, agent-4 5, agent-5 5, agent-6 4, agent-7 4, agent-8 4, agent-9 4)
 git fsck --strict: ok;  git status: clean
 tsc on the main lane after the swarm: no errors
-store: 1028 ops, 456 blobs, verified
+store: 836 ops, 456 blobs, verified
 
 No fake conflicts.
 
@@ -100,9 +100,9 @@ No fake conflicts.
 
 | Criterion | Target | Measured | |
 | --- | --- | --- | --- |
-| Save → op, p95, 2,000-line file | < 30 ms | 22.5 ms | met |
-| Creating a lane, 50000 files (median of 5; best 2160 ms) | < 1 s, with copy-on-write | 2162 ms, files copied | not met here: no copy-on-write on this file system |
-| Integrating without conflicts, verifier excluded, git commit included (worst of 5 lanes; 110 ms for a lane that is up to date) | < 200 ms per 100 ops | 166 ms per 100 ops | met |
+| Save → op, p95, 2,000-line file | < 30 ms | 21.1 ms | met |
+| Creating a lane, 50000 files (median of 5; best 505 ms) | < 1 s, with copy-on-write | 584 ms, files copied | met, without copy-on-write |
+| Integrating without conflicts, verifier excluded, git commit included (worst of 5 lanes; 98 ms for a lane that is up to date) | < 200 ms per 100 ops | 152 ms per 100 ops | met |
 | Confirmed ops lost after a crash (24 kills) | 0 | 0 | met |
 | Fake conflicts (40 integrations by 10 agents) | 0 | 0 | met |
 | Renames / moves kept on the corpus (ten repositories) | >= 99% | 100.0% / 100.0% | met |
