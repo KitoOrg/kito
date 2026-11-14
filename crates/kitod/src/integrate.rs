@@ -16,6 +16,7 @@
 //! symbols keep the IDs they had in the lane.
 
 use crate::error::{Error, Result};
+use crate::refs::{RefAnswers, Side};
 use crate::repo::{Repo, Unsettled};
 use kito_core::{
     BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId, Resolution,
@@ -38,6 +39,8 @@ pub struct Prepared {
     outcome: kito_merge::Outcome,
     /// Conflicts this merge settled with the decisions taken on them.
     settled: Vec<ConflictId>,
+    /// Renames that reached the other side's uses of the symbol.
+    propagated: Vec<AutoResolution>,
 }
 
 /// What [`Repo::prepare_integration`] found.
@@ -46,6 +49,9 @@ pub enum Preparation {
     Done(Box<IntegrationResult>),
     /// The merge composed: verify it, then finish.
     Ready(Box<Prepared>),
+    /// The lanes moved since the references were asked about (or they were
+    /// not asked about at all): plan and ask again.
+    Stale,
 }
 
 /// A decision on a conflict, as a client gives it.
@@ -54,7 +60,15 @@ pub enum Decision {
     Main,
     Lane,
     Text(String),
+    /// For a `semantic_ref` conflict: the uses are of the renamed symbol,
+    /// and take its new name.
+    Rewrite,
+    /// For a `semantic_ref` conflict: they are something else, and stay.
+    Keep,
 }
+
+/// The text that, in a `semantic_ref` conflict, is on the side that renamed.
+const RENAMED: &[u8] = b"renamed: ";
 
 fn kind_word(kind: ConflictKind) -> &'static str {
     match kind {
@@ -150,9 +164,30 @@ impl Repo {
         }
         let lane = conflict.assigned_to.filter(|lane| self.lanes.contains_key(lane));
         let lane = lane.ok_or_else(|| Error::Other(format!("{id}: its lane is closed")))?;
+        let about_uses = conflict.kind == ConflictKind::SemanticRef;
+        // In a conflict about uses, the side that renamed is the one whose
+        // text says so; following it is rewriting the uses.
+        let main_renamed = conflict
+            .main_text
+            .and_then(|blob| self.store.get_blob(&blob).ok().flatten())
+            .is_some_and(|text| text.starts_with(RENAMED));
         conflict.resolution = Some(match decision {
             Decision::Main => Resolution::Main,
             Decision::Lane => Resolution::Lane,
+            Decision::Rewrite | Decision::Keep if !about_uses => {
+                return Err(Error::Other(format!(
+                    "{id} is not about the uses of a renamed symbol: choose `main`, `lane` or a text"
+                )));
+            }
+            Decision::Rewrite if main_renamed => Resolution::Main,
+            Decision::Rewrite => Resolution::Lane,
+            Decision::Keep if main_renamed => Resolution::Lane,
+            Decision::Keep => Resolution::Main,
+            Decision::Text(_) if about_uses => {
+                return Err(Error::Other(format!(
+                    "{id} is about the uses of a renamed symbol: choose `rewrite` (they take the new name) or `keep` (they stay as they are)"
+                )));
+            }
             Decision::Text(text) => {
                 if text.trim().is_empty() {
                     return Err(Error::Other(
@@ -170,11 +205,22 @@ impl Repo {
         Ok(self.conflict_info(&conflict))
     }
 
+    /// Merges the lane into the main lane as they are now. With `answers`,
+    /// the uses each side has of what the other renamed are rewritten
+    /// first; `uses` says what was decided about the doubtful ones.
     fn merge_lane(
         &mut self,
         lane: LaneId,
         decisions: &HashMap<Subject, Choice>,
-    ) -> Result<kito_merge::Outcome> {
+        answers: Option<&RefAnswers>,
+        uses: &HashMap<SymbolId, bool>,
+    ) -> Result<(kito_merge::Outcome, Vec<AutoResolution>)> {
+        let spread = match answers {
+            Some(answers) => Some(self.propagate(lane, answers, uses)?),
+            None => None,
+        };
+        let main_tree =
+            spread.as_ref().and_then(|s| s.main.clone()).unwrap_or_else(|| self.main.tree.clone());
         // Files parsed for the merge stay parsed for the capture that
         // records its result, and those the captures parsed are not parsed
         // again here.
@@ -187,23 +233,43 @@ impl Repo {
                     .flatten()
                     .map(|parsed| parsed.file.clone())
             };
+            let lane_tree = spread.as_ref().and_then(|s| s.lane.as_ref()).unwrap_or(&at.work.tree);
             kito_merge::merge(&kito_merge::Input {
-                base: kito_merge::Side { tree: &at.base_tree, symbols: &at.base_symbols },
-                main: kito_merge::Side { tree: &self.main.tree, symbols: &self.main.symbols },
-                lane: kito_merge::Side { tree: &at.work.tree, symbols: &at.work.symbols },
+                base: kito_merge::Side {
+                    tree: spread.as_ref().and_then(|s| s.base.as_ref()).unwrap_or(&at.base_tree),
+                    symbols: &at.base_symbols,
+                },
+                main: kito_merge::Side { tree: &main_tree, symbols: &self.main.symbols },
+                lane: kito_merge::Side { tree: lane_tree, symbols: &at.work.symbols },
                 blob: &|id| store.get_blob(id).ok().flatten(),
                 resolutions: decisions,
                 parse: Some(&parse),
             })
         });
         self.parse_cache = cache.into_inner();
-        outcome
+        let mut outcome = outcome?;
+        let mut done = Vec::new();
+        if let Some(spread) = spread {
+            // The uses rewritten on the main lane's side are part of the
+            // result also where the merge had nothing else to do.
+            for path in main_tree.differences(&self.main.tree) {
+                if let (false, Some(entry)) = (outcome.files.contains_key(path), main_tree.get(path)) {
+                    let content = self.store.get_blob(&entry.blob)?.unwrap_or_default();
+                    outcome
+                        .files
+                        .insert(path.to_owned(), Some(kito_merge::FileOut { content, mode: entry.mode }));
+                }
+            }
+            outcome.conflicts.extend(spread.doubts);
+            done = spread.done;
+        }
+        Ok((outcome, done))
     }
 
     /// Captures what was saved on the main lane in the files a lane's work
     /// touches: nothing unrecorded may be merged over, or written over.
     /// Returns `true` if something was recorded.
-    fn capture_main_under(&mut self, lane: LaneId, also: &[PathBuf]) -> Result<bool> {
+    pub(crate) fn capture_main_under(&mut self, lane: LaneId, also: &[PathBuf]) -> Result<bool> {
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let mut paths: Vec<PathBuf> = at.work.tree.differences(&at.base_tree).map(Path::to_owned).collect();
         paths.extend(also.iter().cloned());
@@ -212,7 +278,12 @@ impl Repo {
 
     /// Step 1: captures what is still unsaved on both sides and merges the
     /// lane into the main lane.
-    pub fn prepare_integration(&mut self, lane: LaneId) -> Result<Preparation> {
+    ///
+    /// `answers`: what [`Repo::plan_references`] asked and the providers
+    /// answered. Without them the merge is made as if nothing had been
+    /// renamed, unless something was: then it asks for them, with
+    /// [`Preparation::Stale`].
+    pub fn prepare_integration(&mut self, lane: LaneId, answers: Option<&RefAnswers>) -> Result<Preparation> {
         if lane.is_main() {
             return Err(Error::Other("the main lane is what lanes are integrated into".into()));
         }
@@ -221,6 +292,13 @@ impl Repo {
         // involved are looked at: the rest is the watcher's business.
         self.scan_lane(lane)?;
         self.capture_main_under(lane, &[])?;
+        let asked = match answers {
+            Some(answers) => self.answers_hold(lane, answers),
+            None => !self.has_renames(lane),
+        };
+        if !asked {
+            return Ok(Preparation::Stale);
+        }
         let open = self.open_conflicts(lane);
         let blob_of = |text: &Option<Vec<u8>>| text.as_ref().map(|t| BlobId::of(t));
         let same_texts = |conflict: &Conflict, found: &Found| {
@@ -231,7 +309,8 @@ impl Repo {
 
         // What conflicts as things are now, and which of those conflicts
         // already have a decision taken on these very texts.
-        let mut found = self.merge_lane(lane, &HashMap::new())?;
+        let no_uses = HashMap::new();
+        let (mut found, mut propagated) = self.merge_lane(lane, &HashMap::new(), answers, &no_uses)?;
         // The merge may write files of the main lane the lane did not touch
         // (a symbol moved there): if something unrecorded was in them, the
         // merge is made again on what is there now.
@@ -240,26 +319,48 @@ impl Repo {
             if !self.capture_main_under(lane, &written)? {
                 break;
             }
-            found = self.merge_lane(lane, &HashMap::new())?;
+            // The main lane moved: what was asked about it is no longer so.
+            if answers.is_some() {
+                return Ok(Preparation::Stale);
+            }
+            (found, propagated) = self.merge_lane(lane, &HashMap::new(), answers, &no_uses)?;
         }
         let mut decisions: HashMap<Subject, Choice> = HashMap::new();
+        let mut uses: HashMap<SymbolId, bool> = HashMap::new();
         let mut settled = Vec::new();
         for conflict in &found.conflicts {
             let decided = open.iter().find(|c| {
                 subject_of(c) == conflict.subject && c.kind == conflict.kind && same_texts(c, conflict)
             });
             if let Some((known, resolution)) = decided.and_then(|c| c.resolution.map(|r| (c, r))) {
-                let choice = match resolution {
-                    Resolution::Main => Choice::Main,
-                    Resolution::Lane => Choice::Lane,
-                    Resolution::Text(blob) => Choice::Text(self.store.get_blob(&blob)?.unwrap_or_default()),
-                };
-                decisions.insert(conflict.subject.clone(), choice);
+                if let (ConflictKind::SemanticRef, Subject::Symbol(symbol)) =
+                    (conflict.kind, &conflict.subject)
+                {
+                    // Taking the side that renamed is rewriting the uses.
+                    let renamer = answers.and_then(|answers| answers.renamed_by(*symbol));
+                    let rewrite = matches!(
+                        (resolution, renamer),
+                        (Resolution::Main, Some(Side::Main)) | (Resolution::Lane, Some(Side::Lane))
+                    );
+                    uses.insert(*symbol, rewrite);
+                } else {
+                    let choice = match resolution {
+                        Resolution::Main => Choice::Main,
+                        Resolution::Lane => Choice::Lane,
+                        Resolution::Text(blob) => {
+                            Choice::Text(self.store.get_blob(&blob)?.unwrap_or_default())
+                        }
+                    };
+                    decisions.insert(conflict.subject.clone(), choice);
+                }
                 settled.push(known.id);
             }
         }
-        let all_decided = !found.conflicts.is_empty() && decisions.len() == found.conflicts.len();
-        let outcome = if all_decided { self.merge_lane(lane, &decisions)? } else { found };
+        let all_decided = !found.conflicts.is_empty() && settled.len() == found.conflicts.len();
+        let (outcome, propagated) = match all_decided {
+            true => self.merge_lane(lane, &decisions, answers, &uses)?,
+            false => (found, propagated),
+        };
 
         if !outcome.conflicts.is_empty() {
             let infos = self.record_conflicts(lane, &outcome.conflicts, &open, &same_texts)?;
@@ -305,6 +406,7 @@ impl Repo {
             lane_ops: at.work.ops,
             outcome,
             settled,
+            propagated,
         })))
     }
 
@@ -546,6 +648,7 @@ impl Repo {
                     .into_iter()
                     .collect(),
             })
+            .chain(prepared.propagated.iter().cloned())
             .collect();
         result.checkpoint = Some(checkpoint.id.to_string());
         result.your_next_base = Some(checkpoint.id.to_string());
@@ -599,21 +702,27 @@ impl Repo {
     /// place. The daemon does the same without holding the repository
     /// during the verification.
     pub fn integrate(&mut self, lane: LaneId) -> Result<IntegrationResult> {
-        for _ in 0..3 {
-            let prepared = match self.prepare_integration(lane)? {
-                Preparation::Done(result) => return Ok(*result),
-                Preparation::Ready(prepared) => *prepared,
-            };
-            let verification = match self.verification_copy(&prepared)? {
-                Some((dir, commands, timeout)) => {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| Error::Other(format!("starting the verifier: {e}")))?;
-                    Some(runtime.block_on(kito_integrate::verify(&dir, &commands, timeout)))
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Other(format!("starting the verifier: {e}")))?;
+        for _ in 0..4 {
+            // What the providers say of the uses of what was renamed.
+            let answers = match self.plan_references(lane)? {
+                Some(plan) => {
+                    let semantic = self.semantic();
+                    Some(runtime.block_on(crate::refs::answer(&plan, &semantic)))
                 }
                 None => None,
             };
+            let prepared = match self.prepare_integration(lane, answers.as_ref())? {
+                Preparation::Done(result) => return Ok(*result),
+                Preparation::Ready(prepared) => *prepared,
+                Preparation::Stale => continue,
+            };
+            let verification = self.verification_copy(&prepared)?.map(|(dir, commands, timeout)| {
+                runtime.block_on(kito_integrate::verify(&dir, &commands, timeout))
+            });
             if let Some(result) = self.finish_integration(prepared, verification)? {
                 return Ok(result);
             }

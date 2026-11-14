@@ -1844,6 +1844,7 @@ dependencies = [
  "kito-lane",
  "kito-merge",
  "kito-parse",
+ "kito-semantic",
  "kito-store",
  "notify",
  "serde",

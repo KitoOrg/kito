@@ -297,8 +297,15 @@ impl Daemon {
                 "rename_symbol" => {
                     let lane = lane_or_main()?;
                     let (symbol, new_name) = (text("symbol")?, text("new_name")?);
+                    // Who uses the symbol is asked without holding the
+                    // repository: a language server takes its time.
+                    let (plan, semantic) = self
+                        .with_repo(|repo| Ok((repo.plan_rename(lane, symbol)?, repo.semantic())))
+                        .map_err(internal)?;
+                    let uses =
+                        tokio::runtime::Handle::current().block_on(crate::refs::uses_of(&plan, &semantic));
                     let done = self
-                        .with_repo(|repo| repo.rename_symbol(lane, symbol, new_name))
+                        .with_repo(|repo| repo.rename_symbol_with(lane, symbol, new_name, Some(&uses)))
                         .map_err(internal)?;
                     to_json(serde_json::to_value(done))
                 }
@@ -343,10 +350,12 @@ impl Daemon {
                         (_, Some(text)) => Decision::Text(text),
                         (Some("main"), None) => Decision::Main,
                         (Some("lane"), None) => Decision::Lane,
+                        (Some("rewrite"), None) => Decision::Rewrite,
+                        (Some("keep"), None) => Decision::Keep,
                         _ => {
                             return Err((
                                 rpc::INVALID_PARAMS,
-                                "give `choice` (\"main\" or \"lane\") or the new `text`".to_owned(),
+                                "give `choice` (\"main\" or \"lane\"; for the uses of a renamed symbol, \"rewrite\" or \"keep\") or the new `text`".to_owned(),
                             ))
                         }
                     };
@@ -535,21 +544,37 @@ async fn rescan_loop(daemon: Arc<Daemon>) {
 /// merging and while recording: the verification runs with it free.
 async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
     let failed = |message: String| IntegrationResult::failed(lane.to_string(), message);
-    for _ in 0..3 {
+    for _ in 0..4 {
+        // Level 2: who uses what one of the two sides renamed. Asked
+        // without holding the repository: a language server takes its time.
+        let worker = daemon.clone();
+        let plan = tokio::task::spawn_blocking(move || {
+            worker.with_repo(|repo| Ok((repo.plan_references(lane)?, repo.semantic())))
+        })
+        .await;
+        let answers = match plan {
+            Ok(Ok((Some(plan), semantic))) => Some(crate::refs::answer(&plan, &semantic).await),
+            Ok(Ok((None, _))) => None,
+            Ok(Err(e)) => return failed(e.to_string()),
+            Err(e) => return failed(e.to_string()),
+        };
         let worker = daemon.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| match repo.prepare_integration(lane)? {
-                Preparation::Done(result) => Ok(Err(result)),
+            worker.with_repo(|repo| match repo.prepare_integration(lane, answers.as_ref())? {
+                Preparation::Done(result) => Ok(Some(Err(result))),
                 Preparation::Ready(prepared) => {
                     let copy = repo.verification_copy(&prepared)?;
-                    Ok(Ok((prepared, copy)))
+                    Ok(Some(Ok((prepared, copy))))
                 }
+                Preparation::Stale => Ok(None),
             })
         })
         .await;
         let (prepared, copy) = match prepared {
-            Ok(Ok(Ok(ready))) => ready,
-            Ok(Ok(Err(result))) => return *result,
+            Ok(Ok(Some(Ok(ready)))) => ready,
+            Ok(Ok(Some(Err(result)))) => return *result,
+            // A lane moved while the providers were answering: ask again.
+            Ok(Ok(None)) => continue,
             Ok(Err(e)) => return failed(e.to_string()),
             Err(e) => return failed(e.to_string()),
         };

@@ -8,6 +8,7 @@
 
 use crate::ids::{LaneId, SymbolId};
 use crate::model::{Lang, OpKind, SymbolKind};
+use imbl::ordmap::DiffItem;
 use imbl::OrdMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,6 +75,17 @@ impl SymbolTable {
             .into_iter()
             .flatten()
             .filter_map(|id| self.symbols.get(id).map(|entry| (*id, entry)))
+    }
+
+    /// The symbols this table and `other` do not have in the same way: one
+    /// has it and the other does not, or what is known of it differs. Like
+    /// [`crate::Tree::differences`], what the two tables share because one
+    /// was copied from the other is not looked at.
+    pub fn changed<'a>(&'a self, other: &'a SymbolTable) -> impl Iterator<Item = SymbolId> + 'a {
+        self.symbols.diff(&other.symbols).map(|item| match item {
+            DiffItem::Add(id, _) | DiffItem::Remove(id, _) => *id,
+            DiffItem::Update { old: (id, _), .. } => *id,
+        })
     }
 
     /// The counter a lane will use for its next new symbol. Never reused:
@@ -294,6 +306,11 @@ mod tests {
         // IDs are never reused.
         assert_eq!(t.next_seq(LaneId(3)), 3);
         assert_eq!(t.next_seq(LaneId(9)), 0);
+        // Two tables differ in what happened to one and not to the other.
+        let mut other = t.clone();
+        assert_eq!(t.changed(&other).count(), 0);
+        other.apply(&add(20, "Extra", None, "a.ts")).unwrap();
+        assert_eq!(t.changed(&other).collect::<Vec<_>>(), [id(20)]);
         // Nor are the ones a lane used where this table could not see them.
         t.reserve(LaneId(3), 2);
         assert_eq!(t.next_seq(LaneId(3)), 3);

@@ -445,6 +445,8 @@ pub struct Repo {
     /// The last checkpoint exported to git while it was the head of the
     /// main lane, and the files at that point.
     exported: Option<(kito_core::CheckpointId, Tree)>,
+    /// Who knows about the references between symbols (level 2).
+    semantic: std::sync::Arc<kito_semantic::Semantic>,
     pub(crate) clock: HlcClock,
     pub(crate) counters: Counters,
     /// Files being written right now, kept up to date by whoever follows
@@ -505,6 +507,7 @@ impl Repo {
         let store_dir = root.join(STORE_DIR);
         let store = Store::open(&store_dir)?;
         let config = Config::load(&store_dir).map_err(Error::Config)?;
+        let providers = config.semantic.providers(&root);
         let identity = identity::resolve(&config, &root);
         let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.capture.ignore);
         let mut repo = Repo {
@@ -516,6 +519,7 @@ impl Repo {
             lanes: BTreeMap::new(),
             parse_cache: semantic::ParseCache::default(),
             exported: None,
+            semantic: std::sync::Arc::new(providers),
             clock: HlcClock::new(),
             counters: Counters::default(),
             writing: std::sync::Arc::default(),
@@ -557,6 +561,7 @@ impl Repo {
     /// away, without restarting the daemon.
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
+        self.semantic = std::sync::Arc::new(self.config.semantic.providers(&self.root));
         self.main.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
         self.identity = identity::resolve(&self.config, &self.root);
         self.main.author = self.identity.author();
@@ -1094,6 +1099,11 @@ impl Repo {
     }
 
     /// Exports the checkpoints not yet exported to git.
+    /// The providers of level 2: what to ask who uses a symbol.
+    pub fn semantic(&self) -> std::sync::Arc<kito_semantic::Semantic> {
+        self.semantic.clone()
+    }
+
     pub fn export_git(&mut self) -> Result<Vec<(String, String)>> {
         // The files at the last checkpoint exported are remembered: the
         // next commit is made from what changed since, not from the log.

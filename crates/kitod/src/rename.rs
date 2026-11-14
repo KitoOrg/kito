@@ -21,9 +21,13 @@ pub struct RenameResult {
     pub file: String,
     /// The ops recorded.
     pub ops: Vec<String>,
+    /// Places (`file:line`) where the symbol was used and now has its new
+    /// name: the uses a language server vouched for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references_updated: Vec<String>,
     /// Places (`file:line`) where the old name still appears as a word,
     /// outside the symbol's definition: they may be uses of it, and were
-    /// not touched. Following references is level 2 semantics.
+    /// not touched.
     pub possible_references: Vec<String>,
 }
 
@@ -56,7 +60,7 @@ fn occurrences(text: &[u8], word: &[u8]) -> Vec<usize> {
 impl Repo {
     /// Finds a symbol given as `file:name`, as an ID (`1#3`), or as a name
     /// that only one symbol of the lane has.
-    fn symbol_of(&self, lane: LaneId, spec: &str) -> Result<SymbolId> {
+    pub(crate) fn symbol_of(&self, lane: LaneId, spec: &str) -> Result<SymbolId> {
         let table = &self.work(lane)?.symbols;
         let spec = spec.trim();
         if let Ok(id) = spec.parse::<SymbolId>() {
@@ -93,10 +97,31 @@ impl Repo {
         }
     }
 
-    /// Renames a symbol in a lane's working copy: its definition and the
-    /// uses of its own name inside it. The rename is recorded as such,
-    /// whatever the differ would have guessed.
+    /// Renames a symbol in a lane's working copy, asking the providers of
+    /// level 2 who uses it: see [`Repo::rename_symbol_with`]. The daemon
+    /// does the same without holding the repository while they answer.
     pub fn rename_symbol(&mut self, lane: LaneId, symbol: &str, new_name: &str) -> Result<RenameResult> {
+        let plan = self.plan_rename(lane, symbol)?;
+        let semantic = self.semantic();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Other(format!("asking who uses the symbol: {e}")))?;
+        let uses = runtime.block_on(crate::refs::uses_of(&plan, &semantic));
+        self.rename_symbol_with(lane, symbol, new_name, Some(&uses))
+    }
+
+    /// Renames a symbol in a lane's working copy: its definition, the uses
+    /// of its own name inside it and, of the `uses` the providers found
+    /// elsewhere, the ones they are sure of. The rename is recorded as
+    /// such, whatever the differ would have guessed.
+    pub fn rename_symbol_with(
+        &mut self,
+        lane: LaneId,
+        symbol: &str,
+        new_name: &str,
+        uses: Option<&crate::refs::RenameUses>,
+    ) -> Result<RenameResult> {
         let new_name = new_name.trim();
         if !is_identifier(new_name) {
             return Err(Error::Other(format!("{new_name:?} is not a name a symbol can have")));
@@ -141,54 +166,88 @@ impl Repo {
         if hits.is_empty() {
             return Err(Error::Other(format!("`{old}` does not appear in its own definition")));
         }
-        let mut renamed = content[..range.start].to_vec();
-        let mut at = 0;
-        for hit in hits {
-            renamed.extend_from_slice(&inside[at..hit]);
-            renamed.extend_from_slice(new_name.as_bytes());
-            at = hit + old.len();
+        // Per file, where the old name is replaced: in the definition, and
+        // where a provider is sure the symbol is used.
+        let mut places: std::collections::BTreeMap<PathBuf, Vec<usize>> = std::collections::BTreeMap::new();
+        places.insert(entry.file.clone(), hits.iter().map(|hit| range.start + hit).collect());
+        let mut references_updated = Vec::new();
+        if let Some(uses) = uses {
+            if uses.symbol != id || uses.ops != work.ops {
+                return Err(Error::Other(format!(
+                    "{lane} changed while the uses of `{old}` were looked up: try again"
+                )));
+            }
+            for usage in uses.uses.iter().filter(|usage| usage.confidence >= kito_semantic::SURE) {
+                let inside_definition = usage.file == entry.file && range.contains(&usage.range.start);
+                if usage.range.len() == old.len() && !inside_definition {
+                    places.entry(usage.file.clone()).or_default().push(usage.range.start);
+                }
+            }
         }
-        renamed.extend_from_slice(&inside[at..]);
-        renamed.extend_from_slice(&content[range.end..]);
-
-        // Where else the old name is still written.
-        let mut possible_references = Vec::new();
-        let mut note = |path: &Path, text: &[u8], skip: Option<&std::ops::Range<usize>>| {
-            for hit in occurrences(text, old.as_bytes()) {
-                if skip.is_some_and(|range| range.contains(&hit))
-                    || possible_references.len() >= MAX_REFERENCES
-                {
+        let mut changed: Vec<(PathBuf, TreeEntry, Vec<u8>)> = Vec::new();
+        for (path, mut starts) in places {
+            let Some(file_entry) = work.tree.get(&path).copied() else { continue };
+            let mut text = match path == entry.file {
+                true => content.clone(),
+                false => self.store.get_blob(&file_entry.blob)?.unwrap_or_default(),
+            };
+            starts.sort_unstable_by_key(|start| std::cmp::Reverse(*start));
+            starts.dedup();
+            for start in starts {
+                if text.get(start..start + old.len()) != Some(old.as_bytes()) {
                     continue;
                 }
-                let line = text[..hit].iter().filter(|&&c| c == b'\n').count() + 1;
-                possible_references.push(format!("{}:{line}", path.display()));
+                let is_definition = path == entry.file && range.contains(&start);
+                if !is_definition {
+                    let line = text[..start].iter().filter(|&&c| c == b'\n').count() + 1;
+                    references_updated.push(format!("{}:{line}", path.display()));
+                }
+                text.splice(start..start + old.len(), new_name.bytes());
+            }
+            changed.push((path, file_entry, text));
+        }
+        references_updated.sort();
+
+        // Where else the old name is still written, after all that.
+        let mut possible_references = Vec::new();
+        let mut note = |path: &Path, text: &[u8]| {
+            for hit in occurrences(text, old.as_bytes()) {
+                if possible_references.len() < MAX_REFERENCES {
+                    let line = text[..hit].iter().filter(|&&c| c == b'\n').count() + 1;
+                    possible_references.push(format!("{}:{line}", path.display()));
+                }
             }
         };
-        note(&entry.file, &content, Some(&range));
         let others: Vec<(PathBuf, TreeEntry)> = work
             .tree
             .iter()
-            .filter(|(path, _)| *path != entry.file)
+            .filter(|(path, _)| !changed.iter().any(|(known, _, _)| known == path))
             .map(|(p, e)| (p.to_owned(), *e))
             .collect();
+        for (path, _, text) in &changed {
+            note(path, text);
+        }
         for (path, other) in others {
             if dialect_for_path(&path).is_some() {
                 if let Some(text) = self.store.get_blob(&other.blob)? {
-                    note(&path, &text, None);
+                    note(&path, &text);
                 }
             }
         }
 
-        // The file, then the capture, told which symbol this is.
+        // The files, then the capture, told which symbol this is.
         let root = work.root.clone();
-        let blob = self.store.put_blob(&renamed)?;
-        self.write_file_in(&root, &entry.file, &TreeEntry { blob, mode: tree_entry.mode })?;
+        let mut files = Vec::new();
+        for (path, file_entry, text) in changed {
+            let blob = self.store.put_blob(&text)?;
+            self.write_file_in(&root, &path, &TreeEntry { blob, mode: file_entry.mode })?;
+            files.push(path);
+        }
         let mut identities = Identities::new();
         identities.insert(&entry.file, range.start, id);
-        let file = entry.file.clone();
         let ops = self.with(lane, |repo, work| {
             let intent = work.intent;
-            repo.capture_work(work, [file], intent, &identities, crate::repo::Unsettled::Trust)
+            repo.capture_work(work, files, intent, &identities, crate::repo::Unsettled::Trust)
         })?;
         Ok(RenameResult {
             symbol: id.to_string(),
@@ -196,6 +255,7 @@ impl Repo {
             to: format!("{scope}{new_name}"),
             file: entry.file.display().to_string(),
             ops: ops.iter().map(|op| op.id.to_string()).collect(),
+            references_updated,
             possible_references,
         })
     }

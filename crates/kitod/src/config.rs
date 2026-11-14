@@ -52,6 +52,18 @@ email_domain = "kito.invalid"
 # commands = ["npx tsc --noEmit", "npm test"]
 # Seconds after which a command is stopped and counts as failed.
 timeout_secs = 600
+
+# Language servers say who uses a symbol: with one, a rename made in a lane
+# reaches by itself the uses another lane added meanwhile. A server that is
+# not installed is skipped: Kito then reads the syntax only, and asks before
+# it touches a use it is not sure of. These two are also the defaults.
+[semantic.servers.typescript]
+command = ["typescript-language-server", "--stdio"]
+languages = ["typescript", "javascript"]
+
+[semantic.servers.go]
+command = ["gopls"]
+languages = ["go"]
 "#;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +74,94 @@ pub struct Config {
     pub git: GitConfig,
     pub lanes: LanesConfig,
     pub verify: VerifyConfig,
+    pub semantic: SemanticConfig,
+}
+
+/// A language server, as the configuration describes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Program and arguments.
+    pub command: Vec<String>,
+    /// The languages it answers for: `typescript`, `go`, …
+    pub languages: Vec<String>,
+    /// Seconds a question may take, the start of the server included.
+    #[serde(default = "default_server_timeout")]
+    pub timeout_secs: u64,
+    /// Passed to the server when it starts, as its initialization options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<serde_json::Value>,
+}
+
+fn default_server_timeout() -> u64 {
+    60
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SemanticConfig {
+    /// By name: the name is what the references they find are attributed to.
+    pub servers: std::collections::BTreeMap<String, ServerConfig>,
+}
+
+impl Default for SemanticConfig {
+    fn default() -> Self {
+        let server = |command: &[&str], languages: &[&str]| ServerConfig {
+            command: command.iter().map(|s| (*s).to_owned()).collect(),
+            languages: languages.iter().map(|s| (*s).to_owned()).collect(),
+            timeout_secs: default_server_timeout(),
+            options: None,
+        };
+        SemanticConfig {
+            servers: [
+                (
+                    "typescript".to_owned(),
+                    server(&["typescript-language-server", "--stdio"], &["typescript", "javascript"]),
+                ),
+                ("go".to_owned(), server(&["gopls"], &["go"])),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+}
+
+fn lang_named(name: &str) -> Option<kito_core::Lang> {
+    use kito_core::Lang;
+    Some(match name.to_ascii_lowercase().as_str() {
+        "python" => Lang::Python,
+        "javascript" => Lang::JavaScript,
+        "typescript" => Lang::TypeScript,
+        "java" => Lang::Java,
+        "csharp" | "c#" => Lang::CSharp,
+        "c" => Lang::C,
+        "cpp" | "c++" => Lang::Cpp,
+        "go" => Lang::Go,
+        "php" => Lang::Php,
+        "rust" => Lang::Rust,
+        _ => return None,
+    })
+}
+
+impl SemanticConfig {
+    /// The providers of level 2 for the repository at `root`. No server is
+    /// started until it is asked something.
+    pub fn providers(&self, root: &std::path::Path) -> kito_semantic::Semantic {
+        let servers = self
+            .servers
+            .iter()
+            .filter(|(_, server)| !server.command.is_empty())
+            .map(|(name, server)| {
+                let config = kito_semantic::LspConfig {
+                    command: server.command.clone(),
+                    languages: server.languages.iter().filter_map(|l| lang_named(l)).collect(),
+                    timeout_secs: server.timeout_secs.max(1),
+                    options: server.options.clone(),
+                };
+                kito_semantic::LspProvider::new(name, config, root)
+            })
+            .collect();
+        kito_semantic::Semantic::new(servers)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

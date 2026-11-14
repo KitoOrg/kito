@@ -74,6 +74,13 @@ impl Tree {
         })
     }
 
+    /// Gives a file another content, keeping its type.
+    pub fn replace(&mut self, path: &Path, blob: BlobId) -> Result<(), TreeError> {
+        let entry = self.files.get_mut(path).ok_or_else(|| TreeError::Missing(path.to_owned()))?;
+        entry.blob = blob;
+        Ok(())
+    }
+
     /// Files contained in the directory `dir` (at any depth).
     pub fn under<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = (&'a Path, &'a TreeEntry)> {
         // Paths are ordered by components: the descendants of `dir` are

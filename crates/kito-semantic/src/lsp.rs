@@ -45,6 +45,9 @@ fn default_timeout() -> u64 {
     60
 }
 
+/// How the failure of a server whose program does not exist starts.
+const NOT_INSTALLED: &str = "its program is not installed";
+
 /// More names than this in a file are not all asked about by
 /// [`LspProvider::references`]: one question each.
 const MAX_NAMES_ASKED: usize = 2000;
@@ -80,6 +83,9 @@ pub struct LspProvider {
     config: LspConfig,
     root: PathBuf,
     worker: Mutex<Option<Sender<Job>>>,
+    /// The program is not installed: found out at the first question, and
+    /// not tried again.
+    missing: std::sync::atomic::AtomicBool,
 }
 
 fn language_id(path: &Path) -> &'static str {
@@ -138,11 +144,22 @@ impl LspProvider {
     pub fn new(name: &str, config: LspConfig, root: &Path) -> LspProvider {
         // Servers answer with real paths: links in the root are resolved.
         let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
-        LspProvider { name: name.to_owned(), config, root, worker: Mutex::new(None) }
+        LspProvider {
+            name: name.to_owned(),
+            config,
+            root,
+            worker: Mutex::new(None),
+            missing: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// `false` once the server's program turned out not to be installed.
+    pub fn available(&self) -> bool {
+        !self.missing.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn fail(&self, message: impl Into<String>) -> Error {
@@ -172,7 +189,11 @@ impl LspProvider {
         if job.is_some() {
             return Err(self.fail("its thread cannot be started"));
         }
-        answer.await.map_err(|_| self.fail("stopped while a question was open"))?
+        let answer = answer.await.map_err(|_| self.fail("stopped while a question was open"))?;
+        if matches!(&answer, Err(Error::Server { message, .. }) if message.starts_with(NOT_INSTALLED)) {
+            self.missing.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        answer
     }
 
     /// The documents that make the server see `snap`: what differs from the
@@ -405,7 +426,10 @@ impl Running {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| fail(format!("cannot start `{program}`: {e}")))?;
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => fail(format!("{NOT_INSTALLED} (`{program}`)")),
+                _ => fail(format!("cannot start `{program}`: {e}")),
+            })?;
         let stdin = child.stdin.take().ok_or_else(|| fail("no standard input".to_owned()))?;
         let stdout = child.stdout.take().ok_or_else(|| fail("no standard output".to_owned()))?;
         let (sender, messages) = mpsc::channel();

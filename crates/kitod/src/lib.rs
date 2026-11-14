@@ -11,6 +11,7 @@ pub mod identity;
 pub mod ignore;
 pub mod integrate;
 pub mod lanes;
+pub mod refs;
 pub mod rename;
 pub mod repo;
 pub mod rpc;

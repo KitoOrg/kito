@@ -147,6 +147,12 @@ enum Cmd {
         /// Use the text in this file (`-`: standard input)
         #[arg(long, value_name = "FILE")]
         text: Option<PathBuf>,
+        /// For the uses of a renamed symbol: they take the new name
+        #[arg(long, conflicts_with_all = ["main", "lane", "text", "keep"])]
+        rewrite: bool,
+        /// For the uses of a renamed symbol: they are something else, and stay as they are
+        #[arg(long, conflicts_with_all = ["main", "lane", "text"])]
+        keep: bool,
     },
     /// Rename a symbol explicitly, in a lane's working copy or in the main directory
     Rename {
@@ -755,7 +761,14 @@ fn print_integration(result: &IntegrationResult) {
                 result.checkpoint.clone().unwrap_or_default()
             );
             for auto in &result.auto_resolutions {
-                println!("  merged by itself: {}", auto.symbol);
+                match (auto.kind.as_str(), &auto.new_name) {
+                    ("rename_propagation", Some(new_name)) => println!(
+                        "  rename followed: {} is now `{new_name}` also in {}",
+                        auto.symbol,
+                        auto.locations.join(", ")
+                    ),
+                    _ => println!("  merged by itself: {}", auto.symbol),
+                }
             }
             if let Some(message) = &result.message {
                 println!("  {message}");
@@ -766,6 +779,9 @@ fn print_integration(result: &IntegrationResult) {
             println!("{}: {}", result.lane, count(result.conflicts.len() as u64, "conflict", "conflicts"));
             result.conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
             println!("  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again.");
+            if result.conflicts.iter().any(|c| c.kind == "semantic_ref") {
+                println!("  For a semantic_ref (uses that may be of a renamed symbol): `kito resolve <conflict> --rewrite | --keep`.");
+            }
         }
         Integration::VerificationFailed => {
             let report = result.verification.as_ref();
@@ -852,16 +868,15 @@ fn cmd_conflicts(cli: &Cli, id: &Option<String>, all: bool) -> Outcome {
     Ok(())
 }
 
-fn cmd_resolve(cli: &Cli, conflict: &str, main: bool, lane: bool, text: &Option<PathBuf>) -> Outcome {
+fn cmd_resolve(cli: &Cli, conflict: &str, choice: Option<&str>, text: &Option<PathBuf>) -> Outcome {
     let conflict = match conflict.starts_with("conflict#") {
         true => conflict.to_owned(),
         false => format!("conflict#{conflict}"),
     };
     let mut params = json!({ "conflict": conflict });
-    match (main, lane, text) {
-        (true, _, _) => params["choice"] = json!("main"),
-        (_, true, _) => params["choice"] = json!("lane"),
-        (_, _, Some(file)) => {
+    match (choice, text) {
+        (Some(choice), _) => params["choice"] = json!(choice),
+        (None, Some(file)) => {
             let content = if file.as_os_str() == "-" {
                 std::io::read_to_string(std::io::stdin()).map_err(fail)?
             } else {
@@ -869,7 +884,10 @@ fn cmd_resolve(cli: &Cli, conflict: &str, main: bool, lane: bool, text: &Option<
             };
             params["text"] = json!(content);
         }
-        _ => return Err("say how: --main, --lane or --text FILE".to_owned()),
+        _ => return Err(
+            "say how: --main, --lane or --text FILE (for the uses of a renamed symbol: --rewrite or --keep)"
+                .to_owned(),
+        ),
     }
     let done: Value = daemon(cli)?.call("resolve_conflict", params).map_err(fail)?;
     if cli.json {
@@ -895,6 +913,10 @@ fn cmd_rename(cli: &Cli, symbol: &str, new_name: &str, lane: &Option<String>) ->
         return Ok(());
     }
     println!("`{}` is now `{}` in {} (symbol {}).", done.from, done.to, done.file, done.symbol);
+    if !done.references_updated.is_empty() {
+        println!("Its uses took the new name:");
+        done.references_updated.iter().for_each(|place| println!("  {place}"));
+    }
     if !done.possible_references.is_empty() {
         println!("The old name is still written here (not touched: they may be uses of it):");
         done.possible_references.iter().for_each(|place| println!("  {place}"));
@@ -1082,7 +1104,10 @@ fn main() -> ExitCode {
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),
         Cmd::Conflicts { id, all } => cmd_conflicts(&cli, id, *all),
-        Cmd::Resolve { conflict, main, lane, text } => cmd_resolve(&cli, conflict, *main, *lane, text),
+        Cmd::Resolve { conflict, main, lane, text, rewrite, keep } => {
+            let choice = [(*main, "main"), (*lane, "lane"), (*rewrite, "rewrite"), (*keep, "keep")];
+            cmd_resolve(&cli, conflict, choice.iter().find(|(set, _)| *set).map(|(_, word)| *word), text)
+        }
         Cmd::Rename { symbol, new_name, lane } => cmd_rename(&cli, symbol, new_name, lane),
         Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
         Cmd::Status => cmd_status(&cli, false),

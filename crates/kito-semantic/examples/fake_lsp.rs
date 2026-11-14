@@ -91,7 +91,7 @@ fn occurrences(text: &str, word: &str) -> Vec<(usize, usize)> {
     found
 }
 
-fn main() {
+pub fn main() {
     let mut input = std::io::stdin().lock();
     let mut open: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut root = PathBuf::new();

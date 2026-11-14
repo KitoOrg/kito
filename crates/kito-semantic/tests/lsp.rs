@@ -18,7 +18,11 @@ fn fake_server() -> String {
     // target/<profile>/deps/lsp-… → target/<profile>/examples/fake_lsp
     let exe = std::env::current_exe().unwrap();
     let path = exe.parent().unwrap().parent().unwrap().join("examples/fake_lsp");
-    assert!(path.is_file(), "{} is not built", path.display());
+    assert!(
+        path.is_file(),
+        "{} is not built: `cargo test -p kito-semantic` builds it, a single `--test` does not (then: `cargo build -p kito-semantic --example fake_lsp`)",
+        path.display()
+    );
     path.to_str().unwrap().to_owned()
 }
 
@@ -32,9 +36,21 @@ fn fake(root: &Path, timeout_secs: u64) -> LspProvider {
     LspProvider::new("fake", config, root)
 }
 
+/// What the server of the tests was told. Notifications are not answered,
+/// so the last ones may still be on their way: it waits until every
+/// document opened has been closed.
 fn log(root: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(root.join(".fake-lsp-log")).unwrap_or_default();
-    text.lines().map(|line| line.trim().to_owned()).collect()
+    let count = |lines: &[String], what: &str| lines.iter().filter(|line| line.starts_with(what)).count();
+    let mut lines = Vec::new();
+    for _ in 0..100 {
+        let text = std::fs::read_to_string(root.join(".fake-lsp-log")).unwrap_or_default();
+        lines = text.lines().map(|line| line.trim().to_owned()).collect();
+        if count(&lines, "textDocument/didOpen") == count(&lines, "textDocument/didClose") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    lines
 }
 
 #[tokio::test]
@@ -163,6 +179,21 @@ async fn a_server_that_fails_is_stopped_and_the_heuristic_answers() {
         .all(|usage| usage.source == RefSource::TreeSitterHeuristic && usage.confidence < 0.9));
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(problems[0].contains("fake"), "{problems:?}");
+
+    // A server that is not installed is found out once, and then left alone.
+    let go = World::on_disk(
+        tmp.path(),
+        &[("users/users.go", "package users\n\nfunc GetUser() {}\n\nfunc Two() {\n\tGetUser()\n}\n")],
+    );
+    let mut problems = Vec::new();
+    for _ in 0..2 {
+        let found =
+            semantic.usages(&go.snapshot(), go.id("users/users.go", "GetUser"), &mut problems).await.unwrap();
+        assert_eq!(found.len(), 1);
+    }
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("not installed"), "{problems:?}");
+    assert!(!semantic.has_server(Lang::Go));
     semantic.shutdown().await;
 }
 

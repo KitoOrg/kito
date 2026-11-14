@@ -181,10 +181,11 @@ impl Semantic {
     }
 
     fn server_for(&self, lang: Lang) -> Option<&LspProvider> {
-        self.servers.iter().find(|server| server.languages().contains(&lang))
+        self.servers.iter().find(|server| server.available() && server.languages().contains(&lang))
     }
 
-    /// `true` if a language server is configured for this language.
+    /// `true` if a language server is configured for this language, and is
+    /// not known to be missing.
     pub fn has_server(&self, lang: Lang) -> bool {
         self.server_for(lang).is_some()
     }

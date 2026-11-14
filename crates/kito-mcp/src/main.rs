@@ -138,12 +138,14 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
         (
             "resolve_conflict",
             "Decide a conflict: keep what the main lane has, keep what the lane has, or give the text \
-             that replaces both. The next request_integration applies the decision.",
+             that replaces both. For a semantic_ref conflict (uses that may be of a symbol the other \
+             side renamed): `rewrite` if they are uses of it and must take the new name, `keep` if \
+             they are something else. The next request_integration applies the decision.",
             json!({
                 "type": "object",
                 "properties": {
                     "conflict": { "type": "string", "description": "The conflict (conflict#7)" },
-                    "choice": { "type": "string", "enum": ["main", "lane"] },
+                    "choice": { "type": "string", "enum": ["main", "lane", "rewrite", "keep"] },
                     "text": { "type": "string", "description": "The whole new text of the symbol (or of the file, for a text conflict)" }
                 },
                 "required": ["conflict"]
