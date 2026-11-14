@@ -614,6 +614,22 @@ async fn integration_loop(daemon: Arc<Daemon>) {
         let (job, lane) = daemon.queue.next().await;
         let result = integrate(&daemon, lane).await;
         daemon.queue.finish(job, result);
+        // The lane has its answer: now git's index, left behind by the
+        // export of the integration, is brought up to the commit.
+        let worker = daemon.clone();
+        let refreshed = tokio::task::spawn_blocking(move || {
+            match worker.with_repo(|repo| Ok(repo.take_index_refresh())) {
+                Ok(Some((root, options))) => {
+                    kito_git::refresh_index(&root, &options).map_err(|e| e.to_string())
+                }
+                Ok(None) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .await;
+        if let Ok(Err(e)) = refreshed {
+            eprintln!("kitod: git index: {e}");
+        }
     }
 }
 

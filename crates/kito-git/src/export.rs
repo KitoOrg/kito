@@ -182,18 +182,52 @@ pub fn export_known(
             );
             repo.reference(branch.as_str(), commit, PreviousValue::Any, message).map_err(git_err)?;
         }
-        let head_is_branch =
-            repo.head_name().map_err(git_err)?.is_some_and(|n| n.as_bstr() == branch.as_str());
-        if opts.update_index && head_is_branch {
+        if opts.update_index {
             let tree_id = match last_tree {
                 Some(id) => id,
                 None => repo.find_commit(commit).map_err(git_err)?.tree_id().map_err(git_err)?.detach(),
             };
-            let mut index = repo.index_from_tree(&tree_id).map_err(git_err)?;
-            index.write(Default::default()).map_err(git_err)?;
+            write_index(&repo, &branch, tree_id)?;
         }
     }
     Ok(done)
+}
+
+/// Rewrites git's index from a tree, if HEAD is on the exported branch: with
+/// it `git status` is clean when the working directory matches the commit.
+fn write_index(repo: &gix::Repository, branch: &str, tree: gix::ObjectId) -> Result<(), GitError> {
+    let head_is_branch = repo.head_name().map_err(git_err)?.is_some_and(|n| n.as_bstr() == branch);
+    if head_is_branch {
+        let mut index = repo.index_from_tree(&tree).map_err(git_err)?;
+        index.write(Default::default()).map_err(git_err)?;
+    }
+    Ok(())
+}
+
+/// Rewrites git's index from the last commit of the exported branch: what
+/// an export made with `update_index: false` left to do. It reads every
+/// tree of the commit, so its cost grows with the repository: an export
+/// that must be quick leaves it for a moment later.
+pub fn refresh_index(root: &Path, opts: &ExportOptions) -> Result<(), GitError> {
+    let repo = match gix::open(root) {
+        Ok(repo) => repo,
+        Err(_) if !root.join(".git").exists() => return Ok(()),
+        Err(e) => return Err(git_err(e)),
+    };
+    let branch = match &opts.branch {
+        Some(name) if name.starts_with("refs/") => name.clone(),
+        Some(name) => format!("refs/heads/{name}"),
+        None => match repo.head_name().map_err(git_err)? {
+            Some(name) => name.as_bstr().to_string(),
+            None => return Ok(()),
+        },
+    };
+    let Some(mut reference) = repo.try_find_reference(branch.as_str()).map_err(git_err)? else {
+        return Ok(());
+    };
+    let commit = reference.peel_to_id().map_err(git_err)?.detach();
+    let tree = repo.find_commit(commit).map_err(git_err)?.tree_id().map_err(git_err)?.detach();
+    write_index(&repo, &branch, tree)
 }
 
 /// Where an export has got to.

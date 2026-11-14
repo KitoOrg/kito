@@ -463,6 +463,8 @@ pub struct Repo {
     exported: Option<(kito_core::CheckpointId, Tree)>,
     /// Who knows about the references between symbols (level 2).
     semantic: std::sync::Arc<kito_semantic::Semantic>,
+    /// A checkpoint was exported to git without rewriting git's index.
+    index_stale: bool,
     pub(crate) clock: HlcClock,
     pub(crate) counters: Counters,
     /// Files being written right now, kept up to date by whoever follows
@@ -536,6 +538,7 @@ impl Repo {
             parse_cache: semantic::ParseCache::default(),
             exported: None,
             semantic: std::sync::Arc::new(providers),
+            index_stale: false,
             clock: HlcClock::new(),
             counters: Counters::default(),
             writing: std::sync::Arc::default(),
@@ -1147,6 +1150,33 @@ impl Repo {
     }
 
     pub fn export_git(&mut self) -> Result<Vec<(String, String)>> {
+        self.export_git_with(true)
+    }
+
+    /// Exports like [`Repo::export_git`] but leaves git's index as it is:
+    /// rewriting it costs in proportion to the repository, and whoever is
+    /// in a hurry does it a moment later with [`Repo::refresh_git_index`].
+    pub(crate) fn export_git_later_index(&mut self) -> Result<Vec<(String, String)>> {
+        self.export_git_with(false)
+    }
+
+    /// What is left to do after an export that did not rewrite git's index:
+    /// where the repository is and how it is exported. `None` if nothing
+    /// is. The caller passes them to `kito_git::refresh_index`; the
+    /// repository need not be held meanwhile.
+    pub fn take_index_refresh(&mut self) -> Option<(PathBuf, kito_git::ExportOptions)> {
+        std::mem::take(&mut self.index_stale).then(|| (self.root.clone(), self.config.export_options()))
+    }
+
+    /// Rewrites git's index if an export left it behind.
+    pub fn refresh_git_index(&mut self) -> Result<()> {
+        if let Some((root, options)) = self.take_index_refresh() {
+            kito_git::refresh_index(&root, &options)?;
+        }
+        Ok(())
+    }
+
+    fn export_git_with(&mut self, update_index: bool) -> Result<Vec<(String, String)>> {
         // The files at the last checkpoint exported are remembered: the
         // next commit is made from what changed since, not from the log.
         let known = match (&self.exported, self.main.head) {
@@ -1155,12 +1185,9 @@ impl Repo {
             }
             _ => None,
         };
-        let done = kito_git::export_known(
-            &mut self.store,
-            &self.root,
-            &self.config.export_options(),
-            known.as_ref(),
-        )?;
+        let options = kito_git::ExportOptions { update_index, ..self.config.export_options() };
+        let done = kito_git::export_known(&mut self.store, &self.root, &options, known.as_ref())?;
+        self.index_stale = !update_index && (self.index_stale || !done.is_empty());
         self.exported = match (self.store.checkpoints().next_back(), self.main.head) {
             (Some(last), Some(head)) if last.head == head && last.git_commit.is_some() => {
                 Some((last.id, self.main.tree.clone()))
@@ -1611,33 +1638,47 @@ impl Repo {
 
     /// Writes into a working directory a file with the given content and type.
     pub(crate) fn write_file_in(&self, root: &Path, rel: &Path, entry: &TreeEntry) -> Result<()> {
-        use std::os::unix::ffi::OsStrExt;
-        let abs = root.join(rel);
-        if let Some(dir) = abs.parent() {
-            fs::create_dir_all(dir).map_err(Error::io(dir))?;
-        }
-        let content = self.store.get_blob(&entry.blob)?.ok_or_else(|| {
+        let content = self.content_of(rel, entry)?;
+        write_file(root, rel, entry.mode, &content)
+    }
+
+    fn content_of(&self, rel: &Path, entry: &TreeEntry) -> Result<Vec<u8>> {
+        self.store.get_blob(&entry.blob)?.ok_or_else(|| {
             Error::Other(format!("{}: content {} is not in the store", rel.display(), entry.blob))
-        })?;
-        if entry.mode == FileMode::Symlink {
-            let _ = fs::remove_file(&abs);
-            return std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&content), &abs)
-                .map_err(Error::io(&abs));
+        })
+    }
+
+    /// The same for many files: the contents are read from the store one
+    /// after the other, the files are written by several threads.
+    pub(crate) fn write_files_in(&self, root: &Path, files: &[(PathBuf, TreeEntry)]) -> Result<()> {
+        let mut ready = Vec::with_capacity(files.len());
+        for (rel, entry) in files {
+            ready.push((rel.as_path(), entry.mode, self.content_of(rel, entry)?));
         }
-        // Write to a temporary file, then rename: readers never see a half-written file.
-        let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let tmp = abs.with_file_name(format!(".{name}.kito-tmp"));
-        fs::write(&tmp, &content).map_err(Error::io(&tmp))?;
-        let mode = if entry.mode == FileMode::Executable { 0o755 } else { 0o644 };
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(Error::io(&tmp))?;
-        fs::rename(&tmp, &abs).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            Error::io(&abs)(e)
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(8);
+        if ready.len() < 32 || workers < 2 {
+            return ready.iter().try_for_each(|(rel, mode, content)| write_file(root, rel, *mode, content));
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = ready
+                .chunks(ready.len().div_ceil(workers))
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter().try_for_each(|(rel, mode, content)| write_file(root, rel, *mode, content))
+                    })
+                })
+                .collect();
+            handles.into_iter().try_for_each(|handle| handle.join().expect("a writer thread panicked"))
         })
     }
 
     /// Closes the repository, saving the state and leaving the indexes durable.
-    pub fn close(self) -> Result<()> {
+    pub fn close(mut self) -> Result<()> {
+        // git is left as a clean mirror: an index that an export left
+        // behind is brought up to the last commit.
+        if let Err(e) = self.refresh_git_index() {
+            eprintln!("kito: git index: {e}");
+        }
         self.save_state()?;
         self.save_lanes()?;
         self.store.close()?;
@@ -1650,4 +1691,28 @@ pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let start = Instant::now();
     let value = f();
     (value, start.elapsed())
+}
+
+/// Writes a file of a working directory: to a temporary file, then a
+/// rename, so that readers never see it half-written.
+fn write_file(root: &Path, rel: &Path, mode: FileMode, content: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let abs = root.join(rel);
+    if let Some(dir) = abs.parent() {
+        fs::create_dir_all(dir).map_err(Error::io(dir))?;
+    }
+    if mode == FileMode::Symlink {
+        let _ = fs::remove_file(&abs);
+        return std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(content), &abs)
+            .map_err(Error::io(&abs));
+    }
+    let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = abs.with_file_name(format!(".{name}.kito-tmp"));
+    fs::write(&tmp, content).map_err(Error::io(&tmp))?;
+    let mode = if mode == FileMode::Executable { 0o755 } else { 0o644 };
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(Error::io(&tmp))?;
+    fs::rename(&tmp, &abs).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        Error::io(&abs)(e)
+    })
 }

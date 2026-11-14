@@ -597,3 +597,15 @@ of the kind (a file created, written to and not closed, a new directory)
 wait for quiet as before, and so does everything on systems that do not
 report the closing of a file. The plan asks for a debounce of 50 ms and
 for less than 30 ms from a save to its op: this is how both hold.
+
+### D-068 · git's index is rewritten after the lane has its answer
+Exporting a checkpoint ends by rewriting git's index from the commit, so
+that `git status` is clean: it reads every tree of the commit and writes
+every entry, 30 ms on 50,000 files. An integration makes the commit and
+moves the branch, and leaves the index for when the lane has had its
+result: the daemon rewrites it right after, without holding the
+repository; closing the repository, a checkpoint made by hand and
+`kito export-git` rewrite it too. For those 30 ms `git status` may show
+the files of the last integration as modified; nothing in Kito reads the
+index. The files an integration writes, in the main directory and in the
+lane it brings up to date, are written by several threads.

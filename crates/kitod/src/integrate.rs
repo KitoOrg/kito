@@ -577,15 +577,17 @@ impl Repo {
         // The files, then the ops that record them: signed by the agent,
         // the first one with the lane's head as second parent.
         let root = self.root.clone();
+        let mut written = Vec::new();
         for (path, file) in &prepared.outcome.files {
             match file {
                 Some(file) => {
                     let blob = self.store.put_blob(&file.content)?;
-                    self.write_file_in(&root, path, &TreeEntry { blob, mode: file.mode })?;
+                    written.push((path.clone(), TreeEntry { blob, mode: file.mode }));
                 }
                 None => remove_in(&root, path)?,
             }
         }
+        self.write_files_in(&root, &written)?;
         let summary = match &what {
             Some(what) => format!("integrate {lane}: {what}"),
             None => format!("integrate {lane} ({})", agent.name),
@@ -626,7 +628,9 @@ impl Repo {
             }
         }
         if self.config.git.export_on_checkpoint {
-            match self.export_git() {
+            // The commit is made now; git's index, which costs in proportion
+            // to the repository, is rewritten once the lane has its answer.
+            match self.export_git_later_index() {
                 Ok(_) => {
                     result.git_commit = self
                         .store
@@ -684,9 +688,7 @@ impl Repo {
         for path in &remove {
             remove_in(&workdir, path)?;
         }
-        for (path, entry) in &write {
-            self.write_file_in(&workdir, path, entry)?;
-        }
+        self.write_files_in(&workdir, &write)?;
         let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
         for path in remove.iter().chain(write.iter().map(|(path, _)| path)) {
             at.work.stat.remove(path);
@@ -712,6 +714,15 @@ impl Repo {
     /// place. The daemon does the same without holding the repository
     /// during the verification.
     pub fn integrate(&mut self, lane: LaneId) -> Result<IntegrationResult> {
+        let result = self.integrate_leaving_index(lane);
+        self.refresh_git_index()?;
+        result
+    }
+
+    /// [`Repo::integrate`] without the last step, the rewriting of git's
+    /// index: for who measures an integration as the daemon does it, with
+    /// the index rewritten after the lane has its answer.
+    pub fn integrate_leaving_index(&mut self, lane: LaneId) -> Result<IntegrationResult> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

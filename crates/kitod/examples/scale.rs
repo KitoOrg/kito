@@ -101,9 +101,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(workdir.join(path(i)), file(i, 7 + lane as usize))?;
         }
         let recorded = repo.scan_lane(LaneId(lane))?.len();
+        // As the daemon does it: git's index is rewritten after the lane
+        // has its answer, and is not part of the time.
         let started = Instant::now();
-        let result = repo.integrate(LaneId(lane))?;
+        let result = repo.integrate_leaving_index(LaneId(lane))?;
         let took = started.elapsed().as_secs_f64() * 1000.0;
+        repo.refresh_git_index()?;
         if result.result != Outcome::Integrated {
             return Err(format!("not integrated: {result:?}").into());
         }
