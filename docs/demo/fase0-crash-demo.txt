@@ -1,0 +1,32 @@
+crash demo: 1000000 op in /tmp/kito-demo, seed 20261114
+round   1: kill dopo commit + 156 ms | confermate    11281 | presenti    11281 | scartati       0 B | indice CaughtUp { ops: 11281, blobs: 7521 }
+round   2: kill all'avvio  +  57 ms | confermate    13921 | presenti    13921 | scartati       0 B | indice CaughtUp { ops: 2640, blobs: 1760 }
+round   3: kill dopo commit + 315 ms | confermate    30687 | presenti    30687 | scartati       0 B | indice CaughtUp { ops: 16766, blobs: 11178 }
+[…]
+round 205: kill dopo commit + 808 ms | confermate   962894 | presenti   965044 | scartati       0 B | indice CaughtUp { ops: 10631, blobs: 4808 }
+round 206: kill dopo commit + 337 ms | confermate   973029 | verifica rimandata
+round 207: kill a metà write + 626 ms | confermate   974688 | verifica rimandata
+round 208: kill a metà write + 512 ms | confermate   977376 | verifica rimandata
+round 209: kill dopo commit + 642 ms | confermate   985008 | verifica rimandata
+round 210: kill dopo commit + 855 ms | confermate   995601 | presenti   997777 | scartati       0 B | indice CaughtUp { ops: 10721, blobs: 7147 }
+round 211: kill all'avvio  +  96 ms | confermate   995601 | presenti   997777 | scartati       0 B | indice UpToDate
+round 212: terminato                | confermate  1000000 | presenti  1000000 | scartati       0 B | indice UpToDate
+
+op scritte e verificate ........ 1000000
+blob ........................... 666667
+segmenti oplog / pack .......... 5 / 3
+round .......................... 212
+kill -9 ........................ 211
+  dopo un commit ............... 95
+  all'avvio (anche in recupero)  40
+  a metà di una scrittura ...... 76
+  prima del primo commit ....... 50
+verifiche dopo un kill ......... 121
+code troncate scartate ......... 33 (29768 byte, mai confermati)
+indice riallineato / rifatto ... 113 / 0
+tempo di scrittura con i kill .. 108.5 s
+op confermate perse ............ 0
+
+user	2m1.893s
+sys	0m24.495s
+exit=0

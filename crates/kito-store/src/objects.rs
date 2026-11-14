@@ -9,6 +9,7 @@ use crate::logfile::LogRecovery;
 use crate::record::{LogKind, MAX_PAYLOAD};
 use crate::segments::{LogOptions, Pos, SegmentedLog};
 use kito_core::{BlobId, Hash};
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -24,7 +25,27 @@ const PACK_AUTO_FLUSH: usize = 4 << 20;
 
 pub(crate) struct Packs {
     log: SegmentedLog,
-    level: i32,
+    /// Contesto di compressione riusato tra un blob e l'altro: crearne uno a
+    /// ogni chiamata dominava il costo di un blob piccolo (benchmark
+    /// `write/put_blob_512_bytes`, vedi `docs/benchmarks.md`).
+    compressor: zstd::bulk::Compressor<'static>,
+}
+
+thread_local! {
+    /// Contesto di decompressione riusato dalle letture di questo thread
+    /// (benchmark `read/get_blob`).
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { RefCell::new(None) };
+}
+
+fn decompress(body: &[u8], raw_len: usize) -> std::io::Result<Vec<u8>> {
+    DECOMPRESSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let decompressor = match slot.as_mut() {
+            Some(d) => d,
+            None => slot.insert(zstd::bulk::Decompressor::new()?),
+        };
+        decompressor.decompress(body, raw_len)
+    })
 }
 
 impl Packs {
@@ -39,7 +60,9 @@ impl Packs {
         let opts =
             LogOptions { kind: LogKind::Pack, ext: "pack", target_size, auto_flush: Some(PACK_AUTO_FLUSH) };
         let (log, recovery) = SegmentedLog::open(dir, opts, fs, lost_found, floor)?;
-        Ok((Packs { log, level }, recovery))
+        let compressor = zstd::bulk::Compressor::new(level)
+            .map_err(|e| StoreError::InvalidOp(format!("livello zstd {level} non valido: {e}")))?;
+        Ok((Packs { log, compressor }, recovery))
     }
 
     pub(crate) fn log(&self) -> &SegmentedLog {
@@ -57,7 +80,9 @@ impl Packs {
         }
         debug_assert_eq!(*id, BlobId::of(data));
         let compressed = if data.len() >= MIN_COMPRESS {
-            let c = zstd::bulk::compress(data, self.level)
+            let c = self
+                .compressor
+                .compress(data)
                 .map_err(|e| StoreError::InvalidOp(format!("compressione zstd fallita: {e}")))?;
             (c.len() < data.len()).then_some(c)
         } else {
@@ -125,9 +150,7 @@ fn decode(payload: &[u8], expect: Option<&BlobId>) -> std::result::Result<Vec<u8
     let body = &payload[BLOB_HEADER..];
     let data = match payload[32] {
         CODEC_RAW => body.to_vec(),
-        CODEC_ZSTD => {
-            zstd::bulk::decompress(body, raw_len).map_err(|e| format!("decompressione zstd fallita: {e}"))?
-        }
+        CODEC_ZSTD => decompress(body, raw_len).map_err(|e| format!("decompressione zstd fallita: {e}"))?,
         other => return Err(format!("codec {other} sconosciuto")),
     };
     if data.len() != raw_len {
