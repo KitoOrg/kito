@@ -54,3 +54,37 @@ cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
 
 The debounce is 50 ms. See the discussion of the "< 30 ms at p95" target in
 [`phases.md`](phases.md).
+
+## Phase 2 · the cost of symbols on every save
+
+```bash
+cargo bench -p kito-diff
+```
+
+The first version parsed both sides of every save from scratch and looked up
+each old symbol with a scan of the table: on a file of 2,000 functions the
+processing of a save went from 3 ms (phase 1) to 127 ms.
+
+| Step, file of 2,000 functions (172 kB), one changed | Before | After | What changed |
+| --- | --- | --- | --- |
+| Matching old and new symbols (`diff_one_function_changed_of_2000`) | 33.4 ms | 1.1 ms | old symbols looked up by (parent, kind, name) instead of scanning |
+| Reading the new side (`reparse_2000_functions_one_changed`) | 42.8 ms | 21.8 ms | incremental parse from the cached tree of the old side |
+| Reading the old side | 42.8 ms | 0 | taken from the parse cache |
+
+`parse_2000_functions` (from scratch, 42.8 ms) is the reference for the first
+touch of a file. Of the 21.8 ms of an incremental reparse, about 1 ms is the
+parse itself: the rest is running the symbols query and hashing the tokens
+of the whole file again, which is what a later optimization can avoid.
+
+End to end, with the real daemon (`--shape typical` is an ordinary source
+file, `--shape dense` the worst case of one function per line):
+
+```bash
+cargo run --release -p kitod --example latency -- --shape typical
+```
+
+| File | Processing p50 | p95 |
+| --- | --- | --- |
+| 2,000 lines, 143 functions (58 kB) | 14.1 ms | 20.9 ms |
+| 2,000 lines, 2,000 functions (172 kB) | 31.5 ms | 50.5 ms |
+

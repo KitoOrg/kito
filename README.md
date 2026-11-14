@@ -14,7 +14,7 @@ runnable demo.
 | --- | --- | --- |
 | 0 | Foundations: `kito-core`, `kito-store` | done |
 | 1 | Continuous textual capture: `kitod`, CLI, git export/import | done |
-| 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | to do |
+| 2 | Level 1 semantics: tree-sitter, stable IDs, `kito why` | done |
 | 3 | Lanes and integration, MCP server | to do |
 | 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | to do |
 | 5 | Coverage and performance | to do |
@@ -25,7 +25,8 @@ runnable demo.
 | --- | --- |
 | `kito-core` | Data model types, canonical CBOR encoding, IDs and hashes |
 | `kito-store` | Blob packs, segmented oplog, rebuildable indexes, crash recovery |
-| `kito-diff` | Textual diff and generation of the file ops (the AST differ arrives with phase 2) |
+| `kito-parse` | tree-sitter grammars and symbol queries for the ten languages, normalized hashes |
+| `kito-diff` | Textual diff, file ops, and the AST differ that keeps symbol IDs stable |
 | `kito-git` | Export of checkpoints as git commits, import from a git repository |
 | `kitod` | Daemon: watcher, capture, JSON-RPC socket |
 | `kito-cli` | The `kito` binary |
@@ -59,6 +60,26 @@ kito log
 kito checkpoint -m "first version"
 ```
 
+In Python, JavaScript, TypeScript, Java, C#, C, C++, Go, PHP and Rust files
+Kito also follows the symbols: a function keeps its identity when it is
+renamed, edited or moved to another file. Its whole story, asked by the name
+and the place it has today:
+
+```bash
+kito why src/users.ts:fetchUser
+```
+
+To go back to a checkpoint or to an earlier op (recorded as new ops, so it
+can be undone), and to set who signs the changes:
+
+```bash
+kito rollback ckpt#1
+```
+
+```bash
+kito identity --name "Ada" --email ada@example.com
+```
+
 ## Development
 
 ```bash
@@ -70,7 +91,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ```bash
-cargo bench -p kito-store
+cargo bench -p kito-store -p kito-diff
+```
+
+Phase 2 demo: a function is renamed, moved to another file and edited;
+`kito why` tells its whole story.
+
+```bash
+scripts/demo-phase2.sh
 ```
 
 Phase 1 demo: working without commits, `kito log` shows everything, `git log`

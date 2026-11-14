@@ -45,9 +45,9 @@ enum Cmd {
     },
     /// Show the operation log, most recent first
     Log {
-        /// Only operations that touch this file
+        /// Only what concerns this file
         path: Option<PathBuf>,
-        /// How many operations to show
+        /// How many changes to show (what each meant for the symbols comes with it)
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
     },
@@ -284,12 +284,22 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     if items.is_empty() {
         println!("No operations recorded.");
     }
-    let mut pending: Vec<String> = Vec::new();
+    // Sub-lines waiting for the change they go under, each with the file
+    // of its symbol: shown only when it is not the file of that change.
+    let mut pending: Vec<(String, Option<String>)> = Vec::new();
+    let flush = |pending: &mut Vec<(String, Option<String>)>, under: Option<&str>| {
+        for (mut line, file) in pending.drain(..).rev() {
+            if let Some(file) = file.filter(|f| Some(f.as_str()) != under && !line.contains(f.as_str())) {
+                line.push_str(&format!("  ({file})"));
+            }
+            println!("{line}");
+        }
+    };
     for item in items {
         match item {
             LogItem::Checkpoint { id, label, git_commit, .. } => {
                 let git = git_commit.map(|c| format!("  (git {})", &c[..10])).unwrap_or_default();
-                pending.drain(..).rev().for_each(|sub| println!("{sub}"));
+                flush(&mut pending, None);
                 println!("◆ {id}  {label}{git}");
             }
             LogItem::Op {
@@ -299,17 +309,13 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
                 // file change it belongs to, which (going back in time)
                 // comes next.
                 if is_symbolic(&op) {
-                    let mut line = format!("      ↳ {}", detail.unwrap_or(op));
-                    if let Some(path) = path.filter(|p| !line.contains(p.as_str())) {
-                        line.push_str(&format!("  ({path})"));
-                    }
-                    pending.push(line);
+                    pending.push((format!("      ↳ {}", detail.unwrap_or(op)), path));
                     continue;
                 }
                 // The first digits of the ID are enough to point `kito rollback` at the op.
                 let short = &id[..id.len().min(8)];
-                let mut line =
-                    format!("  {short}  {}  {author:<10} {op:<10} {}", utc(at_ms), path.unwrap_or_default());
+                let path = path.unwrap_or_default();
+                let mut line = format!("  {short}  {}  {author:<10} {op:<10} {path}", utc(at_ms));
                 if let (Some(added), Some(removed)) = (lines_added, lines_removed) {
                     line.push_str(&format!("  +{added} −{removed}"));
                 }
@@ -320,11 +326,11 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
                     line.push_str(&format!("  [{intent}]"));
                 }
                 println!("{line}");
-                pending.drain(..).rev().for_each(|sub| println!("{sub}"));
+                flush(&mut pending, Some(&path));
             }
         }
     }
-    pending.drain(..).rev().for_each(|sub| println!("{sub}"));
+    flush(&mut pending, None);
     Ok(())
 }
 

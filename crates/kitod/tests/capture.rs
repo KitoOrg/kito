@@ -654,23 +654,120 @@ fn a_function_is_followed_through_a_rename_and_a_move() {
     assert!(repo.scan().unwrap().is_empty());
     assert!(repo.store().verify().unwrap().is_ok());
 
-    // The log tells the same story, newest first.
-    let items = repo.log(3, None).unwrap();
-    let details: Vec<String> = items
-        .iter()
-        .filter_map(|i| match i {
-            LogItem::Op { op, detail, .. } => Some(format!("{op}: {}", detail.clone().unwrap_or_default())),
-            _ => None,
-        })
-        .collect();
+    // The log tells the same story, newest first: each change of a file,
+    // preceded by what it meant for the symbols. The limit counts changes.
+    let lines = |items: Vec<LogItem>| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|i| match i {
+                LogItem::Op { op, path, detail, .. } => Some(format!(
+                    "{op} {}: {}",
+                    path.clone().unwrap_or_default(),
+                    detail.clone().unwrap_or_default()
+                )),
+                _ => None,
+            })
+            .collect()
+    };
     assert_eq!(
-        details,
+        lines(repo.log(3, None).unwrap()),
         [
-            "ModifyBody: `fetchUser` body changed (+1 −1)",
-            "TextEdit: ",
-            "Move: `fetchUser` moved from src/auth.ts to src/users.ts"
+            "ModifyBody src/users.ts: `fetchUser` body changed (+1 −1)",
+            "TextEdit src/users.ts: ",
+            "Move src/users.ts: `fetchUser` moved from src/auth.ts to src/users.ts",
+            "TextEdit src/auth.ts: ",
+            "FileAdd src/users.ts: ",
         ]
     );
+    // The log of one file: its changes, and the symbols that were in it at
+    // the time. The rename happened when the function was still in auth.ts.
+    assert_eq!(
+        lines(repo.log(2, Some(Path::new("src/users.ts"))).unwrap()),
+        [
+            "ModifyBody src/users.ts: `fetchUser` body changed (+1 −1)",
+            "TextEdit src/users.ts: ",
+            "Move src/users.ts: `fetchUser` moved from src/auth.ts to src/users.ts",
+            "FileAdd src/users.ts: ",
+        ]
+    );
+    assert_eq!(
+        lines(repo.log(2, Some(Path::new("src/auth.ts"))).unwrap()),
+        [
+            "Move src/users.ts: `fetchUser` moved from src/auth.ts to src/users.ts",
+            "TextEdit src/auth.ts: ",
+            "Rename src/auth.ts: renamed `getUser` → `fetchUser`",
+            "TextEdit src/auth.ts: ",
+        ]
+    );
+}
+
+#[test]
+fn a_class_is_followed_out_of_its_namespace_and_a_method_into_another_class() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+
+    let item = "    public class Item\n    {\n        public string Describe()\n        {\n            return string.Format(\"{0} x {1}\", Quantity, Price);\n        }\n    }\n";
+    let cart = "    public class Cart\n    {\n        public decimal Total()\n        {\n            return items.Sum(item => item.Price * item.Quantity);\n        }\n    }\n";
+    write(root, "Shop.cs", &format!("namespace Shop\n{{\n{cart}\n{item}}}\n"));
+    repo.scan().unwrap();
+    let class = repo.symbols().find(Path::new("Shop.cs"), "Shop.Item")[0];
+    let method = repo.symbols().find(Path::new("Shop.cs"), "Shop.Item.Describe")[0];
+
+    // "Move type to its own file": into a namespace block of the same name.
+    write(root, "Shop.cs", &format!("namespace Shop\n{{\n{cart}}}\n"));
+    write(root, "Item.cs", &format!("namespace Shop\n{{\n{item}}}\n"));
+    let ops = repo.scan().unwrap();
+    assert_eq!(kinds(&ops), ["FileAdd", "TextEdit", "AddSymbol", "Move"]);
+    assert_eq!(repo.symbols().find(Path::new("Item.cs"), "Shop.Item"), [class]);
+    assert_eq!(repo.symbols().find(Path::new("Item.cs"), "Shop.Item.Describe"), [method]);
+
+    // Then the method goes to the other class, in the other file.
+    let describe = "        public string Describe()\n        {\n            return string.Format(\"{0} x {1}\", Quantity, Price);\n        }\n";
+    let total = "        public decimal Total()\n        {\n            return items.Sum(item => item.Price * item.Quantity);\n        }\n";
+    write(root, "Item.cs", "namespace Shop\n{\n    public class Item\n    {\n    }\n}\n");
+    write(
+        root,
+        "Shop.cs",
+        &format!("namespace Shop\n{{\n    public class Cart\n    {{\n{total}\n{describe}    }}\n}}\n"),
+    );
+    let ops = repo.scan().unwrap();
+    assert_eq!(kinds(&ops), ["TextEdit", "TextEdit", "Move"]);
+    assert_eq!(repo.symbols().find(Path::new("Shop.cs"), "Shop.Cart.Describe"), [method]);
+    assert_eq!(
+        story(&repo, "Shop.cs", "Shop.Cart.Describe"),
+        [
+            "method `Describe` created in Shop.cs",
+            // It had no move of its own: its class took it along.
+            "moved from Shop.cs to Item.cs, along with `Shop.Item`",
+            "moved from Item.cs to Shop.cs",
+        ]
+    );
+    assert_eq!(
+        story(&repo, "Item.cs", "Shop.Item"),
+        ["class `Item` created in Shop.cs", "moved from Shop.cs to Item.cs"]
+    );
+
+    // A renamed file is part of the story of what it contains.
+    fs::rename(root.join("Item.cs"), root.join("Product.cs")).unwrap();
+    assert_eq!(kinds(&repo.scan().unwrap()), ["FileRename"]);
+    assert_eq!(
+        story(&repo, "Product.cs", "Shop.Item"),
+        [
+            "class `Item` created in Shop.cs",
+            "moved from Shop.cs to Item.cs",
+            "file renamed from Item.cs to Product.cs"
+        ]
+    );
+
+    // Replaying the log gives the same nesting.
+    let symbols = repo.symbols().clone();
+    repo.close().unwrap();
+    fs::remove_file(root.join(".kito/lanes/main/state")).unwrap();
+    let mut repo = Repo::open(root).unwrap();
+    assert_eq!(repo.symbols(), &symbols);
+    assert!(repo.scan().unwrap().is_empty());
 }
 
 #[test]

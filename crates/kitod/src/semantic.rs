@@ -3,7 +3,7 @@
 //! knows as text, and the history of a symbol (`kito why`).
 
 use crate::error::{Error, Result};
-use kito_core::{BlobId, FileMode, LaneId, OpKind, SymbolId, SymbolKind, SymbolTable, Tree};
+use kito_core::{BlobId, FileMode, Hlc, LaneId, Op, OpKind, SymbolId, SymbolKind, SymbolTable, Tree};
 use kito_diff::ast::{diff_symbols, FileChange, SymbolOps, Version};
 use kito_diff::text;
 use kito_parse::{dialect_for_path, parse_reusing, Parsed};
@@ -248,8 +248,11 @@ pub(crate) fn describe_symbol_op(store: &Store, kind: &OpKind) -> Option<String>
         OpKind::Rename { from, to, .. } => format!("renamed `{from}` → `{to}`"),
         // Same file: the symbol changed enclosing symbol (a method that went
         // to another class).
-        OpKind::Move { from, to, .. } if from.file == to.file => {
-            format!("moved within {} (line {} → {})", to.file.display(), from.line, to.line)
+        OpKind::Move { from, to, parent, .. } if from.file == to.file => {
+            match parent.and_then(|container| last_known_name(store, container)) {
+                Some(container) => format!("moved into `{container}` in {}", to.file.display()),
+                None => format!("moved to the top level of {}", to.file.display()),
+            }
         }
         OpKind::Move { from, to, .. } => {
             format!("moved from {} to {}", from.file.display(), to.file.display())
@@ -282,9 +285,72 @@ pub(crate) fn last_known_name(store: &Store, id: SymbolId) -> Option<String> {
     name
 }
 
+/// The ops that tell the story of a symbol, oldest first: its own, and the
+/// moves between files of the symbols that contained it at the time (a
+/// method follows its class without a `Move` of its own). With each
+/// inherited op, the container it happened to.
+fn timeline(store: &Store, id: SymbolId, depth: usize) -> Result<Vec<(Op, Option<SymbolId>)>> {
+    let own = store.symbol_ops(id)?;
+    // Under which container the symbol was, and when.
+    let mut periods: Vec<(SymbolId, Hlc, Option<Hlc>)> = Vec::new();
+    let mut current: Option<(SymbolId, Hlc)> = None;
+    for op in &own {
+        let parent = match &op.kind {
+            OpKind::AddSymbol { sym, .. } => sym.parent,
+            OpKind::Move { parent, .. } => *parent,
+            _ => continue,
+        };
+        if let Some((container, since)) = current.take() {
+            periods.push((container, since, Some(op.at)));
+        }
+        current = parent.map(|container| (container, op.at));
+    }
+    periods.extend(current.map(|(container, since)| (container, since, None)));
+
+    let mut events: Vec<(Op, Option<SymbolId>)> = Vec::new();
+    // Nesting is never this deep; the bound only guards against a damaged log.
+    if depth < 32 {
+        for (container, since, until) in periods {
+            for (op, via) in timeline(store, container, depth + 1)? {
+                let during = op.at > since && until.is_none_or(|until| op.at < until);
+                let to_another_file =
+                    matches!(&op.kind, OpKind::Move { from, to, .. } if from.file != to.file);
+                if during && to_another_file {
+                    events.push((op, Some(via.unwrap_or(container))));
+                }
+            }
+        }
+    }
+    events.extend(own.into_iter().map(|op| (op, None)));
+    events.sort_by_key(|(op, _)| op.at);
+    Ok(events)
+}
+
+/// The renames of files recorded in a lane, oldest first.
+fn file_renames(store: &Store, lane: LaneId) -> Result<Vec<Op>> {
+    const PAGE: usize = 4096;
+    let mut renames = Vec::new();
+    let mut start = 0;
+    loop {
+        let ops = store.lane_ops(lane, start, PAGE)?;
+        let read = ops.len();
+        renames.extend(ops.into_iter().filter(|op| matches!(op.kind, OpKind::FileRename { .. })));
+        if read < PAGE {
+            return Ok(renames);
+        }
+        start += read as u64;
+    }
+}
+
 /// The history of the symbol called `name` (qualified or not) in `file`. If
 /// several symbols answer to that name (overloads), one history each.
-pub(crate) fn why(store: &Store, table: &SymbolTable, file: &Path, name: &str) -> Result<Vec<Why>> {
+pub(crate) fn why(
+    store: &Store,
+    table: &SymbolTable,
+    lane: LaneId,
+    file: &Path,
+    name: &str,
+) -> Result<Vec<Why>> {
     let ids = table.find(file, name);
     if ids.is_empty() {
         let mut known: Vec<String> =
@@ -300,19 +366,57 @@ pub(crate) fn why(store: &Store, table: &SymbolTable, file: &Path, name: &str) -
     let mut histories = Vec::new();
     for id in ids {
         let Some(entry) = table.get(id) else { continue };
-        let steps = store
-            .symbol_ops(id)?
-            .iter()
-            .filter_map(|op| {
-                Some(WhyStep {
-                    op: op.id.to_string(),
-                    at_ms: op.at.wall_ms,
-                    author: op.author.name.clone(),
-                    what: describe_symbol_op(store, &op.kind)?,
-                    intent: op.intent.and_then(|i| store.intent(&i)).map(|i| i.summary.clone()),
-                })
-            })
-            .collect();
+        let events = timeline(store, id, 0)?;
+
+        // Where the symbol's own ops leave it. If that is not where it is
+        // now, its file was renamed along the way: the log of the lane says
+        // when. (Reading it all is the price of the rare case.)
+        let lands = events.iter().rev().find_map(|(op, _)| match &op.kind {
+            OpKind::AddSymbol { sym, .. } => Some(&sym.file),
+            OpKind::Move { to, .. } => Some(&to.file),
+            _ => None,
+        });
+        let renames = if lands == Some(&entry.file) { Vec::new() } else { file_renames(store, lane)? };
+        let mut renames = renames.into_iter().peekable();
+
+        let step = |op: &Op, what: String| WhyStep {
+            op: op.id.to_string(),
+            at_ms: op.at.wall_ms,
+            author: op.author.name.clone(),
+            what,
+            intent: op.intent.and_then(|i| store.intent(&i)).map(|i| i.summary.clone()),
+        };
+        let mut steps = Vec::new();
+        let mut at_file: Option<PathBuf> = None;
+        let mut follow_renames = |before: Option<Hlc>,
+                                  at_file: &mut Option<PathBuf>,
+                                  steps: &mut Vec<WhyStep>| {
+            while let Some(op) = renames.next_if(|op| before.is_none_or(|before| op.at < before)) {
+                let OpKind::FileRename { from, to } = &op.kind else { continue };
+                if at_file.as_ref() == Some(from) {
+                    steps
+                        .push(step(&op, format!("file renamed from {} to {}", from.display(), to.display())));
+                    *at_file = Some(to.clone());
+                }
+            }
+        };
+        for (op, via) in &events {
+            follow_renames(Some(op.at), &mut at_file, &mut steps);
+            match &op.kind {
+                OpKind::AddSymbol { sym, .. } => at_file = Some(sym.file.clone()),
+                OpKind::Move { to, .. } => at_file = Some(to.file.clone()),
+                _ => {}
+            }
+            let Some(mut what) = describe_symbol_op(store, &op.kind) else { continue };
+            if let Some(container) = via {
+                let container =
+                    table.qualified_name(*container).or_else(|| last_known_name(store, *container));
+                what = format!("{what}, along with `{}`", container.unwrap_or_default());
+            }
+            steps.push(step(op, what));
+        }
+        follow_renames(None, &mut at_file, &mut steps);
+
         histories.push(Why {
             id: id.to_string(),
             kind: kind_word(entry.kind).to_owned(),

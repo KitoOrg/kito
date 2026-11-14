@@ -1,0 +1,95 @@
+
+$ kito init
+Kito repository created in /tmp/demo/.kito
+The daemon is running: every save is recorded from now on.
+
+# saving src/auth.ts
+
+$ kito checkpoint -m auth
+ckpt#1 created and exported as git commit 3cf3577e44
+
+# 1. the function is renamed: getUser -> fetchUser
+
+$ kito log -n 1
+  a3f43a40  2026-11-14 15:24:52  francesco  TextEdit   src/auth.ts  +1 −1
+      ↳ renamed `getUser` → `fetchUser`
+
+# 2. the function is cut from src/auth.ts and pasted into a new file, src/users.ts
+
+$ kito log -n 2
+  f4ee2472  2026-11-14 15:24:52  francesco  TextEdit   src/auth.ts  +0 −9
+      ↳ `fetchUser` moved from src/auth.ts to src/users.ts
+  ad0a6e1b  2026-11-14 15:24:52  francesco  FileAdd    src/users.ts
+
+# 3. its body changes in the new file
+
+# 4. a method leaves its class for another one: refresh goes from Session to a new class
+
+$ kito why src/users.ts:fetchUser
+function fetchUser  (src/users.ts)  symbol 0#0
+  2026-11-14 15:24:52  francesco  function `getUser` created in src/auth.ts
+  2026-11-14 15:24:52  francesco  renamed `getUser` → `fetchUser`
+  2026-11-14 15:24:52  francesco  moved from src/auth.ts to src/users.ts
+  2026-11-14 15:24:52  francesco  body changed (+1 −1)
+
+$ kito why src/auth.ts:Renewal.refresh
+method Renewal.refresh  (src/auth.ts)  symbol 0#4
+  2026-11-14 15:24:52  francesco  method `refresh` created in src/auth.ts
+  2026-11-14 15:24:53  francesco  moved into `Renewal` in src/auth.ts
+
+$ kito why src/auth.ts:Session.isValid
+method Session.isValid  (src/auth.ts)  symbol 0#3
+  2026-11-14 15:24:52  francesco  method `isValid` created in src/auth.ts
+
+$ kito log
+  0ba1402f  2026-11-14 15:24:53  francesco  TextEdit   src/auth.ts  +2 −0
+      ↳ class `Renewal` created in src/auth.ts
+      ↳ `Renewal.refresh` moved into `Renewal` in src/auth.ts
+  1a985aa1  2026-11-14 15:24:52  francesco  TextEdit   src/users.ts  +1 −1
+      ↳ `fetchUser` body changed (+1 −1)
+  f4ee2472  2026-11-14 15:24:52  francesco  TextEdit   src/auth.ts  +0 −9
+      ↳ `fetchUser` moved from src/auth.ts to src/users.ts
+  ad0a6e1b  2026-11-14 15:24:52  francesco  FileAdd    src/users.ts
+  a3f43a40  2026-11-14 15:24:52  francesco  TextEdit   src/auth.ts  +1 −1
+      ↳ renamed `getUser` → `fetchUser`
+◆ ckpt#1  auth  (git 3cf3577e44)
+  0e14657d  2026-11-14 15:24:52  francesco  FileAdd    src/auth.ts
+      ↳ function `getUser` created in src/auth.ts
+      ↳ class `Session` created in src/auth.ts
+      ↳ method `constructor` created in src/auth.ts
+      ↳ method `isValid` created in src/auth.ts
+      ↳ method `refresh` created in src/auth.ts
+  82371245  2026-11-14 15:24:52  francesco  FileAdd    .gitignore
+
+$ kito log src/users.ts
+  1a985aa1  2026-11-14 15:24:52  francesco  TextEdit   src/users.ts  +1 −1
+      ↳ `fetchUser` body changed (+1 −1)
+  ad0a6e1b  2026-11-14 15:24:52  francesco  FileAdd    src/users.ts
+      ↳ `fetchUser` moved from src/auth.ts to src/users.ts
+◆ ckpt#1  auth  (git 3cf3577e44)
+
+$ kito checkpoint -m users split from auth
+ckpt#2 created and exported as git commit 9a01af01c8
+
+$ git log --stat --format=%h  %an  %s
+9a01af0  francesco  users split from auth
+
+ src/auth.ts  | 11 ++---------
+ src/users.ts |  9 +++++++++
+ 2 files changed, 11 insertions(+), 9 deletions(-)
+3cf3577  francesco  auth
+
+ .gitignore  |  1 +
+ src/auth.ts | 24 ++++++++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+$ git log --follow --format=%h  %s -- src/users.ts
+9a01af0  users split from auth
+
+$ kito status
+Repository ........ /tmp/demo
+Author ............ francesco <francesco@example.com>
+Tracked files ..... 3
+Symbols ........... 6
+Operations ........ 17 (0 since the last checkpoint)
+Checkpoints ....... 2 (last ckpt#2, all exported to git)

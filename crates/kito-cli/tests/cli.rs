@@ -275,3 +275,71 @@ fn identity_and_rollback() {
     assert!(String::from_utf8_lossy(&bad.stderr).contains("does not exist"));
     ok(root, &["daemon", "stop"]);
 }
+
+#[test]
+fn why_follows_a_function_through_a_rename_and_a_move() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    ok(root, &["init"]);
+    let function = "export function getUser(id: string): User {\n  const cached = cache.get(id);\n  if (cached) {\n    return cached;\n  }\n  const user = db.find(id);\n  cache.set(id, user);\n  return user;\n}\n";
+    let rest =
+        "export class Session {\n  isValid(now: number): boolean {\n    return this.expires > now;\n  }\n}\n";
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/auth.ts"), format!("{function}\n{rest}")).unwrap();
+    ok(root, &["sync"]);
+
+    // Rename it, then move it to another file, then change it there.
+    let renamed = function.replace("getUser", "fetchUser");
+    fs::write(root.join("src/auth.ts"), format!("{renamed}\n{rest}")).unwrap();
+    ok(root, &["sync"]);
+    fs::write(root.join("src/auth.ts"), rest).unwrap();
+    fs::write(root.join("src/users.ts"), &renamed).unwrap();
+    ok(root, &["sync"]);
+    fs::write(
+        root.join("src/users.ts"),
+        renamed.replace("cache.set(id, user);", "cache.set(id, user, TTL);"),
+    )
+    .unwrap();
+    ok(root, &["sync"]);
+
+    // Asked by the name and the place it has today, from a subdirectory.
+    let why = ok(&root.join("src"), &["why", "users.ts:fetchUser"]);
+    let lines: Vec<&str> = why.lines().collect();
+    assert_eq!(lines.len(), 5, "{why}");
+    assert!(lines[0].starts_with("function fetchUser  (src/users.ts)  symbol "), "{why}");
+    for (line, what) in lines[1..].iter().zip([
+        "function `getUser` created in src/auth.ts",
+        "renamed `getUser` → `fetchUser`",
+        "moved from src/auth.ts to src/users.ts",
+        "body changed (+1 −1)",
+    ]) {
+        assert!(line.contains("ada") && line.ends_with(what), "{why}");
+    }
+
+    let histories = json(root, &["why", "src/users.ts:fetchUser", "--json"]);
+    assert_eq!(histories.as_array().unwrap().len(), 1);
+    assert_eq!(histories[0]["steps"].as_array().unwrap().len(), 4);
+    assert_eq!(histories[0]["name"], "fetchUser");
+    let id = histories[0]["id"].as_str().unwrap().to_owned();
+    // The method was never touched: one step, and a different symbol.
+    let method = json(root, &["why", "src/auth.ts:Session.isValid", "--json"]);
+    assert_eq!(method[0]["steps"].as_array().unwrap().len(), 1);
+    assert_ne!(method[0]["id"], id);
+
+    // The log shows what each save meant, under the file it changed.
+    let log = ok(root, &["log", "-n", "4"]);
+    assert!(log.contains("↳") && log.contains("`fetchUser` moved from src/auth.ts to src/users.ts"), "{log}");
+    assert_eq!(json(root, &["status", "--json"])["repo"]["symbols"], 3);
+
+    // Where it no longer is, and what does not exist.
+    let gone = kito(root, &["why", "src/auth.ts:fetchUser"]);
+    assert!(!gone.status.success());
+    let message = String::from_utf8_lossy(&gone.stderr).into_owned();
+    assert!(
+        message.contains("no symbol named `fetchUser`") && message.contains("Session.isValid"),
+        "{message}"
+    );
+    let malformed = kito(root, &["why", "fetchUser"]);
+    assert!(!malformed.status.success());
+    ok(root, &["daemon", "stop"]);
+}

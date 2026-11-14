@@ -217,3 +217,94 @@ rollback refuses instead.
 `.kito/intents` stores `Intent` records like `.kito/checkpoints` stores
 checkpoints. An op may only cite an intent the store already knows, and
 `Store::verify` reports ops whose intent is missing.
+
+### D-029 · File-level ops carry the content, symbolic ops say what it meant
+A save of a parsed file is recorded as the same `TextEdit`/`FileAdd`/… as in
+phase 1, followed in the same batch by the symbolic ops. The tree of a lane
+is rebuilt from the file-level ops alone, so replaying a log never needs a
+parser or a grammar of the right version; the symbol table is rebuilt from
+the symbolic ops alone. The plan's "`TextEdit` as a fallback for what cannot
+be parsed" still holds: a file with no grammar, or too large (2 MiB), has
+only that.
+
+### D-030 · How a symbol is recognized
+Thresholds, all in `kito-diff/src/ast.rs` and all conservative (a false
+identity pollutes history and merges, a missed one costs an add and a
+remove):
+
+- same name and kind in the same scope → same symbol, whatever changed
+  inside; among overloads, the unchanged ones pair up first;
+- same body, other name → rename; a body under 8 tokens also needs the same
+  signature and no twin among the new symbols;
+- fingerprint similarity ≥ 0.8, or ≥ 0.5 with the same signature, for
+  definitions of at least 12 tokens; smaller containers are judged by the
+  names of their members (≥ 80% in common);
+- across scopes and files (moves): same body of at least 8 tokens; or same
+  name, body and signature in a scope of the same name (or in/out of a
+  namespace); or same name and similarity ≥ 0.8.
+
+The values were tuned on the corpus of phase 2 and are measured by
+`cargo run -p kito-diff --example corpus`.
+
+### D-031 · What is a symbol
+Functions, methods, classes, structs, enums, interfaces/traits, type aliases,
+modules/namespaces, and top-level constants and variables. Fields, enum
+members, parameters and locals are not: they belong to the body of what
+contains them. A function nested in a type is a method in every language.
+Rust `impl` blocks are containers named after their type.
+
+### D-032 · A symbol's hashes ignore its own name
+Inside its own definition a symbol's name is hashed as a placeholder. A
+recursive function, a parameter named like its function, a type alias that
+mentions a value of the same name: renaming them changes their body text,
+and without this rule a third of the missed renames on the corpus were of
+this kind (TypeScript went from 80% to 100%).
+
+### D-033 · Moves at any depth; `Move` carries the new enclosing symbol
+A symbol can leave its container: a class cut from a namespace block into
+another file, a method that goes to another class. `OpKind::Move` gained an
+optional field, `parent`, the enclosing symbol after the move. It is absent
+from the encoding when `None`, as in every op written before it existed
+(those only moved top-level symbols), so stored ops keep their IDs. A moved
+container still takes its members along without ops of their own. Kind is
+part of identity: a method that becomes a free function is a new symbol.
+
+### D-034 · Order of the symbolic ops of a batch
+Additions (containers first), then moves (outermost destination first), then
+renames and modifications, then removals (members first). Every op applies
+to the table left by the previous one: a symbol always arrives where its new
+container already is.
+
+### D-035 · `kito why` reads more than the symbol's own ops
+The story of a symbol is its own ops, plus the moves between files of the
+symbols that contained it at the time, plus the renames of its file. File
+renames are not indexed by symbol: they are read from the log of the lane
+only when the symbol's own ops do not leave it where it is now, so a file
+renamed and renamed back is not shown. An index of file renames can be added
+if that reading shows up in a measurement.
+
+### D-036 · Half-written code
+A save that does not parse cleanly is recorded as text and leaves the
+symbols alone; the daemon remembers, per file, the last content that parsed
+and compares the next clean save against it. Typing in the middle of a
+function therefore never removes and re-creates the symbols below it.
+
+### D-037 · Files the history only knows as text
+A repository imported from git, or captured before phase 2, has files with
+no symbols. They are analyzed once (at import, and at the first start of a
+daemon of this version) and get `AddSymbol` ops with no file-level op.
+Symbol IDs start there: the history before that point stays textual.
+
+### D-038 · Rollback and symbols
+A rollback is recorded like any other change: new file-level ops, and the
+symbolic ops the comparison gives. A symbol removed and brought back by a
+rollback is a new symbol unless the same batch still has the old one to pair
+with. `~N` and `--ops N` count file-level ops: the symbolic ops that follow a
+change are part of it. `kito log -n` counts the same way.
+
+### D-039 · Incremental parsing and the parse cache
+The daemon keeps the syntax trees of the last 64 contents it parsed (16 MiB
+at most). The old side of a save is almost always there, and tree-sitter
+reparses the new side from it. Compiled queries are shared by all threads.
+Measured in [`benchmarks.md`](benchmarks.md).
+

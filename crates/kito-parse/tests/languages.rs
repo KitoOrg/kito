@@ -599,6 +599,28 @@ fn a_rename_keeps_body_signature_and_fingerprint() {
 }
 
 #[test]
+fn a_symbol_is_the_same_whatever_it_calls_itself() {
+    // Recursion, a parameter named like the function, a type that mentions
+    // a value of its own name: the symbol's name inside its own definition
+    // is not part of what it is.
+    let before = ts("function walk(node: Node): number {\n  return node.next ? 1 + walk(node.next) : 0;\n}\nfunction limit(limit: number) { return limit; }\ntype shape = z.infer<typeof shape>;\n");
+    let after = ts("function descend(node: Node): number {\n  return node.next ? 1 + descend(node.next) : 0;\n}\nfunction atMost(atMost: number) { return atMost; }\ntype outline = z.infer<typeof outline>;\n");
+    for (old, new) in [("walk", "descend"), ("limit", "atMost"), ("shape", "outline")] {
+        let (old, new) = (symbol(&before, old), symbol(&after, new));
+        assert_eq!((old.body, old.signature), (new.body, new.signature));
+        assert_eq!(old.fingerprint, new.fingerprint);
+    }
+    // Any other name is: calling something else is another body.
+    let other =
+        ts("function walk(node: Node): number {\n  return node.next ? 1 + climb(node.next) : 0;\n}\n");
+    assert_ne!(symbol(&before, "walk").body, symbol(&other, "walk").body);
+    // And the placeholder is not the name of anything.
+    let literal =
+        ts("function walk(node: Node): number {\n  return node.next ? 1 + self(node.next) : 0;\n}\n");
+    assert_ne!(symbol(&before, "walk").body, symbol(&literal, "walk").body);
+}
+
+#[test]
 fn a_small_edit_changes_the_body_but_stays_similar() {
     let before = ts(SERVICE);
     let after =
