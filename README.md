@@ -13,7 +13,7 @@ demo eseguibile.
 | Fase | Contenuto | Stato |
 | --- | --- | --- |
 | 0 | Fondamenta: `kito-core`, `kito-store` | completata |
-| 1 | Cattura continua testuale: `kitod`, CLI, export/import git | da fare |
+| 1 | Cattura continua testuale: `kitod`, CLI, export/import git | completata |
 | 2 | Semantica livello 1: tree-sitter, ID stabili, `kito why` | da fare |
 | 3 | Lane e integrazione, server MCP | da fare |
 | 4 | Semantica livello 2: LSP, conflitti `SemanticRef` | da fare |
@@ -25,10 +25,41 @@ demo eseguibile.
 | --- | --- |
 | `kito-core` | Tipi del modello dati, codifica CBOR canonica, ID e hash |
 | `kito-store` | Pack dei blob, oplog a segmenti, indici ricostruibili, recupero dopo un crash |
+| `kito-diff` | Diff testuale e produzione delle op sui file (il differ AST arriva con la fase 2) |
+| `kito-git` | Export dei checkpoint come commit git, import da un repository git |
+| `kitod` | Daemon: watcher, cattura, socket JSON-RPC |
+| `kito-cli` | Binario `kito` |
 
 Gli altri crate del piano nascono con la fase che li riempie.
 
-## Usare il repository
+## Provarlo
+
+```bash
+cargo build --release -p kitod -p kito-cli
+```
+
+```bash
+export PATH="$PWD/target/release:$PATH"
+```
+
+In una cartella nuova (in un repository git esistente usa `kito import`):
+
+```bash
+kito init
+```
+
+Da qui ogni salvataggio viene registrato, senza commit. Per vedere cosa è
+successo e fissare un punto, che diventa anche un commit git:
+
+```bash
+kito log
+```
+
+```bash
+kito checkpoint -m "prima versione"
+```
+
+## Sviluppo
 
 ```bash
 cargo test --workspace
@@ -40,6 +71,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store
+```
+
+Demo della fase 1: lavorare senza commit, `kito log` mostra tutto, `git log`
+vede i checkpoint.
+
+```bash
+scripts/demo-fase1.sh
 ```
 
 Demo della fase 0: un milione di op, `kill -9` in momenti casuali, nessuna op

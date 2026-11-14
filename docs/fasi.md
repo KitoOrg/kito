@@ -81,7 +81,101 @@ per confermare un'op con due blob (vedi [`benchmarks.md`](benchmarks.md)).
   perdita di corrente è coperta solo dalla simulazione nei test.
 - Vedi D-007 e D-011 in [`decisions.md`](decisions.md).
 
-## Fase 1 · cattura continua testuale — da fare
+## Fase 1 · cattura continua testuale — completata
+
+`kitod` con watcher; op `TextEdit` e `File*`; checkpoint; `kito log`; export
+su git e import da git.
+
+### Cosa c'è
+
+- **Cattura** (`kitod`): un watcher sulla cartella di lavoro raccoglie gli
+  eventi, attende 50 ms di quiete e trasforma lo stato dei file in op
+  concatenate sulla linea principale. Una scansione completa riconcilia
+  all'avvio, ogni 60 secondi e quando il watcher segnala eventi persi; usa una
+  cache di dimensione e data per non rileggere i file invariati.
+- **Op testuali** (`kito-diff`): aggiunta, rimozione, rename (solo se il
+  contenuto è identico) e modifica con gli edit per righe.
+- **Regole di ignore**: `.gitignore` anche annidati, `.git/info/exclude`,
+  `.kitoignore` e la configurazione; le stesse per watcher e scansione.
+- **Checkpoint**: etichette su un punto del log, create a mano.
+- **Git** (`kito-git`): ogni checkpoint diventa un commit deterministico; il
+  ramo avanza solo in fast-forward e l'indice di git viene riallineato, così
+  `git status` resta pulito. L'import porta dentro la storia di un repository
+  esistente.
+- **Daemon e CLI**: socket Unix con JSON-RPC, un solo daemon per repository,
+  avviato da sé dalla CLI. Comandi: `init`, `import`, `log`, `checkpoint`,
+  `export-git`, `sync`, `status`, `daemon status|start|stop`; tutti con `--json`.
+
+### Demo
+
+Lavori in una cartella senza fare commit, `kito log` mostra tutto, `git log`
+vede i checkpoint.
+
+```bash
+cargo build --release -p kitod -p kito-cli
+```
+
+```bash
+scripts/demo-fase1.sh
+```
+
+Output dell'esecuzione del 14 novembre 2026 in
+[`demo/fase1-demo.txt`](demo/fase1-demo.txt). In breve: tre salvataggi senza
+alcun commit compaiono in `kito log` come `FileAdd` e `TextEdit`; due
+`kito checkpoint` diventano due commit in `git log`; `git status` è pulito e
+`git fsck --strict` passa.
+
+### Criteri di accettazione ricontrollati
+
+Il piano chiede di ricontrollare gli obiettivi con misure reali alla fine di
+questa fase. L'unico misurabile ora è la latenza di un salvataggio; creazione
+delle lane e integrazione arrivano con la fase 3.
+
+Salvataggio di un file da 2.000 righe (172 kB), 300 salvataggi, daemon vero:
+
+| Misura | p50 | p95 | Obiettivo v1 |
+| --- | --- | --- | --- |
+| Elaborazione dopo il debounce (lettura, hash, diff, due fsync) | 3,1 ms | 4,7 ms | |
+| Dal primo evento all'op confermata, debounce compreso | 53,8 ms | 55,5 ms | |
+| Dal salvataggio all'op confermata, vista dal client | 54,9 ms | 56,7 ms | < 30 ms al p95 |
+
+**L'obiettivo non è raggiungibile così com'è scritto**: il piano fissa un
+debounce di 50 ms, che da solo supera i 30 ms. Il lavoro vero costa meno di
+5 ms. Le strade sono due, e la scelta spetta a chi possiede il piano:
+intendere l'obiettivo come "dopo il debounce" (già rispettato con ampio
+margine), oppure abbassare `debounce_ms` a 20 o meno in `.kito/config.toml`
+(la latenza totale scende a circa 25 ms, al prezzo di qualche op in più
+quando un editor salva in più passi). Il default resta 50 ms.
+
+La misura si rifà con:
+
+```bash
+cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
+```
+
+### Test
+
+- Motore di cattura: ogni tipo di cambiamento su disco, eventi per percorso
+  e per cartella, regole di ignore, riscritture della stessa dimensione,
+  ripartenza dopo un crash, modifiche fatte a daemon spento.
+- Daemon vero: cattura senza richieste esplicite, raffiche di salvataggi,
+  `sync` come barriera, riavvio, un solo daemon per repository, `kill -9`
+  durante la cattura.
+- Git: export verificato con `git fsck --strict` e confrontato file per file
+  con lo stato di Kito, anche su sequenze casuali di stati; continuità con una
+  storia git preesistente; rilevamento dei commit fatti fuori da Kito; import
+  con rename, permessi, merge.
+- CLI: i comandi veri, in formato leggibile e JSON.
+
+### Limiti noti
+
+- L'import segue solo i primi genitori: i rami fusi compaiono come effetto
+  del commit di merge (D-018).
+- I commit fatti direttamente in git dopo l'import non vengono ancora
+  riassorbiti: l'export si ferma con un errore chiaro (D-017).
+- Gli intent (il "perché" delle op) arrivano con la fase 3, insieme al tool
+  MCP che li imposta.
+- Solo Linux e macOS, come da default del piano; provato su Linux.
 
 ## Fase 2 · semantica livello 1 — da fare
 

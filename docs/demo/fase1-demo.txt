@@ -1,0 +1,57 @@
+
+$ kito init
+Repository Kito creato in /tmp/kito-demo/.kito
+Il daemon è attivo: da ora ogni salvataggio viene registrato.
+
+# salvo src/auth.ts
+
+# salvo README.md
+
+# salvo src/auth.ts
+
+$ kito log
+  2026-11-14 13:33:22  francesco  TextEdit   src/auth.ts  +1 −1
+  2026-11-14 13:33:21  francesco  FileAdd    README.md
+  2026-11-14 13:33:21  francesco  FileAdd    src/auth.ts
+  2026-11-14 13:33:21  francesco  FileAdd    .gitignore
+
+$ kito checkpoint -m auth con cache
+ckpt#1 creato ed esportato come commit git 65408db977
+
+# rinomino README.md in LEGGIMI.md e aggiungo un file
+
+# salvo src/billing.ts
+
+$ kito checkpoint -m fatturazione
+ckpt#2 creato ed esportato come commit git 33ea8a8088
+
+$ kito log
+◆ ckpt#2  fatturazione  (git 33ea8a8088)
+  2026-11-14 13:33:22  francesco  FileAdd    src/billing.ts
+  2026-11-14 13:33:22  francesco  FileRename LEGGIMI.md  (da README.md)
+◆ ckpt#1  auth con cache  (git 65408db977)
+  2026-11-14 13:33:22  francesco  TextEdit   src/auth.ts  +1 −1
+  2026-11-14 13:33:21  francesco  FileAdd    README.md
+  2026-11-14 13:33:21  francesco  FileAdd    src/auth.ts
+  2026-11-14 13:33:21  francesco  FileAdd    .gitignore
+
+$ git log --format=%h  %an  %s
+33ea8a8  francesco  fatturazione
+65408db  francesco  auth con cache
+
+$ git status --short
+
+$ git fsck --strict --no-dangling
+
+$ kito daemon status
+Repository ........ /tmp/kito-demo
+Autore ............ francesco
+File tracciati .... 4
+Operazioni ........ 6 (0 dopo l'ultimo checkpoint)
+Checkpoint ........ 2 (ultimo ckpt#2, tutti esportati su git)
+Daemon ............ pid 4242, attivo da 1 s, versione 0.1.0
+Socket ............ /tmp/kito-demo/.kito/kitod.sock
+Watcher ........... 14 eventi, 5 gruppi, 0 scansioni complete
+Cattura ........... p50 2.2 ms, p95 3.7 ms (dopo il debounce di 50 ms)
+Salvataggio → op .. p50 54.9 ms, p95 59.7 ms (debounce compreso)
+Language server ... nessuno (arrivano con la fase 4)

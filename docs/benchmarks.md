@@ -36,3 +36,21 @@ Ora `Packs` tiene un `Compressor` e ogni thread lettore un `Decompressor`.
 | `recovery/open_clean_50k_ops` | 6,4 ms |
 | `recovery/open_and_rebuild_index_50k_ops` | 281 ms |
 | `recovery/verify_50k_ops` | 1,2 s (prima del riuso dei contesti zstd) |
+
+## Fase 1 · latenza salvataggio → op
+
+Misura end-to-end con il daemon vero, file da 2.000 righe (172 kB), una riga
+cambiata a ogni salvataggio, 300 salvataggi:
+
+```bash
+cargo run --release -p kitod --example latency -- --saves 300 --lines 2000
+```
+
+| Misura | p50 | p95 | massimo |
+| --- | --- | --- | --- |
+| Salvataggio → op confermata, vista dal client | 54,9 ms | 56,7 ms | 91,1 ms |
+| Primo evento → op confermata, misurata dal daemon | 53,8 ms | 55,5 ms | |
+| Sola elaborazione, dopo il debounce | 3,1 ms | 4,7 ms | |
+
+Il debounce è di 50 ms. Vedi la discussione dell'obiettivo "< 30 ms al p95"
+in [`fasi.md`](fasi.md).

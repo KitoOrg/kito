@@ -93,3 +93,77 @@ troncamento del recupero.
 ### D-012 · I crate nascono con la loro fase
 Il workspace arriverà a 12 crate; ognuno viene creato quando comincia la fase
 che lo riempie, invece di tenere crate vuoti.
+
+## Fase 1
+
+### D-013 · Tipo dei file (`FileMode`)
+`FileAdd` ha un campo opzionale `mode` (normale, eseguibile, link simbolico),
+assente dalla codifica quando è "normale". Senza, l'export su git perderebbe
+il bit di esecuzione e la CI smetterebbe di funzionare. È un campo aggiunto,
+non un cambio di semantica: gli hash dei `FileAdd` esistenti non cambiano. Il
+modello non ha un'op per il solo cambio di tipo, quindi un `chmod +x` è un
+`FileRemove` seguito da un `FileAdd`.
+
+### D-014 · L'albero si ricostruisce solo dalle op
+`Tree` (percorso → blob) si ottiene riapplicando le op, senza mai rieseguire
+un parser: la stessa storia dà lo stesso albero anche con versioni future
+delle grammatiche. Conseguenza per la fase 2: le op simboliche dovranno
+portare con sé anche l'effetto sul file (blob prima e dopo), oppure essere
+accompagnate da un'op che lo fa.
+
+### D-015 · Edit in linea solo se piccoli
+`TextEdit.edits` contiene gli edit esatti (diff per righe) quando il file è
+testo e la modifica pesa meno di 32 KiB; altrimenti è vuoto, e la modifica
+resta descritta dai due blob. Evita di scrivere due volte i contenuti grandi.
+
+### D-016 · Rename solo esatti
+Un file sparito e uno comparso nello stesso gruppo, con contenuto identico
+(non vuoto) e stesso tipo, sono un `FileRename`. Nessuna euristica di
+somiglianza: un falso rename inquina la storia. Rename con modifica nello
+stesso salvataggio diventano rimozione più aggiunta.
+
+### D-017 · Export su git
+- I commit sono deterministici: autore dal checkpoint, data dall'ultima op,
+  messaggio = etichetta più `Kito-Checkpoint: ckpt#N`. Indirizzo email
+  `<autore>@kito.invalid`, configurabile.
+- Il primo export in un repository git che ha già commit li prende come
+  genitori: la storia continua.
+- Il ramo avanza solo in fast-forward. Se punta a un commit che Kito non
+  conosce, l'export si ferma (`Diverged`). Se era rimasto indietro per un
+  export interrotto, viene riallineato.
+- Dopo l'export l'indice di git viene riscritto dall'ultimo albero.
+
+### D-018 · Import da git
+Si importa la catena dei primi genitori di HEAD: ogni commit diventa le op
+che portano dall'albero del genitore al suo, più un checkpoint che ricorda il
+commit (e quindi non viene riesportato). I submodule e i percorsi non UTF-8
+si saltano, elencandoli. `kito import` crea `.kito/` se manca.
+
+### D-019 · Protocollo tra daemon e client
+JSON-RPC 2.0, un messaggio per riga, su socket Unix in `.kito/kitod.sock`
+(in `/tmp` se il percorso supera il limite dei socket). È il default indicato
+tra le questioni aperte del piano; un protocollo binario resta possibile
+perché il trasporto è isolato in `kitod::rpc` e `kitod::client`.
+
+### D-020 · `sync` è una scansione completa
+La barriera non si fida degli eventi: confronta tutta la cartella di lavoro
+con l'albero (con la cache degli stat costa uno `stat` per file). Quando
+ritorna, ciò che era su disco è nel log, anche se il watcher ha perso eventi.
+
+### D-021 · Un file tracciato resta tracciato
+Come in git, una regola di ignore aggiunta dopo non fa sparire dal log un
+file già tracciato; vale per i file nuovi.
+
+### D-022 · `kito init` avvia il daemon e non scavalca git
+La cattura è continua solo se il daemon gira: `init` e `import` lo avviano.
+In una cartella che è già un repository git `init` si rifiuta e indica
+`kito import` (che ne porta dentro la storia) o `init --fresh`.
+
+### D-023 · Comandi in più rispetto al piano
+`kito sync` (la barriera, che il piano prevede solo come tool MCP),
+`kito status` e `kito daemon start|stop`.
+
+### D-024 · Stato salvato della linea principale
+`.kito/lanes/main/state` contiene l'albero e la cache degli stat per
+ripartire in fretta. È un derivato: se manca, è illeggibile o non corrisponde
+al log, si riapplicano le op.

@@ -4,7 +4,7 @@ use crate::{git_err, object_id, oid20, GitError};
 use gix::bstr::BString;
 use gix::objs::tree::EntryKind;
 use gix::refs::transaction::PreviousValue;
-use kito_core::{Checkpoint, CheckpointId, FileMode, LaneId, OpKind, Tree};
+use kito_core::{Checkpoint, CheckpointId, FileMode, LaneId, Tree};
 use kito_store::Store;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -115,7 +115,7 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
             for op in page {
                 tree.apply(&op.kind)?;
                 if tracking {
-                    touched(&op.kind, &mut dirty);
+                    dirty.extend(op.kind.paths().into_iter().cloned());
                 }
                 if Some(op.id) == prev_head {
                     tracking = true;
@@ -224,23 +224,6 @@ fn is_first_parent_ancestor(
         }
     }
     Ok(false)
-}
-
-/// Percorsi il cui stato può essere cambiato per effetto dell'op.
-fn touched(kind: &OpKind, out: &mut BTreeSet<PathBuf>) {
-    match kind {
-        OpKind::FileAdd { path, .. } | OpKind::FileRemove { path } => {
-            out.insert(path.clone());
-        }
-        OpKind::FileRename { from, to } => {
-            out.insert(from.clone());
-            out.insert(to.clone());
-        }
-        OpKind::TextEdit { file, .. } => {
-            out.insert(file.clone());
-        }
-        _ => {}
-    }
 }
 
 fn commit_message(ck: &Checkpoint) -> BString {
