@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kito-core", "crates/kito-store", "crates/kito-diff", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
+members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
 
 [workspace.package]
 version = "0.1.1"
@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 kito-core = { path = "crates/kito-core" }
 kito-store = { path = "crates/kito-store" }
+kito-parse = { path = "crates/kito-parse" }
 kito-diff = { path = "crates/kito-diff" }
 kito-git = { path = "crates/kito-git" }
 kitod = { path = "crates/kitod" }
@@ -33,6 +34,17 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
 toml = "0.9"
 toml_edit = "0.23"
+tree-sitter = "0.27"
+tree-sitter-c = "0.24"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-php = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
 zstd = "0.13"
 
 # test / bench
