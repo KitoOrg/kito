@@ -309,6 +309,15 @@ pub enum LogItem {
         /// were already there).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         change: Option<String>,
+        /// For a symbolic op: the ID of the symbol, and the name it was
+        /// given by this op (created, renamed) or has now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<String>,
+        /// For a rename: the name the symbol had before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed_from: Option<String>,
     },
     Checkpoint {
         id: String,
@@ -1408,6 +1417,8 @@ impl Repo {
         change: Option<OpId>,
     ) -> LogItem {
         let display = |p: &Path| p.to_string_lossy().into_owned();
+        let mut symbol = None;
+        let mut renamed_from = None;
         let (path, detail, stat) = match &op.kind {
             OpKind::FileAdd { path, mode, .. } => {
                 let detail = match mode {
@@ -1438,6 +1449,14 @@ impl Repo {
                     symbols.qualified_name(id).or_else(|| semantic::last_known_name(&self.store, id))
                 });
                 let what = semantic::describe_symbol_op(&self.store, other);
+                symbol = match other {
+                    OpKind::AddSymbol { sym, .. } => Some(sym.name.clone()),
+                    OpKind::Rename { from, to, .. } => {
+                        renamed_from = Some(from.clone());
+                        Some(to.clone())
+                    }
+                    _ => name.clone(),
+                };
                 let detail = match (name, what) {
                     (Some(name), Some(what))
                         if !matches!(other, OpKind::AddSymbol { .. } | OpKind::Rename { .. }) =>
@@ -1461,6 +1480,9 @@ impl Repo {
             lines_removed: stat.map(|s| s.lines_removed),
             intent: op.intent.and_then(|id| self.store.intent(&id)).map(|i| i.summary.clone()),
             change: change.map(|id| id.to_string()),
+            symbol_id: op.kind.symbol().map(|id| id.to_string()),
+            symbol,
+            renamed_from,
         }
     }
 

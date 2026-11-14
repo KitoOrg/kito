@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod claude;
+mod log;
 
 #[derive(Parser)]
 #[command(name = "kito", version, about = "Semantic version control for agent swarms")]
@@ -61,12 +62,16 @@ enum Cmd {
     Log {
         /// Only what concerns this file; or a lane (lane/1) for its own log
         target: Option<PathBuf>,
-        /// How many changes to show (what each meant for the symbols comes with it)
+        /// How many lines to show (with -v: how many saves)
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
         /// The log of this lane instead of the main one
         #[arg(long, value_name = "LANE")]
         lane: Option<String>,
+        /// Every save on a line of its own, with what it meant for each
+        /// symbol under it
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
     /// Create a checkpoint manually
     Checkpoint {
@@ -412,7 +417,13 @@ fn is_symbolic(op: &str) -> bool {
     matches!(op, "AddSymbol" | "RemoveSymbol" | "ModifyBody" | "ModifySignature" | "Rename" | "Move")
 }
 
-fn cmd_log(cli: &Cli, target: &Option<PathBuf>, limit: usize, lane: &Option<String>) -> Outcome {
+fn cmd_log(
+    cli: &Cli,
+    target: &Option<PathBuf>,
+    limit: usize,
+    lane: &Option<String>,
+    verbose: bool,
+) -> Outcome {
     let root = root_of(cli)?;
     // `kito log lane/1` is the log of that lane.
     let named =
@@ -431,11 +442,35 @@ fn cmd_log(cli: &Cli, target: &Option<PathBuf>, limit: usize, lane: &Option<Stri
     // Before showing the log, make sure it contains everything that is on
     // disk, even if the watcher has missed some events.
     client.call_value("sync", json!({})).map_err(fail)?;
-    let mut params = json!({ "limit": limit, "path": rel });
-    if let Some(lane) = &lane {
-        params["lane"] = json!(lane);
+    let mut ask = |changes: usize| -> Result<Vec<LogItem>, String> {
+        let mut params = json!({ "limit": changes, "path": rel });
+        if let Some(lane) = &lane {
+            params["lane"] = json!(lane);
+        }
+        client.call("log", params).map_err(fail)
+    };
+    if !verbose && !cli.json {
+        // Several saves make one line: enough of them are asked for to
+        // fill the lines wanted, and one more, so that the last line shown
+        // is a whole run of saves.
+        let mut changes = limit.saturating_mul(4).max(64);
+        loop {
+            let items = ask(changes)?;
+            let whole = log::changes(&items) < changes;
+            let (lines, all) = log::compact(items, limit);
+            if all > limit || whole || changes >= 1 << 20 {
+                if lines.is_empty() {
+                    println!("No operations recorded.");
+                }
+                for line in lines {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
+            changes = changes.saturating_mul(4);
+        }
     }
-    let items: Vec<LogItem> = client.call("log", params).map_err(fail)?;
+    let items = ask(limit)?;
     if cli.json {
         print_json(&items);
         return Ok(());
@@ -1152,7 +1187,7 @@ fn main() -> ExitCode {
         Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
         Cmd::Import { path, no_claude } => cmd_import(&cli, path, *no_claude),
         Cmd::Claude => cmd_claude(&cli),
-        Cmd::Log { target, limit, lane } => cmd_log(&cli, target, *limit, lane),
+        Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
         Cmd::Scip { file } => cmd_scip(&cli, file),

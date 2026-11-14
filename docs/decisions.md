@@ -677,3 +677,23 @@ closes; the rule in `.claude/settings.json` is read, and applies once the
 folder is trusted. The rules say two things the trials taught: a rename
 without a language server leaves uses to update by hand, and an integration
 asked in the same step as an edit can go ahead without it.
+
+### D-073 · `kito log` is short by default
+Every save is an op, and the log gave each one a line, and under it a line
+for every symbol it touched: a function worked on for ten minutes filled the
+screen with itself. The log now has one line for a run of saves: the saves
+of one file that follow one another, by the same author and for the same
+reason, with no checkpoint between them. The line carries the ID and the
+time of the last save (the point `kito rollback` returns to), the lines
+added and removed in all, how many saves, and what they meant for the
+symbols, each symbol once: a file created and then worked on is `new`, a
+function changed six times is `changed`, one that came and went is not
+named. Runs, not files: two files edited in turn are lines in turn, so the
+order things happened in is still the order of the lines. `-n` counts
+lines. `kito log -v` is the log as it was, and `--json` and the MCP tool
+give the ops as before, to which each symbolic op adds the symbol's ID, its
+name and, for a rename, the name it had. The folding is the command line's:
+the daemon is asked for more ops until the lines wanted are whole.
+The reason of a line is left out when it only repeats the label of the
+checkpoint it is under, as the lines of an integration do.
+The demos recorded for each phase show the log as it was then.

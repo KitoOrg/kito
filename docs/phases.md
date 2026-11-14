@@ -886,3 +886,6 @@ to the one made from the log; many new files at once equal to one by one.
   Tried with Claude Code itself on a project that had only `kito init` run
   in it: asked in plain words to add a function, and to rename one, it
   opened a lane, worked in it, integrated and closed.
+- **0.5.2 · a shorter `kito log`** (D-073). One line for each run of saves
+  of a file, with what they meant for its symbols on the same line; the
+  longer form, every save on a line of its own, is `kito log -v`.

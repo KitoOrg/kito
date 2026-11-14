@@ -66,6 +66,19 @@ kito log
 kito checkpoint -m "first version"
 ```
 
+The log has a line for each file worked on, however many times it was saved,
+with what the saves meant for its symbols; `kito log -v` gives every save a
+line of its own:
+
+```text
+  b2bc7079  11-14 21:53  francesco  src/version.ts  +1 −1            VERSION changed
+◆ ckpt#2  billing  (git 78ff4e73aa)
+  928f6f58  11-14 21:53  claude     src/billing.ts  new              invoice created  [integrate lane/1: billing]
+  071ff037  11-14 21:53  francesco  src/web.ts      +1 −1            profile changed
+  9239b953  11-14 21:53  francesco  src/auth.ts     +10 −0, 7 saves  getUser changed; getAdmin created
+◆ ckpt#1  start  (git f908e3a85f)
+```
+
 In Python, JavaScript, TypeScript, Java, C#, C, C++, Go, PHP and Rust files
 Kito also follows the symbols: a function keeps its identity when it is
 renamed, edited or moved to another file. Its whole story, asked by the name

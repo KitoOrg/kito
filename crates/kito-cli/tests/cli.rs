@@ -107,7 +107,17 @@ fn work_without_committing_then_checkpoint() {
     assert_eq!(status["repo"]["ops"], 3);
     assert_eq!(status["repo"]["author"], "ada");
 
+    // The log: a line for each file, however many times it was saved.
     let log = ok(root, &["log"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].contains("src/app.txt") && lines[0].contains("new, 2 saves"), "{log}");
+    assert!(
+        lines[1].contains(".gitignore") && lines[1].contains("ada") && lines[1].ends_with("new"),
+        "{log}"
+    );
+    // And every save on a line of its own.
+    let log = ok(root, &["log", "-v"]);
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 3, "{log}");
     assert!(
@@ -121,6 +131,8 @@ fn work_without_committing_then_checkpoint() {
 
     // The log of one file, given as seen from a subdirectory.
     let only = ok(&root.join("src"), &["log", "app.txt"]);
+    assert_eq!(only.lines().count(), 1, "{only}");
+    let only = ok(&root.join("src"), &["log", "-v", "app.txt"]);
     assert_eq!(only.lines().count(), 2, "{only}");
     let items = json(root, &["log", "--json", "-n", "1"]);
     assert_eq!(items.as_array().unwrap().len(), 1);
@@ -161,11 +173,19 @@ fn import_a_git_repository() {
     assert!(out.contains("Imported 2 commits: 3 operations, 2 checkpoints."), "{out}");
     assert!(out.contains("Captured 1 change not yet in git."), "{out}");
 
-    let log = ok(root, &["log"]);
+    let log = ok(root, &["log", "-v"]);
     let lines: Vec<&str> = log.lines().collect();
     assert!(lines[0].contains("FileAdd") && lines[0].contains("uncommitted.txt"), "{log}");
     assert!(lines[1].starts_with("◆ ckpt#2  second commit  (git "), "{log}");
     assert!(lines[2].contains("TextEdit") && lines[2].contains("Ada") && lines[2].contains("+2 −0"), "{log}");
+    assert!(lines[3].starts_with("◆ ckpt#1  first commit"), "{log}");
+    // In short: the same lines, and a checkpoint keeps apart what came
+    // before it from what came after.
+    let log = ok(root, &["log"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert!(lines[0].contains("uncommitted.txt") && lines[0].ends_with("new"), "{log}");
+    assert!(lines[1].starts_with("◆ ckpt#2  second commit  (git "), "{log}");
+    assert!(lines[2].contains("main.txt") && lines[2].contains("Ada") && lines[2].contains("+2 −0"), "{log}");
     assert!(lines[3].starts_with("◆ ckpt#1  first commit"), "{log}");
 
     // A second import makes no sense: the store already has a history.
@@ -221,8 +241,10 @@ fn log_is_up_to_date_even_when_file_events_are_missing() {
     fs::hard_link(root.join("note.txt"), &link).unwrap();
     fs::write(&link, "before\nafter\n").unwrap();
 
-    let log = ok(root, &["log"]);
+    let log = ok(root, &["log", "-v"]);
     assert!(log.lines().next().unwrap().contains("TextEdit"), "kito log must show it right away:\n{log}");
+    let log = ok(root, &["log"]);
+    assert!(log.contains("note.txt") && log.contains("new, 2 saves"), "{log}");
     let status = ok(root, &["daemon", "status"]);
     assert!(status.contains("the operating system did not report 1 change"), "{status}");
     assert!(status.contains("full scan every") && !status.contains("full scan every 60 s"), "{status}");
@@ -345,8 +367,12 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
     assert_ne!(method[0]["id"], id);
 
     // The log shows what each save meant, under the file it changed.
-    let log = ok(root, &["log", "-n", "4"]);
+    let log = ok(root, &["log", "-v", "-n", "4"]);
     assert!(log.contains("↳") && log.contains("`fetchUser` moved from src/auth.ts to src/users.ts"), "{log}");
+    // In short, on the line of the file it went to.
+    let log = ok(root, &["log", "-n", "4"]);
+    let line = log.lines().find(|line| line.contains("fetchUser") && line.contains("moved")).expect(&log);
+    assert!(line.contains("src/users.ts") && !log.contains("↳"), "{log}");
     assert_eq!(json(root, &["status", "--json"])["repo"]["symbols"], 3);
 
     // Where it no longer is, and what does not exist.
@@ -410,6 +436,8 @@ fn lanes_integration_and_conflicts_from_the_command_line() {
     );
     // The log of a lane, and a symbol's story as the lane knows it.
     let log = ok(root, &["log", "lane/1"]);
+    assert!(log.contains("src/shop.ts") && log.contains("discount changed"), "{log}");
+    let log = ok(root, &["log", "-v", "lane/1"]);
     assert!(log.contains("TextEdit") && log.contains("`discount` body changed"), "{log}");
     assert!(ok(root, &["why", "src/shop.ts:discount", "--lane", "lane/1"]).contains("body changed"));
 
@@ -565,4 +593,35 @@ fn a_project_can_be_left_alone_and_set_up_later() {
     let imported = json(other, &["status", "--json"]);
     assert_eq!(imported["repo"]["files"], 5);
     ok(other, &["daemon", "stop"]);
+}
+
+#[test]
+fn the_log_is_short_however_often_a_file_is_saved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    ok(root, &["init"]);
+    fs::write(root.join("first.txt"), "first\n").unwrap();
+    ok(root, &["sync"]);
+    // More saves than the daemon is asked for at first: the line is whole
+    // all the same.
+    let mut text = String::new();
+    for n in 0..70 {
+        text.push_str(&format!("line {n}\n"));
+        fs::write(root.join("notes.txt"), &text).unwrap();
+        ok(root, &["sync"]);
+    }
+    let log = ok(root, &["log"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].contains("notes.txt") && lines[0].contains("new, 70 saves"), "{log}");
+    assert!(lines[1].contains("first.txt"), "{log}");
+    let one = ok(root, &["log", "-n", "1"]);
+    assert_eq!(one.lines().collect::<Vec<_>>(), [lines[0]], "{one}");
+    // The short ID is the last save's: the point a rollback returns to.
+    let id = lines[0].split_whitespace().next().unwrap();
+    let newest = ok(root, &["log", "-v", "-n", "1"]);
+    assert!(newest.trim_start().starts_with(id), "{newest}");
+    assert_eq!(ok(root, &["log", "-v", "-n", "1000"]).lines().count(), 71);
+    assert_eq!(json(root, &["log", "--json", "-n", "5"]).as_array().unwrap().len(), 5);
+    ok(root, &["daemon", "stop"]);
 }
