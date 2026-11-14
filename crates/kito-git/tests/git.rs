@@ -1,5 +1,5 @@
-//! Round-trip con git: dopo l'export `git fsck` passa e ogni commit contiene
-//! esattamente lo stato di Kito; l'import ricostruisce la storia.
+//! Round trip with git: after the export `git fsck` passes and every commit
+//! contains exactly Kito's state; the import rebuilds the history.
 
 use kito_core::*;
 use kito_diff::fileops::{ops_for_changes, Snapshot};
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Stato desiderato dei file: percorso → (contenuto, tipo).
+/// Desired state of the files: path → (content, type).
 type State = BTreeMap<String, (Vec<u8>, FileMode)>;
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -26,12 +26,12 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_DATE", "2026-01-02T03:04:05Z")
         .env("GIT_COMMITTER_DATE", "2026-01-02T03:04:05Z")
         .output()
-        .expect("git è installato");
+        .expect("git is installed");
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Uno store con la sua linea principale, pilotato per stati dei file.
+/// A store with its main lane, driven by file states.
 struct Kito {
     store: Store,
     tree: Tree,
@@ -49,7 +49,7 @@ impl Kito {
         }
     }
 
-    /// Porta l'albero allo stato dato producendo le op necessarie.
+    /// Brings the tree to the given state, producing the necessary ops.
     fn set(&mut self, state: &State) {
         let mut changes: BTreeMap<PathBuf, Option<Snapshot>> =
             self.tree.iter().map(|(p, _)| (p.to_owned(), None)).collect();
@@ -71,7 +71,7 @@ impl Kito {
     fn checkpoint(&mut self, label: &str) -> CheckpointId {
         let ck = Checkpoint {
             id: self.store.next_checkpoint_id(),
-            head: self.head.expect("almeno un'op"),
+            head: self.head.expect("at least one op"),
             label: label.into(),
             created_by: Author::human("Francesco D."),
             verification: None,
@@ -82,12 +82,12 @@ impl Kito {
     }
 
     fn commit_of(&self, id: CheckpointId) -> String {
-        let oid = self.store.checkpoint(id).unwrap().git_commit.expect("esportato");
+        let oid = self.store.checkpoint(id).unwrap().git_commit.expect("exported");
         oid.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
-/// Lo stato contenuto in un commit git, letto con il git vero.
+/// The state contained in a git commit, read with the real git.
 fn git_state(root: &Path, commit: &str) -> State {
     let mut state = State::new();
     for line in git(root, &["ls-tree", "-r", "-z", commit]).split('\0').filter(|l| !l.is_empty()) {
@@ -98,7 +98,7 @@ fn git_state(root: &Path, commit: &str) -> State {
             "100644" => FileMode::Regular,
             "100755" => FileMode::Executable,
             "120000" => FileMode::Symlink,
-            other => panic!("modo {other}"),
+            other => panic!("mode {other}"),
         };
         let content =
             Command::new("git").current_dir(root).args(["cat-file", "blob", oid]).output().unwrap().stdout;
@@ -118,23 +118,23 @@ fn checkpoints_become_commits_that_git_accepts() {
     let mut kito = Kito::init(root);
 
     let mut s1 = State::new();
-    s1.insert("README.md".into(), file("# progetto\n"));
+    s1.insert("README.md".into(), file("# project\n"));
     s1.insert("src/main.rs".into(), file("fn main() {}\n"));
-    s1.insert("scripts/run.sh".into(), (b"#!/bin/sh\necho ciao\n".to_vec(), FileMode::Executable));
+    s1.insert("scripts/run.sh".into(), (b"#!/bin/sh\necho hello\n".to_vec(), FileMode::Executable));
     s1.insert("link".into(), (b"README.md".to_vec(), FileMode::Symlink));
-    s1.insert("dati.bin".into(), (vec![0, 159, 146, 150, 0, 1], FileMode::Regular));
+    s1.insert("data.bin".into(), (vec![0, 159, 146, 150, 0, 1], FileMode::Regular));
     kito.set(&s1);
-    let c1 = kito.checkpoint("primo checkpoint");
+    let c1 = kito.checkpoint("first checkpoint");
 
     let mut s2 = s1.clone();
-    s2.insert("src/main.rs".into(), file("fn main() {\n    println!(\"ciao\");\n}\n"));
+    s2.insert("src/main.rs".into(), file("fn main() {\n    println!(\"hello\");\n}\n"));
     s2.remove("README.md");
-    s2.insert("docs/LEGGIMI.md".into(), file("# progetto\n")); // rename
+    s2.insert("docs/README.md".into(), file("# project\n")); // rename
     s2.remove("link");
     s2.insert("src/deep/nested/mod.rs".into(), file("pub fn f() {}\n"));
     kito.set(&s2);
-    let c2 = kito.checkpoint("secondo checkpoint");
-    let c3 = kito.checkpoint(""); // nessuna op in mezzo: commit con lo stesso albero
+    let c2 = kito.checkpoint("second checkpoint");
+    let c3 = kito.checkpoint(""); // no ops in between: commit with the same tree
 
     let done = export(&mut kito.store, root, &ExportOptions::default()).unwrap();
     assert_eq!(done.iter().map(|e| e.checkpoint).collect::<Vec<_>>(), [c1, c2, c3]);
@@ -151,19 +151,19 @@ fn checkpoints_become_commits_that_git_accepts() {
         lines[0],
         format!("{}|Checkpoint ckpt#3|Francesco D.|francesco-d.@kito.invalid|1767323045", kito.commit_of(c3))
     );
-    assert!(lines[1].starts_with(&format!("{}|secondo checkpoint|", kito.commit_of(c2))));
-    assert!(lines[2].starts_with(&format!("{}|primo checkpoint|", kito.commit_of(c1))));
+    assert!(lines[1].starts_with(&format!("{}|second checkpoint|", kito.commit_of(c2))));
+    assert!(lines[2].starts_with(&format!("{}|first checkpoint|", kito.commit_of(c1))));
     assert!(git(root, &["log", "-1", "--format=%B"]).contains("Kito-Checkpoint: ckpt#3"));
 
-    // Il rename è riconoscibile anche da git, perché il blob è lo stesso.
+    // The rename is recognizable by git too, because the blob is the same.
     let renames = git(root, &["diff", "--name-status", "-M", &kito.commit_of(c1), &kito.commit_of(c2)]);
-    assert!(renames.contains("R100\tREADME.md\tdocs/LEGGIMI.md"), "{renames}");
+    assert!(renames.contains("R100\tREADME.md\tdocs/README.md"), "{renames}");
 
-    // Rifare l'export non cambia nulla.
+    // Redoing the export changes nothing.
     assert!(export(&mut kito.store, root, &ExportOptions::default()).unwrap().is_empty());
     assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "3");
 
-    // Con i file sul disco, `git status` è pulito: l'indice è stato riscritto.
+    // With the files on disk, `git status` is clean: the index has been rewritten.
     for (path, (content, mode)) in &s2 {
         let p = root.join(path);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -182,40 +182,40 @@ fn export_continues_history_and_detects_foreign_commits() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    // Un repository git che esisteva prima di Kito.
+    // A git repository that existed before Kito.
     git(root, &["init", "-q", "-b", "main"]);
-    std::fs::write(root.join("vecchio.txt"), "prima di kito\n").unwrap();
-    git(root, &["add", "vecchio.txt"]);
-    git(root, &["commit", "-q", "-m", "commit fatto con git"]);
+    std::fs::write(root.join("old.txt"), "before kito\n").unwrap();
+    git(root, &["add", "old.txt"]);
+    git(root, &["commit", "-q", "-m", "commit made with git"]);
     let original = git(root, &["rev-parse", "HEAD"]).trim().to_owned();
 
     let mut kito = Kito::init(root);
     let mut s = State::new();
-    s.insert("vecchio.txt".into(), file("prima di kito\n"));
-    s.insert("nuovo.txt".into(), file("con kito\n"));
+    s.insert("old.txt".into(), file("before kito\n"));
+    s.insert("new.txt".into(), file("with kito\n"));
     kito.set(&s);
-    let c1 = kito.checkpoint("primo da kito");
+    let c1 = kito.checkpoint("first from kito");
     export(&mut kito.store, root, &ExportOptions::default()).unwrap();
     assert_eq!(
         git(root, &["rev-parse", "HEAD~1"]).trim(),
         original,
-        "il primo export continua la storia esistente"
+        "the first export continues the existing history"
     );
     assert_eq!(git_state(root, "HEAD"), s);
 
-    // Export interrotto prima di spostare il ramo: il successivo lo riallinea.
+    // Export interrupted before moving the branch: the next one realigns it.
     git(root, &["update-ref", "refs/heads/main", &original]);
     assert!(export(&mut kito.store, root, &ExportOptions::default()).unwrap().is_empty());
     assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), kito.commit_of(c1));
 
-    // Un commit fatto direttamente in git: l'export si ferma invece di scavalcarlo.
-    git(root, &["commit", "-q", "--allow-empty", "-m", "fuori da kito"]);
-    s.insert("altro.txt".into(), file("x\n"));
+    // A commit made directly in git: the export stops instead of skipping over it.
+    git(root, &["commit", "-q", "--allow-empty", "-m", "outside kito"]);
+    s.insert("other.txt".into(), file("x\n"));
     kito.set(&s);
-    kito.checkpoint("secondo da kito");
+    kito.checkpoint("second from kito");
     let err = export(&mut kito.store, root, &ExportOptions::default()).unwrap_err();
     assert!(matches!(err, GitError::Diverged { .. }), "{err}");
-    assert!(git(root, &["log", "-1", "--format=%s"]).contains("fuori da kito"));
+    assert!(git(root, &["log", "-1", "--format=%s"]).contains("outside kito"));
     git(root, &["fsck", "--strict", "--no-dangling"]);
 }
 
@@ -229,28 +229,28 @@ fn git_history_is_imported_as_ops_and_checkpoints() {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, content).unwrap();
     };
-    git(root, &["commit", "-q", "--allow-empty", "-m", "commit vuoto iniziale"]);
-    write("a.txt", "uno\ndue\ntre\n");
-    write("dir/b.txt", "contenuto di b\n");
+    git(root, &["commit", "-q", "--allow-empty", "-m", "initial empty commit"]);
+    write("a.txt", "one\ntwo\nthree\n");
+    write("dir/b.txt", "content of b\n");
     write("run.sh", "#!/bin/sh\n");
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "aggiunge i file\n\ncorpo del messaggio"]);
-    write("a.txt", "uno\nDUE\ntre\n");
+    git(root, &["commit", "-q", "-m", "add the files\n\nmessage body"]);
+    write("a.txt", "one\nTWO\nthree\n");
     git(root, &["mv", "dir/b.txt", "dir/c.txt"]);
-    git(root, &["commit", "-q", "-am", "modifica e rinomina"]);
-    // Un ramo laterale, fuso con un commit di merge.
+    git(root, &["commit", "-q", "-am", "edit and rename"]);
+    // A side branch, merged with a merge commit.
     git(root, &["checkout", "-q", "-b", "feature"]);
-    write("feature.txt", "dal ramo\n");
+    write("feature.txt", "from the branch\n");
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "lavoro sul ramo"]);
+    git(root, &["commit", "-q", "-m", "work on the branch"]);
     git(root, &["checkout", "-q", "main"]);
     git(root, &["rm", "-q", "run.sh"]);
-    git(root, &["commit", "-q", "-m", "rimuove lo script"]);
-    git(root, &["merge", "-q", "--no-ff", "feature", "-m", "merge del ramo"]);
+    git(root, &["commit", "-q", "-m", "remove the script"]);
+    git(root, &["merge", "-q", "--no-ff", "feature", "-m", "merge the branch"]);
     let head = git(root, &["rev-parse", "HEAD"]).trim().to_owned();
     let chain: Vec<String> =
         git(root, &["rev-list", "--first-parent", "--reverse", "HEAD"]).lines().map(str::to_owned).collect();
@@ -261,14 +261,14 @@ fn git_history_is_imported_as_ops_and_checkpoints() {
     assert_eq!(
         (report.commits, report.checkpoints),
         (5, 4),
-        "il commit vuoto iniziale non ha un'op a cui puntare"
+        "the initial empty commit has no op to point to"
     );
     assert!(report.skipped.is_empty());
 
-    // Ogni checkpoint ricorda il suo commit e ne riproduce l'albero.
+    // Every checkpoint remembers its commit and reproduces its tree.
     let checkpoints: Vec<Checkpoint> = kito.store.checkpoints().cloned().collect();
     let labels: Vec<&str> = checkpoints.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels, ["aggiunge i file", "modifica e rinomina", "rimuove lo script", "merge del ramo"]);
+    assert_eq!(labels, ["add the files", "edit and rename", "remove the script", "merge the branch"]);
     let ops = kito.store.lane_ops(LaneId::MAIN, 0, usize::MAX).unwrap();
     assert_eq!(ops.len(), report.ops);
     let mut tree = Tree::new();
@@ -293,31 +293,31 @@ fn git_history_is_imported_as_ops_and_checkpoints() {
     let kinds: Vec<&str> = ops.iter().map(|o| o.kind.name()).collect();
     assert_eq!(kinds, ["FileAdd", "FileAdd", "FileAdd", "FileRename", "TextEdit", "FileRemove", "FileAdd"]);
     match &ops[4].kind {
-        OpKind::TextEdit { edits, .. } => assert_eq!(edits, &vec![TextEdit::new(4, 8, "DUE\n")]),
+        OpKind::TextEdit { edits, .. } => assert_eq!(edits, &vec![TextEdit::new(4, 8, "TWO\n")]),
         other => panic!("{other:?}"),
     }
 
-    // Niente da riesportare; un nuovo checkpoint si innesta sopra HEAD.
+    // Nothing to re-export; a new checkpoint is grafted on top of HEAD.
     assert!(export(&mut kito.store, root, &ExportOptions::default()).unwrap().is_empty());
     assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), head);
     kito.tree = tree;
     kito.head = ops.last().map(|o| o.id);
     let mut s = git_state(root, &head);
-    s.insert("dopo-import.txt".into(), file("nuovo\n"));
+    s.insert("after-import.txt".into(), file("new\n"));
     kito.set(&s);
-    kito.checkpoint("primo checkpoint dopo l'import");
+    kito.checkpoint("first checkpoint after the import");
     assert_eq!(export(&mut kito.store, root, &ExportOptions::default()).unwrap().len(), 1);
     assert_eq!(git(root, &["rev-parse", "HEAD~1"]).trim(), head);
     assert_eq!(git_state(root, "HEAD"), s);
     git(root, &["fsck", "--strict", "--no-dangling"]);
 
-    // L'import si fa solo in uno store vuoto.
+    // Import only works on an empty store.
     assert!(matches!(import(&mut kito.store, root, &mut HlcClock::new()), Err(GitError::NotEmpty)));
 }
 
 fn arb_state() -> impl Strategy<Value = State> {
     let path = prop::sample::select(vec!["a", "b.txt", "d/a", "d/b", "d/e/f", "x/y/z.rs", "x/w"]);
-    let content = prop::sample::select(vec!["", "uno\n", "uno\ndue\n", "tre\n", "binario\0\u{1}", "quattro"]);
+    let content = prop::sample::select(vec!["", "one\n", "one\ntwo\n", "three\n", "binary\0\u{1}", "four"]);
     let mode = prop::sample::select(vec![
         FileMode::Regular,
         FileMode::Regular,
@@ -332,8 +332,8 @@ fn arb_state() -> impl Strategy<Value = State> {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
 
-    /// Qualunque sequenza di stati: ogni commit esportato contiene lo stato
-    /// di Kito a quel checkpoint, e git considera valido il repository.
+    /// Any sequence of states: every exported commit contains Kito's state
+    /// at that checkpoint, and git considers the repository valid.
     #[test]
     fn exported_commits_match_kito_state(states in prop::collection::vec(arb_state(), 1..6), split in 0usize..6) {
         let tmp = tempfile::tempdir().unwrap();
@@ -343,9 +343,9 @@ proptest! {
         for (i, state) in states.iter().enumerate() {
             kito.set(state);
             if kito.head.is_some() {
-                expected.push((kito.checkpoint(&format!("stato {i}")), state.clone()));
+                expected.push((kito.checkpoint(&format!("state {i}")), state.clone()));
             }
-            // Si esporta anche a metà: l'export incrementale deve dare lo stesso risultato.
+            // Also export midway: the incremental export must give the same result.
             if i == split {
                 export(&mut kito.store, root, &ExportOptions::default()).unwrap();
             }

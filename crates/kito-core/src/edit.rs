@@ -1,12 +1,12 @@
-//! Modifiche testuali a intervalli di byte.
+//! Text edits over byte ranges.
 
 use serde::{Deserialize, Serialize};
 
-/// Sostituisce i byte `start..end` del testo *di partenza* con `text`.
+/// Replaces the bytes `start..end` of the *original* text with `text`.
 ///
-/// In una lista di edit gli intervalli sono ordinati, non si sovrappongono e
-/// sono tutti espressi rispetto al testo di partenza (non a quello già
-/// modificato dagli edit precedenti).
+/// In a list of edits the ranges are sorted, do not overlap and are all
+/// expressed relative to the original text (not to the one already modified
+/// by the preceding edits).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextEdit {
     pub start: u32,
@@ -23,13 +23,13 @@ impl TextEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EditError {
-    #[error("edit {index}: intervallo {start}..{end} non valido per un testo di {len} byte")]
+    #[error("edit {index}: range {start}..{end} is not valid for a text of {len} bytes")]
     OutOfBounds { index: usize, start: u32, end: u32, len: usize },
-    #[error("edit {index}: si sovrappone al precedente o non è in ordine")]
+    #[error("edit {index}: overlaps the previous one or is out of order")]
     Overlap { index: usize },
 }
 
-/// Applica gli edit a `before` e restituisce il testo risultante.
+/// Applies the edits to `before` and returns the resulting text.
 pub fn apply_edits(before: &[u8], edits: &[TextEdit]) -> Result<Vec<u8>, EditError> {
     let grow: usize = edits.iter().map(|e| e.text.len()).sum();
     let mut out = Vec::with_capacity(before.len() + grow);

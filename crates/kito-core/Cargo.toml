@@ -1,6 +1,6 @@
 [package]
 name = "kito-core"
-description = "Kito: tipi del modello dati e serializzazione"
+description = "Kito: data model types and serialization"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

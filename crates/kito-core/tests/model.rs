@@ -1,4 +1,4 @@
-//! Test del contratto di serializzazione del modello dati.
+//! Tests of the data model's serialization contract.
 
 use kito_core::*;
 use proptest::prelude::*;
@@ -123,7 +123,7 @@ proptest! {
         let back: Op = codec::from_slice(&bytes).unwrap();
         prop_assert_eq!(&back, &op);
         prop_assert!(back.verify_id());
-        // Codifica deterministica: ricodificare dà gli stessi byte.
+        // Deterministic encoding: re-encoding gives the same bytes.
         prop_assert_eq!(codec::to_vec(&back).unwrap(), bytes);
     }
 
@@ -177,8 +177,8 @@ fn sample_op() -> Op {
     .unwrap()
 }
 
-/// Il formato su disco e gli ID sono un contratto: se questo test fallisce, i
-/// record già scritti non sono più leggibili o cambiano identità. Serve un ADR.
+/// The on-disk format and the IDs are a contract: if this test fails, records
+/// already written are no longer readable or change identity. An ADR is needed.
 #[test]
 fn golden_encoding_is_stable() {
     let op = sample_op();
@@ -195,15 +195,15 @@ fn golden_encoding_is_stable() {
 fn hashes_are_byte_strings_in_cbor_and_hex_in_json() {
     let id = BlobId::of(b"x");
     let cbor = codec::to_vec(&id).unwrap();
-    assert_eq!(cbor.len(), 34, "byte string di 32 byte: 2 byte di intestazione");
+    assert_eq!(cbor.len(), 34, "32-byte byte string: 2 header bytes");
     assert_eq!(&cbor[..2], &[0x58, 32]);
     assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{id}\""));
 }
 
 #[test]
 fn absent_intent_is_not_encoded() {
-    // Un campo opzionale assente non occupa spazio e non altera la codifica:
-    // è la proprietà che permette di aggiungere campi senza rompere i record.
+    // An absent optional field takes no space and does not alter the encoding:
+    // it is the property that allows adding fields without breaking records.
     let op = sample_op();
     let json = serde_json::to_value(&op).unwrap();
     assert!(json.get("intent").is_none());
@@ -214,9 +214,9 @@ fn absent_intent_is_not_encoded() {
 
 #[test]
 fn unknown_fields_are_ignored_when_reading() {
-    // Un record scritto da una versione futura, con un campo in più, si legge.
+    // A record written by a future version, with one extra field, can be read.
     let mut v = serde_json::to_value(sample_op()).unwrap();
-    v.as_object_mut().unwrap().insert("campo_futuro".into(), serde_json::json!(42));
+    v.as_object_mut().unwrap().insert("future_field".into(), serde_json::json!(42));
     let back: Op = serde_json::from_value(v).unwrap();
     assert_eq!(back, sample_op());
 }
@@ -226,7 +226,7 @@ fn checkpoint_and_friends_round_trip() {
     let ck = Checkpoint {
         id: CheckpointId(119),
         head: OpId(Hash::of(b"h")),
-        label: "integra lane/b2".into(),
+        label: "integrate lane/b2".into(),
         created_by: Author::human("francesco"),
         verification: Some(Verification {
             commands: vec!["tsc".into(), "npm test".into()],
@@ -274,9 +274,9 @@ fn checkpoint_and_friends_round_trip() {
     };
     assert_eq!(codec::from_slice::<Reference>(&codec::to_vec(&reference).unwrap()).unwrap(), reference);
 
-    let intent = Intent::new("aggiungi cache sulle richieste utente", Some("task #55".into()), None).unwrap();
+    let intent = Intent::new("add a cache for user requests", Some("task #55".into()), None).unwrap();
     assert_eq!(codec::from_slice::<Intent>(&codec::to_vec(&intent).unwrap()).unwrap(), intent);
-    assert_ne!(intent.id, Intent::new("altro", None, None).unwrap().id);
+    assert_ne!(intent.id, Intent::new("other", None, None).unwrap().id);
 }
 
 #[test]
@@ -284,8 +284,8 @@ fn text_edit_bytes_survive_json_even_if_not_utf8() {
     let e = TextEdit::new(1, 2, vec![0xff, 0xfe, 0x00]);
     let back: TextEdit = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
     assert_eq!(back, e);
-    let e = TextEdit::new(1, 2, "ciao è");
-    assert_eq!(serde_json::to_value(&e).unwrap()["text"], serde_json::json!("ciao è"));
+    let e = TextEdit::new(1, 2, "naïve café");
+    assert_eq!(serde_json::to_value(&e).unwrap()["text"], serde_json::json!("naïve café"));
     let back: TextEdit = codec::from_slice(&codec::to_vec(&e).unwrap()).unwrap();
     assert_eq!(back, e);
 }

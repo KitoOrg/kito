@@ -1,18 +1,18 @@
-//! Hash di contenuto BLAKE3 a 256 bit.
+//! 256-bit BLAKE3 content hash.
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
-/// Hash di contenuto: BLAKE3, 32 byte.
+/// Content hash: BLAKE3, 32 bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Hash([u8; 32]);
 
-/// Errore di parsing di un hash in esadecimale.
+/// Error parsing a hash in hexadecimal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HashParseError {
-    #[error("lunghezza non valida: attesi {expected} caratteri esadecimali, trovati {found}")]
+    #[error("invalid length: expected {expected} hexadecimal characters, found {found}")]
     Length { expected: usize, found: usize },
-    #[error("carattere non esadecimale alla posizione {0}")]
+    #[error("non-hexadecimal character at position {0}")]
     Digit(usize),
 }
 
@@ -28,13 +28,13 @@ impl Hash {
         &self.0
     }
 
-    /// BLAKE3 del contenuto, senza contesto: coincide con `b3sum`.
+    /// BLAKE3 of the content, with no context: it matches `b3sum`.
     pub fn of(data: &[u8]) -> Self {
         Hash(*blake3::hash(data).as_bytes())
     }
 
-    /// BLAKE3 in modalità `derive_key`: separa i domini, così l'hash di una
-    /// operazione non può mai collidere con quello di un blob.
+    /// BLAKE3 in `derive_key` mode: it separates the domains, so the hash of
+    /// an operation can never collide with that of a blob.
     pub fn derive(context: &str, data: &[u8]) -> Self {
         Hash(blake3::derive_key(context, data))
     }
@@ -43,7 +43,7 @@ impl Hash {
         hex::encode(&self.0)
     }
 
-    /// Prefisso corto per l'output umano (12 caratteri esadecimali).
+    /// Short prefix for human output (12 hexadecimal characters).
     pub fn short(&self) -> String {
         hex::encode(&self.0[..6])
     }
@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for Hash {
     }
 }
 
-/// Esadecimale minimale, senza dipendenze, per hash e object id di git.
+/// Minimal, dependency-free hexadecimal, for hashes and git object ids.
 pub(crate) mod hex {
     use super::*;
 
@@ -129,8 +129,9 @@ pub(crate) mod hex {
         Ok(())
     }
 
-    /// Deserializza `out.len()` byte da una stringa esadecimale (formati
-    /// leggibili), da una byte string (CBOR) o da una sequenza di interi.
+    /// Deserializes `out.len()` bytes from a hexadecimal string
+    /// (human-readable formats), from a byte string (CBOR) or from a sequence
+    /// of integers.
     pub fn deserialize_fixed<'de, D: Deserializer<'de>>(d: D, out: &mut [u8]) -> Result<(), D::Error> {
         struct V<'a>(&'a mut [u8]);
 
@@ -138,7 +139,7 @@ pub(crate) mod hex {
             type Value = ();
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{} byte (byte string o esadecimale)", self.0.len())
+                write!(f, "{} bytes (byte string or hexadecimal)", self.0.len())
             }
 
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<(), E> {
@@ -156,10 +157,10 @@ pub(crate) mod hex {
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
                 let len = self.0.len();
                 for (i, o) in self.0.iter_mut().enumerate() {
-                    *o = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(i, &"più byte"))?;
+                    *o = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(i, &"more bytes"))?;
                 }
                 if seq.next_element::<u8>()?.is_some() {
-                    return Err(de::Error::invalid_length(len + 1, &"meno byte"));
+                    return Err(de::Error::invalid_length(len + 1, &"fewer bytes"));
                 }
                 Ok(())
             }
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn matches_blake3_reference_vector() {
-        // Vettore ufficiale: BLAKE3("") .
+        // Official test vector: BLAKE3("").
         assert_eq!(
             Hash::of(b"").to_hex(),
             "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"

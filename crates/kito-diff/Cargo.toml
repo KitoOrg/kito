@@ -1,6 +1,6 @@
 [package]
 name = "kito-diff"
-description = "Kito: differ testuale (fase 1) e differ AST con ID stabili (fase 2)"
+description = "Kito: text differ (phase 1) and AST differ with stable IDs (phase 2)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

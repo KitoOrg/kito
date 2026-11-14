@@ -1,6 +1,6 @@
 [package]
 name = "kito-git"
-description = "Kito: export dei checkpoint in commit git, import da un repo git"
+description = "Kito: export of checkpoints as git commits, import from a git repo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
