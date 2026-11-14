@@ -187,3 +187,29 @@ non genera eventi in Linux, ma vale anche per le cartelle di rete. Tre misure:
 Con la scansione al posto degli eventi la cattura resta completa ma meno
 fine: i salvataggi tra una scansione e l'altra si fondono in una sola op, e
 l'ora registrata è quella della scansione.
+
+### D-026 · Identity
+Who signs captured changes is resolved, in order, from: the repository
+config (`[author]` in `.kito/config.toml`), the environment (`KITO_AUTHOR`,
+`KITO_EMAIL`), the personal config (`~/.config/kito/config.toml`), git's
+`user.name`/`user.email`, and finally `$USER`. Name and email are resolved
+independently, as git does. `Author` gained an optional `email` field (absent
+from the encoding when unset, so existing op IDs are unchanged); exported git
+commits use it, which is what lets GitHub attribute them. `kito identity`
+shows the identity in use and where it comes from, and sets it
+(`--name`, `--email`, `--agent`/`--human`, `--global`).
+
+### D-027 · Rollback never rewrites history
+`kito rollback <point> [paths…]` brings the working directory (or only the
+given paths) back to the state at a checkpoint, at an op, or N ops ago. The
+log stays append-only: the current state is captured first, then the files
+are rewritten and the difference is recorded as new ops carrying an intent
+("rollback to ckpt#1"). A rollback can therefore always be undone by rolling
+back to the previous head, which the command prints. An untracked (ignored)
+file sitting where a file must be recreated is never overwritten: the
+rollback refuses instead.
+
+### D-028 · Intents live in their own append-only log
+`.kito/intents` stores `Intent` records like `.kito/checkpoints` stores
+checkpoints. An op may only cite an intent the store already knows, and
+`Store::verify` reports ops whose intent is missing.

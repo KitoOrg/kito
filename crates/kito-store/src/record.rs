@@ -27,6 +27,7 @@ pub(crate) enum LogKind {
     Oplog = 1,
     Pack = 2,
     Checkpoints = 3,
+    Intents = 4,
 }
 
 pub(crate) fn encode_header(kind: LogKind, segment: u32) -> [u8; HEADER_LEN] {

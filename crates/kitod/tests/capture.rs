@@ -75,6 +75,7 @@ fn kito_state(repo: &Repo) -> BTreeMap<PathBuf, (Vec<u8>, FileMode)> {
 
 #[test]
 fn every_kind_of_change_on_disk_becomes_the_right_op() {
+    isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let mut repo = Repo::init(root).unwrap();
@@ -256,6 +257,7 @@ fn state_is_rebuilt_after_a_crash_and_offline_changes_are_caught() {
 
 #[test]
 fn checkpoints_show_up_in_git_log_and_in_kito_log() {
+    isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let mut repo = Repo::init(root).unwrap();
@@ -325,6 +327,7 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
 
 #[test]
 fn a_git_repository_is_imported_and_then_continued() {
+    isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -351,4 +354,193 @@ fn a_git_repository_is_imported_and_then_continued() {
     assert_eq!(git(root, &["rev-parse", "HEAD~1"]).trim(), head);
     assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), done.git_commit.unwrap());
     assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+/// Niente configurazione personale né identità di git della macchina: i test
+/// vedono solo ciò che impostano.
+fn isolate_identity() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let empty = std::env::temp_dir().join(format!("kito-test-config-{}", std::process::id()));
+        std::env::set_var("KITO_CONFIG_DIR", &empty);
+        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+        std::env::remove_var("KITO_AUTHOR");
+        std::env::remove_var("KITO_EMAIL");
+        std::env::set_var("USER", "utente-di-sistema");
+    });
+}
+
+#[test]
+fn identity_signs_ops_and_exported_commits() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    // Senza nulla di configurato si ripiega sull'utente del sistema.
+    assert_eq!(repo.identity().name, "utente-di-sistema");
+    assert_eq!(repo.identity().source, kitod::identity::Source::SystemUser);
+    assert_eq!(repo.identity().email, None);
+
+    write(root, ".gitignore", ".kito/\n");
+    write(root, "a.txt", "prima\n");
+    let first = repo.scan().unwrap();
+    assert_eq!(first[0].author, Author::human("utente-di-sistema"));
+
+    // `kito identity --name … --email …` scrive nel config e il daemon lo rilegge.
+    let config = root.join(".kito/config.toml");
+    kitod::identity::write(&config, Some("Ada Lovelace"), Some("ada@example.com"), None).unwrap();
+    repo.reload_config().unwrap();
+    assert_eq!(repo.identity().source, kitod::identity::Source::Repository);
+    write(root, "a.txt", "dopo\n");
+    let ops = repo.scan().unwrap();
+    assert_eq!(ops[0].author, Author::human("Ada Lovelace").with_email("ada@example.com"));
+    assert_eq!(repo.status().unwrap().author, "Ada Lovelace <ada@example.com>");
+
+    // Il commit esportato porta l'email vera: è ciò che GitHub usa per attribuirlo.
+    repo.checkpoint("con identità").unwrap();
+    assert_eq!(git(root, &["log", "-1", "--format=%an <%ae>"]).trim(), "Ada Lovelace <ada@example.com>");
+
+    // Un agente.
+    kitod::identity::write(&config, Some("agent-7"), None, Some("agent")).unwrap();
+    repo.reload_config().unwrap();
+    write(root, "a.txt", "dall'agente\n");
+    assert_eq!(repo.scan().unwrap()[0].author.kind, AuthorKind::Agent);
+}
+
+#[test]
+fn rollback_restores_files_and_can_itself_be_undone() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    fs::write(root.join(".kito/config.toml"), "[git]\nexport_on_checkpoint = false\n").unwrap();
+    repo.reload_config().unwrap();
+
+    // Stato 1.
+    write(root, "src/auth.ts", "export const v = 1;\n");
+    write(root, "docs/guida.md", "# Guida\n");
+    write(root, "run.sh", "#!/bin/sh\n");
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("docs/guida.md", root.join("link")).unwrap();
+    repo.checkpoint("stato uno").unwrap();
+    let state1 = disk(root);
+
+    // Stato 2: modifica, aggiunta, rimozione, rename, cambio di tipo.
+    write(root, "src/auth.ts", "export const v = 2;\n");
+    write(root, "src/nuovo/modulo.ts", "export {};\n");
+    fs::remove_file(root.join("link")).unwrap();
+    fs::rename(root.join("docs/guida.md"), root.join("docs/manuale.md")).unwrap();
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+    let second = repo.checkpoint("stato due").unwrap();
+    let state2 = disk(root);
+    // Una modifica non ancora vista da nessuno: il rollback non deve perderla.
+    write(root, "src/auth.ts", "export const v = 3; // salvato un attimo prima del rollback\n");
+    let state3 = disk(root);
+    assert_ne!(state1, state2);
+
+    // Prova a vuoto: elenca, non tocca.
+    let preview = repo.rollback("ckpt#1", &[], true).unwrap();
+    assert!(!preview.applied && preview.ops == 0);
+    let listed: Vec<(&str, &str)> =
+        preview.changes.iter().map(|c| (c.action.as_str(), c.path.as_str())).collect();
+    assert_eq!(
+        listed,
+        [
+            ("ricrea", "docs/guida.md"),
+            ("rimuove", "docs/manuale.md"),
+            ("ricrea", "link"),
+            ("ripristina", "run.sh"),
+            ("ripristina", "src/auth.ts"),
+            ("rimuove", "src/nuovo/modulo.ts"),
+        ]
+    );
+    assert_eq!(disk(root), state3);
+
+    // Rollback vero al primo checkpoint.
+    let done = repo.rollback("ckpt#1", &[], false).unwrap();
+    assert!(done.applied && done.ops > 0);
+    assert_eq!(done.target, "ckpt#1 (stato uno)");
+    assert_eq!(disk(root), state1, "contenuti, permessi e link come allora");
+    assert!(!root.join("src/nuovo").exists(), "le cartelle rimaste vuote spariscono");
+    assert_eq!(kito_state(&repo), state1);
+    assert!(repo.scan().unwrap().is_empty(), "il rollback è già tutto registrato");
+
+    // La storia non è stata riscritta: le op del rollback sono in coda, con il loro perché.
+    let items = repo.log(3, None).unwrap();
+    assert!(items.iter().all(
+        |i| matches!(i, LogItem::Op { intent: Some(why), .. } if why == "rollback a ckpt#1 (stato uno)")
+    ));
+    assert_eq!(repo.store().checkpoints().count(), 2);
+
+    // Annullare il rollback riporta anche la modifica fatta un attimo prima.
+    let undo = done.undo.unwrap();
+    repo.rollback(&undo, &[], false).unwrap();
+    assert_eq!(disk(root), state3);
+
+    // A un checkpoint successivo, per numero; poi indietro di N op; poi a un'op per ID.
+    repo.rollback("2", &[], false).unwrap();
+    assert_eq!(disk(root), state2);
+    assert_eq!(second.id, "ckpt#2");
+    let before = repo.status().unwrap().ops;
+    let last = repo.rollback("~1", &[], false).unwrap();
+    assert!(last.applied);
+    assert_eq!(repo.status().unwrap().ops, before + last.ops as u64);
+    let head_before_that = last.undo.unwrap();
+    repo.rollback(&head_before_that, &[], false).unwrap();
+    assert_eq!(disk(root), state2);
+
+    // Niente da fare se lo stato è già quello.
+    let noop = repo.rollback("ckpt#2", &[], false).unwrap();
+    assert!(noop.changes.is_empty() && !noop.applied);
+    assert!(repo.store().verify().unwrap().is_ok());
+}
+
+#[test]
+fn rollback_of_selected_paths_and_its_refusals() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    fs::write(root.join(".kito/config.toml"), "[git]\nexport_on_checkpoint = false\n").unwrap();
+    repo.reload_config().unwrap();
+    write(root, "a.txt", "a1\n");
+    write(root, "dir/b.txt", "b1\n");
+    write(root, "dir/c.txt", "c1\n");
+    repo.checkpoint("uno").unwrap();
+    write(root, "a.txt", "a2\n");
+    write(root, "dir/b.txt", "b2\n");
+    write(root, "dir/c.txt", "c2\n");
+    repo.scan().unwrap();
+
+    // Solo una cartella: il resto resta com'è.
+    let done = repo.rollback("ckpt#1", &["dir".into()], false).unwrap();
+    assert_eq!(done.changes.len(), 2);
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a2\n");
+    assert_eq!(fs::read_to_string(root.join("dir/b.txt")).unwrap(), "b1\n");
+    // Solo un file.
+    repo.rollback("ckpt#1", &["a.txt".into()], false).unwrap();
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a1\n");
+
+    // Punti che non esistono o non si capiscono.
+    for (spec, needle) in [
+        ("ckpt#9", "non esiste"),
+        ("~999", "solo"),
+        ("abcdef123456", "nessuna operazione"),
+        ("boh", "non riconosciuto"),
+    ] {
+        let err = repo.rollback(spec, &[], false).unwrap_err().to_string();
+        assert!(err.contains(needle), "{spec}: {err}");
+    }
+
+    // Un file ignorato nel posto in cui il rollback ricreerebbe un file: non
+    // è nel log, quindi non viene sovrascritto.
+    fs::remove_file(root.join("a.txt")).unwrap();
+    repo.scan().unwrap();
+    write(root, ".gitignore", "a.txt\n");
+    repo.scan().unwrap();
+    write(root, "a.txt", "contenuto mai registrato\n");
+    let err = repo.rollback("ckpt#1", &["a.txt".into()], false).unwrap_err().to_string();
+    assert!(err.contains("non è tracciato"), "{err}");
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "contenuto mai registrato\n");
 }

@@ -32,6 +32,7 @@ smallvec = { version = "1", features = ["serde", "union"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
 toml = "0.9"
+toml_edit = "0.23"
 zstd = "0.13"
 
 # test / bench

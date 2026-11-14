@@ -28,7 +28,11 @@ fn kito(cwd: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("KITOD_BIN", kitod())
         .env("KITO_AUTHOR", "ada")
+        .env_remove("KITO_EMAIL")
+        // Niente identità presa dalla macchina su cui girano i test.
+        .env("KITO_CONFIG_DIR", cwd.join(".config-personale-assente"))
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap()
 }
@@ -206,5 +210,70 @@ fn log_is_up_to_date_even_when_file_events_are_missing() {
     let status = ok(root, &["daemon", "status"]);
     assert!(status.contains("non sono state segnalate dal sistema operativo"), "{status}");
     assert!(status.contains("scansione completa ogni 1 s"), "{status}");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
+fn identity_and_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.config-personale-assente/\n").unwrap();
+
+    // Identità: prima quella di ripiego, poi quella impostata.
+    let shown = ok(root, &["identity"]);
+    assert!(shown.contains("ada (persona)") && shown.contains("variabili d'ambiente"), "{shown}");
+    assert!(shown.contains("Nessuna email"), "{shown}");
+    let set = ok(root, &["identity", "--name", "Ada Lovelace", "--email", "ada@example.com"]);
+    assert!(set.contains("Ada Lovelace <ada@example.com> (persona)"), "{set}");
+    assert!(set.contains("configurazione del repository"), "{set}");
+    assert_eq!(json(root, &["identity", "--json"])["email"], "ada@example.com");
+
+    fs::write(root.join("nota.txt"), "versione uno\n").unwrap();
+    ok(root, &["checkpoint", "-m", "uno"]);
+    assert_eq!(git(root, &["log", "-1", "--format=%an <%ae>"]).trim(), "Ada Lovelace <ada@example.com>");
+
+    fs::write(root.join("nota.txt"), "versione due\n").unwrap();
+    fs::write(root.join("altro.txt"), "aggiunto dopo\n").unwrap();
+    ok(root, &["sync"]);
+
+    // Prova a vuoto, poi rollback vero al checkpoint.
+    let preview = ok(root, &["rollback", "ckpt#1", "--dry-run"]);
+    assert!(preview.contains("cambierebbe 2 file") && preview.contains("nulla è stato toccato"), "{preview}");
+    assert_eq!(fs::read_to_string(root.join("nota.txt")).unwrap(), "versione due\n");
+    let done = ok(root, &["rollback", "ckpt#1"]);
+    assert!(done.contains("Rollback a ckpt#1 (uno): 2 file"), "{done}");
+    assert!(done.contains("ripristina nota.txt") && done.contains("rimuove    altro.txt"), "{done}");
+    assert_eq!(fs::read_to_string(root.join("nota.txt")).unwrap(), "versione uno\n");
+    assert!(!root.join("altro.txt").exists());
+
+    // Il log mostra il rollback come nuove op, con il loro perché e un ID breve.
+    let log = ok(root, &["log", "-n", "2"]);
+    assert!(log.lines().all(|l| l.contains("[rollback a ckpt#1 (uno)]")), "{log}");
+    let first = log.lines().next().unwrap().split_whitespace().next().unwrap().to_owned();
+    assert_eq!(first.len(), 8, "ID breve dell'op: {first}");
+
+    // Si annulla con il comando suggerito.
+    let undo =
+        done.lines().find_map(|l| l.strip_prefix("Per annullarlo: kito rollback ")).unwrap().to_owned();
+    ok(root, &["rollback", &undo]);
+    assert_eq!(fs::read_to_string(root.join("nota.txt")).unwrap(), "versione due\n");
+    assert_eq!(fs::read_to_string(root.join("altro.txt")).unwrap(), "aggiunto dopo\n");
+
+    // Un solo file, indicato da una sottocartella; e all'indietro di N operazioni.
+    fs::create_dir(root.join("sub")).unwrap();
+    ok(&root.join("sub"), &["rollback", "ckpt#1", "../nota.txt"]);
+    assert_eq!(fs::read_to_string(root.join("nota.txt")).unwrap(), "versione uno\n");
+    assert!(root.join("altro.txt").exists());
+    ok(root, &["rollback", "--ops", "1"]);
+    assert_eq!(fs::read_to_string(root.join("nota.txt")).unwrap(), "versione due\n");
+
+    assert!(ok(root, &["rollback", "ckpt#1", "sub"]).contains("niente da fare"));
+    let bad = kito(root, &["rollback"]);
+    assert!(
+        !bad.status.success() && String::from_utf8_lossy(&bad.stderr).contains("indica a che punto tornare")
+    );
+    let bad = kito(root, &["rollback", "ckpt#42"]);
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("non esiste"));
     ok(root, &["daemon", "stop"]);
 }

@@ -5,8 +5,12 @@
 
 use crate::config::{Config, CONFIG_FILE, DEFAULT_CONFIG};
 use crate::error::{Error, Result};
+use crate::identity::{self, Identity};
 use crate::ignore::IgnoreRules;
-use kito_core::{codec, Author, BlobId, Checkpoint, FileMode, Hlc, HlcClock, LaneId, Op, OpId, OpKind, Tree};
+use kito_core::{
+    codec, Author, BlobId, Checkpoint, CheckpointId, FileMode, Hlc, HlcClock, Intent, IntentId, LaneId, Op,
+    OpId, OpKind, Tree, TreeEntry,
+};
 use kito_diff::fileops::{ops_for_changes, Snapshot};
 use kito_diff::text;
 use kito_store::fs::atomic_write;
@@ -67,7 +71,9 @@ pub struct Counters {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub root: PathBuf,
+    /// `Nome <email>` di chi firma le modifiche.
     pub author: String,
+    pub identity: Identity,
     pub head: Option<String>,
     pub ops: u64,
     pub files: usize,
@@ -94,6 +100,9 @@ pub enum LogItem {
         detail: Option<String>,
         lines_added: Option<usize>,
         lines_removed: Option<usize>,
+        /// Il "perché" dell'operazione, se dichiarato.
+        #[serde(default)]
+        intent: Option<String>,
     },
     Checkpoint {
         id: String,
@@ -114,10 +123,32 @@ pub struct CheckpointResult {
     pub git_error: Option<String>,
 }
 
+/// Una voce di ciò che un rollback cambia nella cartella di lavoro.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackChange {
+    pub path: String,
+    /// `ripristina`, `ricrea` oppure `rimuove`.
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackResult {
+    /// Il punto a cui si torna, in parole.
+    pub target: String,
+    pub changes: Vec<RollbackChange>,
+    /// `false` per una prova a vuoto (`--dry-run`).
+    pub applied: bool,
+    /// Op registrate dal rollback.
+    pub ops: usize,
+    /// Punto a cui tornare per annullare questo rollback.
+    pub undo: Option<String>,
+}
+
 pub struct Repo {
     root: PathBuf,
     store: Store,
     config: Config,
+    identity: Identity,
     author: Author,
     ignore: IgnoreRules,
     tree: Tree,
@@ -156,11 +187,13 @@ impl Repo {
         let store = Store::open(&store_dir)?;
         let config = Config::load(&store_dir).map_err(Error::Config)?;
         let ignore = IgnoreRules::new(&root, &config.capture.ignore);
-        let author = config.author();
+        let identity = identity::resolve(&config, &root);
+        let author = identity.author();
         let mut repo = Repo {
             root,
             store,
             config,
+            identity,
             author,
             ignore,
             tree: Tree::new(),
@@ -184,6 +217,21 @@ impl Repo {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Chi firma le modifiche catturate in questo repository.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Rilegge `config.toml`: identità e regole di ignore hanno effetto da
+    /// subito, senza riavviare il daemon.
+    pub fn reload_config(&mut self) -> Result<()> {
+        self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
+        self.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
+        self.identity = identity::resolve(&self.config, &self.root);
+        self.author = self.identity.author();
+        Ok(())
     }
 
     pub fn store(&self) -> &Store {
@@ -313,6 +361,15 @@ impl Repo {
     /// registra le op che ne derivano. Una cartella vale per tutto ciò che
     /// contiene. Restituisce le op registrate, già confermate.
     pub fn capture(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Result<Vec<Op>> {
+        self.capture_as(paths, None)
+    }
+
+    /// Come [`Repo::capture`], dichiarando il "perché" delle op registrate.
+    fn capture_as(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        intent: Option<IntentId>,
+    ) -> Result<Vec<Op>> {
         // 1. Dai percorsi segnalati ai singoli file da guardare.
         let mut files: BTreeSet<PathBuf> = BTreeSet::new();
         for rel in paths {
@@ -403,7 +460,7 @@ impl Repo {
         let kinds = ops_for_changes(&self.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
         let mut ops = Vec::with_capacity(kinds.len());
         for kind in kinds {
-            let op = Op::new(self.head, LaneId::MAIN, self.author.clone(), self.clock.now(), kind, None)?;
+            let op = Op::new(self.head, LaneId::MAIN, self.author.clone(), self.clock.now(), kind, intent)?;
             self.tree.apply(&op.kind)?;
             self.store.append_op(&op)?;
             self.head = Some(op.id);
@@ -502,7 +559,8 @@ impl Repo {
         };
         Ok(Status {
             root: self.root.clone(),
-            author: self.author.name.clone(),
+            author: self.author.to_string(),
+            identity: self.identity.clone(),
             head: self.head.map(|h| h.to_string()),
             ops: self.ops,
             files: self.tree.len(),
@@ -588,7 +646,203 @@ impl Repo {
             detail,
             lines_added: stat.map(|s| s.lines_added),
             lines_removed: stat.map(|s| s.lines_removed),
+            intent: op.intent.and_then(|id| self.store.intent(&id)).map(|i| i.summary.clone()),
         }
+    }
+
+    // ------------------------------------------------------------ rollback
+
+    /// Op della linea principale che soddisfano `matches`, con la loro
+    /// posizione (da 0), dalla più recente.
+    fn positions_of(&self, matches: impl Fn(&Op) -> bool) -> Result<Vec<(u64, OpId)>> {
+        let mut found = Vec::new();
+        let mut end = self.ops;
+        while end > 0 {
+            let start = end.saturating_sub(500);
+            let page = self.store.lane_ops(LaneId::MAIN, start, (end - start) as usize)?;
+            for (i, op) in page.iter().enumerate().rev() {
+                if matches(op) {
+                    found.push((start + i as u64, op.id));
+                }
+            }
+            end = start;
+        }
+        Ok(found)
+    }
+
+    /// Traduce un punto della storia nel numero di op che lo precedono (lo
+    /// stato "dopo le prime k op") e in una descrizione leggibile.
+    ///
+    /// Forme accettate: `ckpt#3`, `#3` o `3` (un checkpoint); `~2` (due op
+    /// fa); un prefisso di almeno 6 cifre dell'ID di un'op (lo stato subito
+    /// dopo quell'op).
+    fn resolve_point(&self, spec: &str) -> Result<(u64, String)> {
+        let spec = spec.trim();
+        let invalid = |why: &str| Error::Other(format!("{spec:?}: {why}"));
+        if let Some(back) = spec.strip_prefix('~') {
+            let back: u64 = back.parse().map_err(|_| invalid("dopo ~ serve un numero di operazioni"))?;
+            if back > self.ops {
+                return Err(invalid(&format!("la storia ha solo {} operazioni", self.ops)));
+            }
+            return Ok((self.ops - back, format!("{back} operazioni fa")));
+        }
+        let number = spec.strip_prefix("ckpt#").or_else(|| spec.strip_prefix('#')).unwrap_or(spec);
+        let looks_like_checkpoint = number.len() != spec.len() || number.len() < 6;
+        if looks_like_checkpoint {
+            if let Ok(n) = number.parse::<u64>() {
+                let ck = self
+                    .store
+                    .checkpoint(CheckpointId(n))
+                    .ok_or_else(|| invalid("questo checkpoint non esiste (vedi `kito log`)"))?;
+                let head = ck.head;
+                let found = self.positions_of(|op| op.id == head)?;
+                let (index, _) =
+                    found.first().ok_or_else(|| invalid("il checkpoint non è sulla linea principale"))?;
+                let label = if ck.label.is_empty() { String::new() } else { format!(" ({})", ck.label) };
+                return Ok((index + 1, format!("{}{label}", ck.id)));
+            }
+        }
+        if spec.len() >= 6 && spec.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let prefix = spec.to_ascii_lowercase();
+            let found = self.positions_of(|op| op.id.to_string().starts_with(&prefix))?;
+            return match found.as_slice() {
+                [(index, id)] => Ok((index + 1, format!("l'operazione {}", id.hash().short()))),
+                [] => Err(invalid("nessuna operazione con questo ID (vedi `kito log`)")),
+                _ => Err(invalid("più operazioni iniziano così: aggiungi qualche cifra")),
+            };
+        }
+        Err(invalid("punto non riconosciuto: usa un checkpoint (ckpt#3), le prime cifre dell'ID di un'operazione, o ~N"))
+    }
+
+    /// L'albero della linea principale dopo le prime `k` op.
+    fn tree_at(&self, k: u64) -> Result<Tree> {
+        let mut tree = Tree::new();
+        let mut applied = 0u64;
+        while applied < k {
+            let page = self.store.lane_ops(LaneId::MAIN, applied, (k - applied).min(1000) as usize)?;
+            if page.is_empty() {
+                break;
+            }
+            for op in page {
+                tree.apply(&op.kind)?;
+                applied += 1;
+            }
+        }
+        Ok(tree)
+    }
+
+    /// Riporta la cartella di lavoro allo stato che aveva in un punto della
+    /// storia (vedi [`Repo::resolve_point`]), per tutti i file o solo per
+    /// quelli sotto `paths`.
+    ///
+    /// La storia non si riscrive: lo stato attuale viene prima catturato, e
+    /// il ritorno indietro è registrato come nuove op. Per questo un rollback
+    /// si può sempre annullare tornando al punto indicato in `undo`.
+    pub fn rollback(&mut self, spec: &str, paths: &[PathBuf], dry_run: bool) -> Result<RollbackResult> {
+        self.scan()?;
+        let (k, description) = self.resolve_point(spec)?;
+        let target = self.tree_at(k)?;
+        let selected = |path: &Path| paths.is_empty() || paths.iter().any(|p| path.starts_with(p));
+
+        // Cosa cambia: file da riscrivere (con il contenuto di allora) e da togliere.
+        let mut restore: Vec<(PathBuf, TreeEntry, &str)> = Vec::new();
+        let mut remove: Vec<PathBuf> = Vec::new();
+        for (path, entry) in target.iter().filter(|(p, _)| selected(p)) {
+            match self.tree.get(path) {
+                Some(current) if current == entry => {}
+                Some(_) => restore.push((path.to_owned(), *entry, "ripristina")),
+                None => restore.push((path.to_owned(), *entry, "ricrea")),
+            }
+        }
+        for (path, _) in self.tree.iter().filter(|(p, _)| selected(p)) {
+            if !target.contains(path) {
+                remove.push(path.to_owned());
+            }
+        }
+        let mut changes: Vec<RollbackChange> = restore
+            .iter()
+            .map(|(p, _, action)| RollbackChange {
+                path: p.display().to_string(),
+                action: (*action).to_owned(),
+            })
+            .chain(
+                remove
+                    .iter()
+                    .map(|p| RollbackChange { path: p.display().to_string(), action: "rimuove".to_owned() }),
+            )
+            .collect();
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        let undo = self.head.map(|h| h.hash().short());
+        if dry_run || changes.is_empty() {
+            return Ok(RollbackResult { target: description, changes, applied: false, ops: 0, undo: None });
+        }
+
+        // Un file non tracciato (perché ignorato) nel posto in cui va ricreato
+        // un file: il suo contenuto non è nel log e non va sovrascritto.
+        for (path, _, _) in &restore {
+            if !self.tree.contains(path) && fs::symlink_metadata(self.root.join(path)).is_ok() {
+                return Err(Error::Other(format!(
+                    "{}: esiste ma non è tracciato; spostalo prima di fare il rollback",
+                    path.display()
+                )));
+            }
+        }
+
+        // Prima le rimozioni (un file può lasciare il posto a una cartella e
+        // viceversa), poi le scritture.
+        for path in &remove {
+            let abs = self.root.join(path);
+            match fs::remove_file(&abs) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(&abs)(e)),
+            }
+            // Le cartelle rimaste vuote se ne vanno con l'ultimo file.
+            let mut dir = path.parent();
+            while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+                if fs::remove_dir(self.root.join(d)).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
+        for (path, entry, _) in &restore {
+            self.write_file(path, entry)?;
+        }
+
+        let intent = Intent::new(format!("rollback a {description}"), None, None)?;
+        self.store.put_intent(&intent)?;
+        let touched: Vec<PathBuf> = restore.into_iter().map(|(p, _, _)| p).chain(remove).collect();
+        let ops = self.capture_as(touched, Some(intent.id))?;
+        self.save_state()?;
+        Ok(RollbackResult { target: description, changes, applied: true, ops: ops.len(), undo })
+    }
+
+    /// Scrive nella cartella di lavoro un file con il contenuto e il tipo dati.
+    fn write_file(&self, rel: &Path, entry: &TreeEntry) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let abs = self.root.join(rel);
+        if let Some(dir) = abs.parent() {
+            fs::create_dir_all(dir).map_err(Error::io(dir))?;
+        }
+        let content = self.store.get_blob(&entry.blob)?.ok_or_else(|| {
+            Error::Other(format!("{}: il contenuto {} non è nello store", rel.display(), entry.blob))
+        })?;
+        if entry.mode == FileMode::Symlink {
+            let _ = fs::remove_file(&abs);
+            return std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&content), &abs)
+                .map_err(Error::io(&abs));
+        }
+        // Scrittura su file temporaneo e rename: chi legge non vede mai un file a metà.
+        let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = abs.with_file_name(format!(".{name}.kito-tmp"));
+        fs::write(&tmp, &content).map_err(Error::io(&tmp))?;
+        let mode = if entry.mode == FileMode::Executable { 0o755 } else { 0o644 };
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(Error::io(&tmp))?;
+        fs::rename(&tmp, &abs).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            Error::io(&abs)(e)
+        })
     }
 
     /// Chiude il repository salvando lo stato e lasciando gli indici durevoli.

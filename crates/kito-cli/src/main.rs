@@ -6,7 +6,8 @@
 
 use clap::{Parser, Subcommand};
 use kitod::client::{find_root, Client, ClientError};
-use kitod::repo::{CheckpointResult, LogItem};
+use kitod::identity::{self, Identity};
+use kitod::repo::{CheckpointResult, LogItem, RollbackResult};
 use kitod::rpc::DaemonStatus;
 use kitod::Repo;
 use serde_json::{json, Value};
@@ -57,6 +58,37 @@ enum Cmd {
     },
     /// Esporta su git i checkpoint non ancora esportati
     ExportGit,
+    /// Riporta i file allo stato di un checkpoint o di un'operazione precedente
+    Rollback {
+        /// Punto a cui tornare: un checkpoint (ckpt#3) o le prime cifre
+        /// dell'ID di un'operazione, come li mostra `kito log`
+        to: Option<String>,
+        /// Solo questi file o cartelle (default: tutto)
+        paths: Vec<PathBuf>,
+        /// Torna a prima delle ultime N operazioni
+        #[arg(long, value_name = "N", conflicts_with = "to")]
+        ops: Option<u64>,
+        /// Mostra cosa cambierebbe, senza toccare nulla
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Mostra o imposta chi firma le modifiche (nome ed email)
+    Identity {
+        #[arg(long)]
+        name: Option<String>,
+        /// Usata per attribuire i commit esportati su git
+        #[arg(long)]
+        email: Option<String>,
+        /// Le modifiche sono di un agente
+        #[arg(long, conflicts_with = "human")]
+        agent: bool,
+        /// Le modifiche sono di una persona
+        #[arg(long)]
+        human: bool,
+        /// Vale per tutti i tuoi repository (configurazione personale)
+        #[arg(long)]
+        global: bool,
+    },
     /// Attende che tutti i salvataggi siano registrati
     Sync,
     /// Stato del repository
@@ -193,15 +225,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
 
 fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     let root = root_of(cli)?;
-    // Il file si indica come lo si vede dalla cartella corrente.
-    let rel = match path {
-        Some(p) => {
-            let abs = std::env::current_dir().map_err(fail)?.join(p);
-            let abs = abs.canonicalize().unwrap_or(abs);
-            Some(abs.strip_prefix(&root).map(Path::to_owned).unwrap_or_else(|_| p.clone()))
-        }
-        None => None,
-    };
+    let rel = path.as_ref().map(|p| repo_relative(&root, p)).transpose()?;
     let mut client = daemon(cli)?;
     // Prima di mostrare il log ci si assicura che contenga tutto ciò che è
     // su disco, anche se il watcher avesse perso qualche evento.
@@ -220,18 +244,137 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
                 let git = git_commit.map(|c| format!("  (git {})", &c[..10])).unwrap_or_default();
                 println!("◆ {id}  {label}{git}");
             }
-            LogItem::Op { at_ms, author, op, path, detail, lines_added, lines_removed, .. } => {
+            LogItem::Op {
+                id, at_ms, author, op, path, detail, lines_added, lines_removed, intent, ..
+            } => {
+                // Le prime cifre dell'ID bastano per indicare l'op a `kito rollback`.
+                let short = &id[..id.len().min(8)];
                 let mut line =
-                    format!("  {}  {author:<10} {op:<10} {}", utc(at_ms), path.unwrap_or_default());
+                    format!("  {short}  {}  {author:<10} {op:<10} {}", utc(at_ms), path.unwrap_or_default());
                 if let (Some(added), Some(removed)) = (lines_added, lines_removed) {
                     line.push_str(&format!("  +{added} −{removed}"));
                 }
                 if let Some(detail) = detail {
                     line.push_str(&format!("  ({detail})"));
                 }
+                if let Some(intent) = intent {
+                    line.push_str(&format!("  [{intent}]"));
+                }
                 println!("{line}");
             }
         }
+    }
+    Ok(())
+}
+
+/// Un percorso indicato come lo si vede dalla cartella corrente, reso
+/// relativo alla radice del repository.
+fn repo_relative(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let abs = std::env::current_dir().map_err(fail)?.join(path);
+    // Il file può non esistere più: si risolve la cartella che lo contiene.
+    let abs = match abs.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(_) => match (abs.parent().and_then(|p| p.canonicalize().ok()), abs.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            _ => abs,
+        },
+    };
+    Ok(abs.strip_prefix(root).map(Path::to_owned).unwrap_or_else(|_| path.to_owned()))
+}
+
+fn cmd_rollback(
+    cli: &Cli,
+    to: &Option<String>,
+    paths: &[PathBuf],
+    ops: Option<u64>,
+    dry_run: bool,
+) -> Outcome {
+    let root = root_of(cli)?;
+    let to = match (to, ops) {
+        (Some(to), _) => to.clone(),
+        (None, Some(n)) => format!("~{n}"),
+        (None, None) => {
+            return Err("indica a che punto tornare: un checkpoint (ckpt#3), le prime cifre dell'ID di \
+                        un'operazione (vedi `kito log`), oppure --ops N"
+                .to_owned())
+        }
+    };
+    let paths = paths.iter().map(|p| repo_relative(&root, p)).collect::<Result<Vec<_>, _>>()?;
+    let done: RollbackResult = daemon(cli)?
+        .call("rollback", json!({ "to": to, "paths": paths, "dry_run": dry_run }))
+        .map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+        return Ok(());
+    }
+    if done.changes.is_empty() {
+        println!("I file sono già nello stato di {}: niente da fare.", done.target);
+        return Ok(());
+    }
+    let files = match done.changes.len() {
+        1 => "1 file".to_owned(),
+        n => format!("{n} file"),
+    };
+    if done.applied {
+        println!("Rollback a {}: {files}", done.target);
+    } else {
+        println!("Il rollback a {} cambierebbe {files} (prova a vuoto, nulla è stato toccato):", done.target);
+    }
+    for change in &done.changes {
+        println!("  {:<10} {}", change.action, change.path);
+    }
+    if let (true, Some(undo)) = (done.applied, &done.undo) {
+        println!("Registrato come {} operazioni: la storia precedente resta intatta.", done.ops);
+        println!("Per annullarlo: kito rollback {undo}");
+    }
+    Ok(())
+}
+
+fn print_identity(identity: &Identity) {
+    let kind = if identity.kind == "agent" { "agente" } else { "persona" };
+    println!("{} ({kind})", identity.author());
+    println!("Fonte: {}", identity.source.describe());
+    if identity.email.is_none() {
+        println!("Nessuna email: i commit esportati su git useranno un indirizzo segnaposto.");
+        println!("Per impostarla: kito identity --email tu@esempio.it");
+    }
+}
+
+fn cmd_identity(
+    cli: &Cli,
+    name: &Option<String>,
+    email: &Option<String>,
+    kind: Option<&str>,
+    global: bool,
+) -> Outcome {
+    let root = root_of(cli).ok();
+    let changing = name.is_some() || email.is_some() || kind.is_some();
+    if changing {
+        let path = if global {
+            identity::personal_config_path()
+                .ok_or("impossibile trovare la cartella di configurazione personale")?
+        } else {
+            match &root {
+                Some(root) => root.join(".kito").join("config.toml"),
+                None => return Err(format!("{} (oppure usa --global)", ClientError::NoRepository)),
+            }
+        };
+        identity::write(&path, name.as_deref(), email.as_deref(), kind)?;
+    }
+    let identity: Identity = match &root {
+        // Il daemon rilegge la configurazione: l'identità vale dalla prossima op.
+        Some(root) => {
+            Client::connect_or_start(root).map_err(fail)?.call("reload", json!({})).map_err(fail)?
+        }
+        None => {
+            let here = std::env::current_dir().map_err(fail)?;
+            identity::resolve(&kitod::config::Config::default(), &here)
+        }
+    };
+    if cli.json {
+        print_json(&identity);
+    } else {
+        print_identity(&identity);
     }
     Ok(())
 }
@@ -405,6 +548,17 @@ fn main() -> ExitCode {
         Cmd::Log { path, limit } => cmd_log(&cli, path, *limit),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
+        Cmd::Rollback { to, paths, ops, dry_run } => cmd_rollback(&cli, to, paths, *ops, *dry_run),
+        Cmd::Identity { name, email, agent, human, global } => {
+            let kind = if *agent {
+                Some("agent")
+            } else if *human {
+                Some("human")
+            } else {
+                None
+            };
+            cmd_identity(&cli, name, email, kind, *global)
+        }
         Cmd::Sync => cmd_sync(&cli),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

@@ -1,6 +1,5 @@
 //! Configurazione del repository: `.kito/config.toml`.
 
-use kito_core::{Author, AuthorKind};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -11,8 +10,11 @@ pub const DEFAULT_CONFIG: &str = r#"# Configurazione di Kito per questo reposito
 
 [author]
 # Chi firma le modifiche catturate nella cartella di lavoro principale.
-# Se manca si usa $KITO_AUTHOR, poi $USER.
-# name = "francesco"
+# Si imposta con `kito identity --name ... --email ...`. Se manca valgono,
+# nell'ordine: $KITO_AUTHOR e $KITO_EMAIL, la configurazione personale
+# (~/.config/kito/config.toml), l'identità di git, $USER.
+# name = "Francesco"
+# email = "francesco@example.com"
 # kind = "human"        # oppure "agent"
 
 [capture]
@@ -52,7 +54,8 @@ pub struct Config {
 #[serde(default)]
 pub struct AuthorConfig {
     pub name: Option<String>,
-    pub kind: AuthorKindConfig,
+    pub email: Option<String>,
+    pub kind: Option<AuthorKindConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,23 +114,6 @@ impl Config {
         }
     }
 
-    /// Autore delle modifiche catturate nella cartella di lavoro principale.
-    pub fn author(&self) -> Author {
-        let name = self
-            .author
-            .name
-            .clone()
-            .or_else(|| std::env::var("KITO_AUTHOR").ok())
-            .or_else(|| std::env::var("USER").ok())
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or_else(|| "sconosciuto".to_owned());
-        let kind = match self.author.kind {
-            AuthorKindConfig::Human => AuthorKind::Human,
-            AuthorKindConfig::Agent => AuthorKind::Agent,
-        };
-        Author { kind, name }
-    }
-
     pub fn export_options(&self) -> kito_git::ExportOptions {
         kito_git::ExportOptions {
             branch: self.git.branch.clone(),
@@ -153,7 +139,8 @@ mod tests {
             "[author]\nname = \"ada\"\nkind = \"agent\"\n[capture]\ndebounce_ms = 10\n[futuro]\nx = 1\n",
         )
         .unwrap();
-        assert_eq!(parsed.author(), Author::agent("ada"));
+        assert_eq!(parsed.author.name.as_deref(), Some("ada"));
+        assert_eq!(parsed.author.kind, Some(AuthorKindConfig::Agent));
         assert_eq!(parsed.capture.debounce_ms, 10);
         assert_eq!(parsed.capture.rescan_secs, 60);
     }

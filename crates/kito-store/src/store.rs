@@ -4,11 +4,12 @@ use crate::checkpoints::CheckpointLog;
 use crate::error::{IoContext, Result, StoreError};
 use crate::fs::{atomic_write, remove_stray_tmp, FileSystem, StdFs};
 use crate::index::{Index, IndexBatch, IndexedOp, Watermark};
+use crate::intents::IntentLog;
 use crate::logfile::LogRecovery;
 use crate::objects::Packs;
 use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
-use kito_core::{codec, BlobId, Checkpoint, CheckpointId, LaneId, Op, OpId, SymbolId};
+use kito_core::{codec, BlobId, Checkpoint, CheckpointId, Intent, IntentId, LaneId, Op, OpId, SymbolId};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -96,13 +97,17 @@ pub struct RecoveryReport {
     pub oplog: LogRecovery,
     pub packs: LogRecovery,
     pub checkpoints: LogRecovery,
+    pub intents: LogRecovery,
     pub index: IndexRecovery,
 }
 
 impl RecoveryReport {
     /// Byte di coda scartati in totale (record mai confermati).
     pub fn discarded_bytes(&self) -> u64 {
-        self.oplog.discarded_bytes + self.packs.discarded_bytes + self.checkpoints.discarded_bytes
+        self.oplog.discarded_bytes
+            + self.packs.discarded_bytes
+            + self.checkpoints.discarded_bytes
+            + self.intents.discarded_bytes
     }
 }
 
@@ -162,6 +167,7 @@ pub struct Store {
     packs: Packs,
     oplog: SegmentedLog,
     checkpoints: CheckpointLog,
+    intents: IntentLog,
     index: Index,
     pending: Pending,
     poisoned: bool,
@@ -256,7 +262,10 @@ impl Store {
         // registri come confermato.
         packs.sync()?;
         oplog.sync()?;
-        let (index, index_recovery) = reconcile_index(index, &oplog, &packs, checkpoints.len())?;
+        let (intents, intents_recovery) =
+            IntentLog::open(&dir.join("intents"), &*opts.fs, &lost_found, floor.map(|w| w.intents_end))?;
+        let (index, index_recovery) =
+            reconcile_index(index, &oplog, &packs, (checkpoints.len(), intents.len()))?;
 
         Ok(Store {
             dir: dir.to_owned(),
@@ -265,6 +274,7 @@ impl Store {
             packs,
             oplog,
             checkpoints,
+            intents,
             index,
             pending: Pending::default(),
             poisoned: false,
@@ -272,6 +282,7 @@ impl Store {
                 oplog: oplog_recovery,
                 packs: packs_recovery,
                 checkpoints: checkpoints_recovery,
+                intents: intents_recovery,
                 index: index_recovery,
             },
             index_dirty: false,
@@ -374,6 +385,11 @@ impl Store {
                 return Err(StoreError::InvalidOp(format!("op {}: blob {blob} sconosciuto", op.id)));
             }
         }
+        if let Some(intent) = &op.intent {
+            if self.intents.get(intent).is_none() {
+                return Err(StoreError::InvalidOp(format!("op {}: intent {intent} sconosciuto", op.id)));
+            }
+        }
         let bytes = codec::to_vec(op)?;
         // Il buffer dell'oplog arriva al file solo dentro `commit`, dopo che i
         // pack sono durevoli. Se accodare questa op chiuderebbe il segmento
@@ -440,6 +456,7 @@ impl Store {
             packs_end: self.packs.log().end(),
             tail,
             checkpoints_end: self.checkpoints.len(),
+            intents_end: self.intents.len(),
         })
     }
 
@@ -584,6 +601,25 @@ impl Store {
         self.checkpoints.next_id()
     }
 
+    // -------------------------------------------------------------- intent
+
+    /// Registra un intent in modo durevole: le op successive possono citarlo.
+    pub fn put_intent(&mut self, intent: &Intent) -> Result<()> {
+        self.check()?;
+        if !intent.verify_id() {
+            return Err(StoreError::InvalidOp(format!(
+                "l'ID {} non corrisponde al contenuto dell'intent",
+                intent.id
+            )));
+        }
+        let put = self.intents.put(intent);
+        self.guard(put)
+    }
+
+    pub fn intent(&self, id: &IntentId) -> Option<&Intent> {
+        self.intents.get(id)
+    }
+
     // ------------------------------------------------------- manutenzione
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -611,6 +647,7 @@ impl Store {
                 packs_end: self.packs.log().start(),
                 tail: None,
                 checkpoints_end: self.checkpoints.len(),
+                intents_end: self.intents.len(),
             };
             catch_up(&index, &self.oplog, &self.packs, start)?;
             Ok(index)
@@ -674,6 +711,11 @@ impl Store {
                     problems.push(format!("op {}: blob {blob} assente dai pack", op.id));
                 }
             }
+            if let Some(intent) = &op.intent {
+                if self.intents.get(intent).is_none() {
+                    problems.push(format!("op {}: intent {intent} assente", op.id));
+                }
+            }
             if !ops.insert(op.id) {
                 problems.push(format!("op {}: duplicata nel log a {pos:?}", op.id));
                 return Ok(());
@@ -733,10 +775,15 @@ fn reconcile_index(
     index: Index,
     oplog: &SegmentedLog,
     packs: &Packs,
-    checkpoints_end: u64,
+    (checkpoints_end, intents_end): (u64, u64),
 ) -> Result<(Index, IndexRecovery)> {
-    let start =
-        Watermark { oplog_end: oplog.start(), packs_end: packs.log().start(), tail: None, checkpoints_end };
+    let start = Watermark {
+        oplog_end: oplog.start(),
+        packs_end: packs.log().start(),
+        tail: None,
+        checkpoints_end,
+        intents_end,
+    };
     let logs_end = (oplog.end(), packs.log().end());
 
     let (from, stale) = match index.watermark()? {
@@ -747,7 +794,7 @@ fn reconcile_index(
             Some((pos, crc)) if !matches!(oplog.read_with(pos, |_, c| c), Ok(found) if found == crc) => {
                 (start, Some("l'ultima op indicizzata non è più nel log"))
             }
-            _ => (Watermark { checkpoints_end, ..wm }, None),
+            _ => (Watermark { checkpoints_end, intents_end, ..wm }, None),
         },
     };
 

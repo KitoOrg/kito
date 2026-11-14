@@ -147,7 +147,13 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
 
                     let time = gix::date::Time { seconds: (op.at.wall_ms / 1000) as i64, offset: 0 };
                     let name = ck.created_by.name.clone();
-                    let email = format!("{}@{}", email_local_part(&name), opts.email_domain);
+                    // L'email vera, se l'autore ne ha una: è ciò che GitHub usa per
+                    // attribuire il commit. Altrimenti un indirizzo segnaposto.
+                    let email = ck
+                        .created_by
+                        .email
+                        .clone()
+                        .unwrap_or_else(|| format!("{}@{}", email_local_part(&name), opts.email_domain));
                     let signature = gix::actor::Signature { name: name.into(), email: email.into(), time };
                     let commit = gix::objs::Commit {
                         tree: tree_id,

@@ -9,6 +9,7 @@
 //!   index/        indici ricostruibili (redb)
 //!   lanes/<id>/   stato delle lane (gestito da `kito-lane`)
 //!   checkpoints   log append-only dei checkpoint
+//!   intents       log append-only degli intent (il "perché" delle op)
 //!   lost+found/   code di log scartate dal recupero dopo un crash
 //! ```
 //!
@@ -25,6 +26,7 @@ mod checkpoints;
 mod error;
 pub mod fs;
 mod index;
+mod intents;
 mod logfile;
 #[allow(unsafe_code)]
 mod mmap;

@@ -97,15 +97,33 @@ pub enum AuthorKind {
 pub struct Author {
     pub kind: AuthorKind,
     pub name: String,
+    /// Indirizzo email, usato per attribuire i commit esportati su git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 impl Author {
     pub fn agent(name: impl Into<String>) -> Self {
-        Author { kind: AuthorKind::Agent, name: name.into() }
+        Author { kind: AuthorKind::Agent, name: name.into(), email: None }
     }
 
     pub fn human(name: impl Into<String>) -> Self {
-        Author { kind: AuthorKind::Human, name: name.into() }
+        Author { kind: AuthorKind::Human, name: name.into(), email: None }
+    }
+
+    pub fn with_email(mut self, email: impl Into<String>) -> Self {
+        self.email = Some(email.into());
+        self
+    }
+}
+
+impl std::fmt::Display for Author {
+    /// `Nome <email>` se l'email è nota, altrimenti solo il nome.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.email {
+            Some(email) => write!(f, "{} <{email}>", self.name),
+            None => f.write_str(&self.name),
+        }
     }
 }
 
@@ -347,6 +365,11 @@ impl Intent {
         let summary = summary.into();
         let bytes = codec::to_vec(&(&summary, &task, &prompt))?;
         Ok(Intent { id: IntentId(Hash::derive(INTENT_CONTEXT, &bytes)), summary, task, prompt })
+    }
+
+    /// `true` se l'ID registrato corrisponde al contenuto.
+    pub fn verify_id(&self) -> bool {
+        matches!(Intent::new(self.summary.clone(), self.task.clone(), self.prompt), Ok(i) if i.id == self.id)
     }
 }
 

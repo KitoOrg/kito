@@ -275,7 +275,7 @@ fn git_history_is_imported_as_ops_and_checkpoints() {
     let mut next = checkpoints.iter().peekable();
     for op in &ops {
         tree.apply(&op.kind).unwrap();
-        assert_eq!(op.author, Author::human("Ada"));
+        assert_eq!(op.author, Author::human("Ada").with_email("ada@example.com"));
         while let Some(ck) = next.next_if(|c| c.head == op.id) {
             let commit: String = ck.git_commit.unwrap().iter().map(|b| format!("{b:02x}")).collect();
             assert!(chain.contains(&commit));

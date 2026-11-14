@@ -300,3 +300,29 @@ fn append_commits_on_its_own_when_the_buffer_fills() {
     assert!(survived > 150 && survived < 200, "confermate dall'auto-commit: {survived}");
     assert_holds(&store, &ops[..survived as usize]);
 }
+
+#[test]
+fn intents_are_durable_and_ops_can_only_cite_known_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::init(tmp.path()).unwrap();
+    let intent = Intent::new("aggiungi cache sulle richieste utente", Some("task #55".into()), None).unwrap();
+    let kind = OpKind::FileRemove { path: "mai-esistito".into() };
+
+    // Un'op non può citare un intent che lo store non conosce.
+    let op = Op::new([], LaneId::MAIN, Author::agent("a"), Hlc::new(1, 0), kind, Some(intent.id)).unwrap();
+    assert!(matches!(store.append_op(&op), Err(StoreError::InvalidOp(m)) if m.contains("intent")));
+
+    store.put_intent(&intent).unwrap();
+    store.put_intent(&intent).unwrap(); // idempotente
+    assert!(store.append_op(&op).unwrap());
+    let mut forged = intent.clone();
+    forged.summary.push('!');
+    assert!(matches!(store.put_intent(&forged), Err(StoreError::InvalidOp(_))));
+    store.close().unwrap();
+
+    let store = Store::open(tmp.path()).unwrap();
+    assert_eq!(store.intent(&intent.id), Some(&intent));
+    assert_eq!(store.get_op(&op.id).unwrap().unwrap().intent, Some(intent.id));
+    assert!(store.verify().unwrap().is_ok());
+    assert!(tmp.path().join("intents").is_file());
+}

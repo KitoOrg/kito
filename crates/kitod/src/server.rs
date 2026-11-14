@@ -190,6 +190,25 @@ impl Daemon {
                         done.into_iter().map(|(c, g)| json!({ "checkpoint": c, "commit": g })).collect();
                     Ok(Value::Array(list))
                 }
+                "rollback" => {
+                    let to = params
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .ok_or((rpc::INVALID_PARAMS, "manca il parametro `to`".to_owned()))?;
+                    let paths: Vec<PathBuf> = params
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|list| list.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+                        .unwrap_or_default();
+                    let dry_run = params.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
+                    let done = self.with_repo(|repo| repo.rollback(to, &paths, dry_run)).map_err(internal)?;
+                    to_json(serde_json::to_value(done))
+                }
+                "reload" => {
+                    self.with_repo(|repo| repo.reload_config()).map_err(internal)?;
+                    let identity = self.with_repo(|repo| Ok(repo.identity().clone())).map_err(internal)?;
+                    to_json(serde_json::to_value(identity))
+                }
                 "shutdown" => {
                     self.shutdown.notify_one();
                     Ok(json!({}))

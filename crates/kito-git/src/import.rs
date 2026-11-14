@@ -71,7 +71,11 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
         let kinds = ops_for_changes(&tree, &snapshots, &mut |blob| store.get_blob(blob).ok().flatten());
 
         let signature = commit.author().map_err(git_err)?;
-        let author = Author::human(signature.name.to_string().trim().to_owned());
+        let mut author = Author::human(signature.name.to_string().trim().to_owned());
+        let email = signature.email.to_string();
+        if !email.trim().is_empty() {
+            author = author.with_email(email.trim());
+        }
         let seconds = commit.time().map_err(git_err)?.seconds.max(0) as u64;
         for kind in kinds {
             let op = Op::new(head_op, LaneId::MAIN, author.clone(), clock.tick(seconds * 1000), kind, None)?;
