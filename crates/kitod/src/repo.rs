@@ -7,9 +7,10 @@ use crate::config::{Config, CONFIG_FILE, DEFAULT_CONFIG};
 use crate::error::{Error, Result};
 use crate::identity::{self, Identity};
 use crate::ignore::IgnoreRules;
+use crate::semantic::{self, Why};
 use kito_core::{
     codec, Author, BlobId, Checkpoint, CheckpointId, FileMode, Hlc, HlcClock, Intent, IntentId, LaneId, Op,
-    OpId, OpKind, Tree, TreeEntry,
+    OpId, OpKind, SymbolTable, Tree, TreeEntry,
 };
 use kito_diff::fileops::{ops_for_changes, Snapshot};
 use kito_diff::text;
@@ -26,6 +27,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// second write in the same instant might not change its size and
 /// modification time, and would escape the scan.
 const RACY_WINDOW: Duration = Duration::from_millis(100);
+
+/// Layout version of the saved state of the main lane.
+const STATE_VERSION: u32 = 2;
 
 /// Size, modification time and permissions of a file at the last capture:
 /// if they have not changed, the scan does not reread it.
@@ -50,10 +54,19 @@ impl FileStat {
 /// be rebuilt by reapplying the ops.
 #[derive(Serialize, Deserialize)]
 struct SavedState {
-    /// Ops of the main lane already applied to `tree`.
+    /// Layout of this file: a state written by another version is ignored
+    /// and rebuilt from the log.
+    #[serde(default)]
+    version: u32,
+    /// Ops of the main lane already applied to `tree` and `symbols`.
     ops: u64,
     head: Option<OpId>,
     tree: Tree,
+    #[serde(default)]
+    symbols: SymbolTable,
+    /// See [`Repo::last_clean`].
+    #[serde(default)]
+    last_clean: Vec<(PathBuf, BlobId)>,
     stat: Vec<(PathBuf, FileStat)>,
     saved_ns: i64,
 }
@@ -77,6 +90,9 @@ pub struct Status {
     pub head: Option<String>,
     pub ops: u64,
     pub files: usize,
+    /// Symbols (functions, classes…) the history knows in those files.
+    #[serde(default)]
+    pub symbols: usize,
     pub checkpoints: usize,
     pub last_checkpoint: Option<String>,
     /// Checkpoints not yet exported to git.
@@ -152,6 +168,11 @@ pub struct Repo {
     author: Author,
     ignore: IgnoreRules,
     tree: Tree,
+    symbols: SymbolTable,
+    /// For files whose current content has syntax errors: the last content
+    /// that parsed, to compare the next clean save with. A hint, not state:
+    /// without it only the names of the symbols are compared.
+    last_clean: HashMap<PathBuf, BlobId>,
     head: Option<OpId>,
     /// Ops of the main lane.
     ops: u64,
@@ -168,10 +189,10 @@ fn now_ns() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
 }
 
-fn operations(n: u64) -> String {
+fn file_changes(n: usize) -> String {
     match n {
-        1 => "1 operation".to_owned(),
-        n => format!("{n} operations"),
+        1 => "1 file change".to_owned(),
+        n => format!("{n} file changes"),
     }
 }
 
@@ -204,6 +225,8 @@ impl Repo {
             author,
             ignore,
             tree: Tree::new(),
+            symbols: SymbolTable::new(),
+            last_clean: HashMap::new(),
             head: None,
             ops: 0,
             clock: HlcClock::new(),
@@ -274,8 +297,10 @@ impl Repo {
                     0 => saved.head.is_none(),
                     n => self.store.lane_ops(LaneId::MAIN, n - 1, 1)?.first().map(|op| op.id) == saved.head,
                 };
-            if matches_log {
+            if matches_log && saved.version == STATE_VERSION {
                 self.tree = saved.tree;
+                self.symbols = saved.symbols;
+                self.last_clean = saved.last_clean.into_iter().collect();
                 self.head = saved.head;
                 self.ops = saved.ops;
                 let racy_after = saved.saved_ns - RACY_WINDOW.as_nanos() as i64;
@@ -292,6 +317,7 @@ impl Repo {
                     self.stat.remove(path);
                 }
                 self.tree.apply(&op.kind)?;
+                self.symbols.apply(&op.kind)?;
                 self.head = Some(op.id);
                 self.ops += 1;
             }
@@ -302,9 +328,12 @@ impl Repo {
     /// Saves the state of the main lane for the next open.
     pub fn save_state(&self) -> Result<()> {
         let saved = SavedState {
+            version: STATE_VERSION,
             ops: self.ops,
             head: self.head,
             tree: self.tree.clone(),
+            symbols: self.symbols.clone(),
+            last_clean: self.last_clean.iter().map(|(p, b)| (p.clone(), *b)).collect(),
             stat: self.stat.iter().map(|(p, s)| (p.clone(), *s)).collect(),
             saved_ns: now_ns(),
         };
@@ -464,16 +493,21 @@ impl Repo {
 
         // 3. Ops, in an order that can be applied to the tree, chained to the head.
         let store = &self.store;
-        let kinds = ops_for_changes(&self.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
-        let mut ops = Vec::with_capacity(kinds.len());
-        for kind in kinds {
-            let op = Op::new(self.head, LaneId::MAIN, self.author.clone(), self.clock.now(), kind, intent)?;
-            self.tree.apply(&op.kind)?;
-            self.store.append_op(&op)?;
-            self.head = Some(op.id);
-            self.ops += 1;
-            ops.push(op);
+        let file_ops = ops_for_changes(&self.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
+        // The file-level ops carry the new contents; what the change means
+        // for the symbols follows.
+        let symbolic = semantic::symbol_ops(
+            &self.store,
+            &self.tree,
+            &self.symbols,
+            LaneId::MAIN,
+            &file_ops,
+            &mut self.last_clean,
+        )?;
+        for blob in &symbolic.blobs {
+            self.store.put_blob(blob)?;
         }
+        let ops = self.record(file_ops.into_iter().chain(symbolic.ops), intent)?;
         if !ops.is_empty() {
             self.store.commit()?;
             self.counters.captures += 1;
@@ -486,6 +520,56 @@ impl Repo {
             };
         }
         Ok(ops)
+    }
+
+    /// Appends ops to the main lane, chained to the head, and applies them
+    /// to the state. They are confirmed by the caller's commit.
+    fn record(
+        &mut self,
+        kinds: impl IntoIterator<Item = OpKind>,
+        intent: Option<IntentId>,
+    ) -> Result<Vec<Op>> {
+        let mut ops = Vec::new();
+        for kind in kinds {
+            let op = Op::new(self.head, LaneId::MAIN, self.author.clone(), self.clock.now(), kind, intent)?;
+            self.tree.apply(&op.kind)?;
+            self.symbols.apply(&op.kind)?;
+            self.store.append_op(&op)?;
+            self.head = Some(op.id);
+            self.ops += 1;
+            ops.push(op);
+        }
+        Ok(ops)
+    }
+
+    /// Analyzes the files the history knows only as text (imported from git,
+    /// or captured before symbols existed) and records their symbols. Does
+    /// nothing once every parseable file has been analyzed.
+    pub fn analyze(&mut self) -> Result<usize> {
+        let found = semantic::analyze_unindexed(&self.store, &self.tree, &self.symbols, LaneId::MAIN)?;
+        if found.ops.is_empty() {
+            return Ok(0);
+        }
+        for blob in &found.blobs {
+            self.store.put_blob(blob)?;
+        }
+        let intent = Intent::new("first analysis of the symbols", None, None)?;
+        self.store.put_intent(&intent)?;
+        let ops = self.record(found.ops, Some(intent.id))?;
+        self.store.commit()?;
+        self.counters.ops += ops.len() as u64;
+        Ok(ops.len())
+    }
+
+    /// The symbols the history knows.
+    pub fn symbols(&self) -> &SymbolTable {
+        &self.symbols
+    }
+
+    /// The history of the symbol called `name` in `file`, across renames
+    /// and moves.
+    pub fn why(&self, file: &Path, name: &str) -> Result<Vec<Why>> {
+        semantic::why(&self.store, &self.symbols, file, name)
     }
 
     /// Creates a checkpoint on the current state of the working directory
@@ -532,10 +616,13 @@ impl Repo {
     pub fn import_git(&mut self) -> Result<kito_git::Imported> {
         let report = kito_git::import(&mut self.store, &self.root, &mut self.clock)?;
         self.tree = Tree::new();
+        self.symbols = SymbolTable::new();
         self.head = None;
         self.ops = 0;
         self.stat.clear();
         self.load_state()?;
+        // The imported history is text; the state it ends in gets the full analysis.
+        self.analyze()?;
         self.save_state()?;
         Ok(report)
     }
@@ -571,6 +658,7 @@ impl Repo {
             head: self.head.map(|h| h.to_string()),
             ops: self.ops,
             files: self.tree.len(),
+            symbols: self.symbols.len(),
             checkpoints: checkpoints.len(),
             last_checkpoint: last.map(|c| c.id.to_string()),
             unexported: checkpoints.iter().filter(|c| c.git_commit.is_none()).count(),
@@ -641,7 +729,29 @@ impl Repo {
                     (Some(display(file)), None, Some(text::stat(&old, edits)))
                 }
             }
-            other => (None, other.symbol().map(|s| format!("symbol {s}")), None),
+            other => {
+                // Symbolic ops: the file the symbol is in now (or was last),
+                // and what happened to it.
+                let id = other.symbol();
+                let file = match other {
+                    OpKind::AddSymbol { sym, .. } => Some(sym.file.clone()),
+                    OpKind::Move { to, .. } => Some(to.file.clone()),
+                    _ => id.and_then(|id| self.symbols.get(id)).map(|entry| entry.file.clone()),
+                };
+                let name = id.and_then(|id| {
+                    self.symbols.qualified_name(id).or_else(|| semantic::last_known_name(&self.store, id))
+                });
+                let what = semantic::describe_symbol_op(&self.store, other);
+                let detail = match (name, what) {
+                    (Some(name), Some(what))
+                        if !matches!(other, OpKind::AddSymbol { .. } | OpKind::Rename { .. }) =>
+                    {
+                        Some(format!("`{name}` {what}"))
+                    }
+                    (_, what) => what,
+                };
+                (file.as_deref().map(display), detail, None)
+            }
         };
         LogItem::Op {
             id: op.id.to_string(),
@@ -687,12 +797,18 @@ impl Repo {
         let spec = spec.trim();
         let invalid = |why: &str| Error::Other(format!("{spec:?}: {why}"));
         if let Some(back) = spec.strip_prefix('~') {
-            let back: u64 =
-                back.parse().map_err(|_| invalid("~ must be followed by a number of operations"))?;
-            if back > self.ops {
-                return Err(invalid(&format!("the history has only {}", operations(self.ops))));
+            let back: usize =
+                back.parse().map_err(|_| invalid("~ must be followed by a number of file changes"))?;
+            if back == 0 {
+                return Ok((self.ops, "the current state".to_owned()));
             }
-            return Ok((self.ops - back, format!("{} ago", operations(back))));
+            // What counts are the ops that change a file: the symbolic ops
+            // that follow them only say what the change meant.
+            let file_ops = self.positions_of(|op| !op.kind.paths().is_empty())?;
+            let Some((index, _)) = file_ops.get(back - 1) else {
+                return Err(invalid(&format!("the history has only {}", file_changes(file_ops.len()))));
+            };
+            return Ok((*index, format!("{} ago", file_changes(back))));
         }
         let number = spec.strip_prefix("ckpt#").or_else(|| spec.strip_prefix('#')).unwrap_or(spec);
         let looks_like_checkpoint = number.len() != spec.len() || number.len() < 6;

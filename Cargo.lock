@@ -1538,6 +1538,7 @@ dependencies = [
  "kito-core",
  "kito-diff",
  "kito-git",
+ "kito-parse",
  "kito-store",
  "notify",
  "serde",

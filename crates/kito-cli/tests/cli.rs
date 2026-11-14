@@ -79,9 +79,9 @@ fn work_without_committing_then_checkpoint() {
     // save. `sync` is the barrier that waits for the recording.
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
     fs::create_dir(root.join("src")).unwrap();
-    fs::write(root.join("src/app.ts"), "export const a = 1;\n").unwrap();
+    fs::write(root.join("src/app.txt"), "export const a = 1;\n").unwrap();
     assert!(ok(root, &["sync"]).contains("Everything is recorded"));
-    fs::write(root.join("src/app.ts"), "export const a = 1;\nexport const b = 2;\n").unwrap();
+    fs::write(root.join("src/app.txt"), "export const a = 1;\nexport const b = 2;\n").unwrap();
     ok(root, &["sync"]);
 
     let status = json(root, &["status", "--json"]);
@@ -93,7 +93,7 @@ fn work_without_committing_then_checkpoint() {
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 3, "{log}");
     assert!(
-        lines[0].contains("TextEdit") && lines[0].contains("src/app.ts") && lines[0].contains("+1 −0"),
+        lines[0].contains("TextEdit") && lines[0].contains("src/app.txt") && lines[0].contains("+1 −0"),
         "{log}"
     );
     assert!(
@@ -102,7 +102,7 @@ fn work_without_committing_then_checkpoint() {
     );
 
     // The log of one file, given as seen from a subdirectory.
-    let only = ok(&root.join("src"), &["log", "app.ts"]);
+    let only = ok(&root.join("src"), &["log", "app.txt"]);
     assert_eq!(only.lines().count(), 2, "{only}");
     let items = json(root, &["log", "--json", "-n", "1"]);
     assert_eq!(items.as_array().unwrap().len(), 1);
@@ -132,10 +132,10 @@ fn import_a_git_repository() {
     let root = tmp.path();
     git(root, &["init", "-q", "-b", "main"]);
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
-    fs::write(root.join("main.go"), "package main\n").unwrap();
+    fs::write(root.join("main.txt"), "package main\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "first commit"]);
-    fs::write(root.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+    fs::write(root.join("main.txt"), "package main\n\nfunc main() {}\n").unwrap();
     git(root, &["commit", "-q", "-am", "second commit"]);
     fs::write(root.join("uncommitted.txt"), "x\n").unwrap();
 

@@ -11,6 +11,8 @@ pub enum Error {
     #[error(transparent)]
     Tree(#[from] kito_core::TreeError),
     #[error(transparent)]
+    Symbol(#[from] kito_core::SymbolError),
+    #[error(transparent)]
     Codec(#[from] kito_core::CodecError),
     #[error(transparent)]
     Git(#[from] kito_git::GitError),

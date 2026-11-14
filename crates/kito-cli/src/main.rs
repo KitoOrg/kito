@@ -9,6 +9,7 @@ use kitod::client::{find_root, Client, ClientError};
 use kitod::identity::{self, Identity};
 use kitod::repo::{CheckpointResult, LogItem, RollbackResult};
 use kitod::rpc::DaemonStatus;
+use kitod::semantic::Why;
 use kitod::Repo;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -65,7 +66,7 @@ enum Cmd {
         to: Option<String>,
         /// Only these files or directories (default: everything)
         paths: Vec<PathBuf>,
-        /// Go back to before the last N operations
+        /// Go back to before the last N file changes (the lines of `kito log` that have an ID)
         #[arg(long, value_name = "N", conflicts_with = "to")]
         ops: Option<u64>,
         /// Show what would change, without touching anything
@@ -88,6 +89,11 @@ enum Cmd {
         /// Apply to all your repositories (personal configuration)
         #[arg(long)]
         global: bool,
+    },
+    /// Show the history of a symbol, across renames and moves
+    Why {
+        /// <file>:<symbol>, for example src/auth.ts:getUser or src/auth.ts:Session.refresh
+        target: String,
     },
     /// Wait until every save has been recorded
     Sync,
@@ -227,6 +233,42 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
     Ok(())
 }
 
+fn cmd_why(cli: &Cli, target: &str) -> Outcome {
+    let root = root_of(cli)?;
+    // The file comes first; a symbol may itself contain colons (`Foo::bar`).
+    let Some((file, symbol)) = target.split_once(':').filter(|(f, s)| !f.is_empty() && !s.is_empty()) else {
+        return Err("say which symbol: <file>:<symbol>, for example src/auth.ts:getUser".to_owned());
+    };
+    let file = repo_relative(&root, Path::new(file))?;
+    let mut client = daemon(cli)?;
+    client.call_value("sync", json!({})).map_err(fail)?;
+    let histories: Vec<Why> = client.call("why", json!({ "file": file, "symbol": symbol })).map_err(fail)?;
+    if cli.json {
+        print_json(&histories);
+        return Ok(());
+    }
+    for (i, why) in histories.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("{} {}  ({})  symbol {}", why.kind, why.name, why.file, why.id);
+        for step in &why.steps {
+            let mut line = format!("  {}  {:<10} {}", utc(step.at_ms), step.author, step.what);
+            if let Some(intent) = &step.intent {
+                line.push_str(&format!("  [{intent}]"));
+            }
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// Ops that say what a change meant for a symbol, as opposed to the ones
+/// that change a file.
+fn is_symbolic(op: &str) -> bool {
+    matches!(op, "AddSymbol" | "RemoveSymbol" | "ModifyBody" | "ModifySignature" | "Rename" | "Move")
+}
+
 fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     let root = root_of(cli)?;
     let rel = path.as_ref().map(|p| repo_relative(&root, p)).transpose()?;
@@ -242,15 +284,28 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     if items.is_empty() {
         println!("No operations recorded.");
     }
+    let mut pending: Vec<String> = Vec::new();
     for item in items {
         match item {
             LogItem::Checkpoint { id, label, git_commit, .. } => {
                 let git = git_commit.map(|c| format!("  (git {})", &c[..10])).unwrap_or_default();
+                pending.drain(..).rev().for_each(|sub| println!("{sub}"));
                 println!("◆ {id}  {label}{git}");
             }
             LogItem::Op {
                 id, at_ms, author, op, path, detail, lines_added, lines_removed, intent, ..
             } => {
+                // What a change meant for the symbols is shown under the
+                // file change it belongs to, which (going back in time)
+                // comes next.
+                if is_symbolic(&op) {
+                    let mut line = format!("      ↳ {}", detail.unwrap_or(op));
+                    if let Some(path) = path.filter(|p| !line.contains(p.as_str())) {
+                        line.push_str(&format!("  ({path})"));
+                    }
+                    pending.push(line);
+                    continue;
+                }
                 // The first digits of the ID are enough to point `kito rollback` at the op.
                 let short = &id[..id.len().min(8)];
                 let mut line =
@@ -265,9 +320,11 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
                     line.push_str(&format!("  [{intent}]"));
                 }
                 println!("{line}");
+                pending.drain(..).rev().for_each(|sub| println!("{sub}"));
             }
         }
     }
+    pending.drain(..).rev().for_each(|sub| println!("{sub}"));
     Ok(())
 }
 
@@ -436,6 +493,7 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
     println!("Repository ........ {}", repo.root.display());
     println!("Author ............ {}", repo.author);
     println!("Tracked files ..... {}", repo.files);
+    println!("Symbols ........... {}", repo.symbols);
     println!("Operations ........ {} ({} since the last checkpoint)", repo.ops, repo.ops_since_checkpoint);
     println!(
         "Checkpoints ....... {}{}",
@@ -570,6 +628,7 @@ fn main() -> ExitCode {
             };
             cmd_identity(&cli, name, email, kind, *global)
         }
+        Cmd::Why { target } => cmd_why(&cli, target),
         Cmd::Sync => cmd_sync(&cli),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

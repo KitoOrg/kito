@@ -60,7 +60,7 @@ fn saves_are_captured_without_asking() {
     fs::write(root.join("a.txt"), "one\n").unwrap();
     wait_until("the capture of a.txt", || status(&mut client).repo.ops == 1);
     fs::create_dir_all(root.join("src/deep")).unwrap();
-    fs::write(root.join("src/deep/b.rs"), "fn b() {}\n").unwrap();
+    fs::write(root.join("src/deep/b.txt"), "fn b() {}\n").unwrap();
     wait_until("the capture in a new directory", || status(&mut client).repo.ops == 2);
     fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
     wait_until("the capture of the edit", || status(&mut client).repo.ops == 3);
@@ -70,10 +70,10 @@ fn saves_are_captured_without_asking() {
     wait_until("the capture of the removal", || status(&mut client).repo.ops == 5);
 
     let expected = [
-        ("FileRemove", "src/deep/b.rs"),
+        ("FileRemove", "src/deep/b.txt"),
         ("FileRename", "c.txt"),
         ("TextEdit", "a.txt"),
-        ("FileAdd", "src/deep/b.rs"),
+        ("FileAdd", "src/deep/b.txt"),
         ("FileAdd", "a.txt"),
     ];
     let got = ops(&mut client);

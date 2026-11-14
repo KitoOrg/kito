@@ -11,6 +11,7 @@ pub mod identity;
 pub mod ignore;
 pub mod repo;
 pub mod rpc;
+pub mod semantic;
 pub mod server;
 
 pub use error::{Error, Result};

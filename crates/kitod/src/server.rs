@@ -209,6 +209,17 @@ impl Daemon {
                     let identity = self.with_repo(|repo| Ok(repo.identity().clone())).map_err(internal)?;
                     to_json(serde_json::to_value(identity))
                 }
+                "why" => {
+                    let text = |key: &str| {
+                        params
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
+                    };
+                    let (file, symbol) = (PathBuf::from(text("file")?), text("symbol")?);
+                    let found = self.with_repo(|repo| repo.why(&file, symbol)).map_err(internal)?;
+                    to_json(serde_json::to_value(found))
+                }
                 "shutdown" => {
                     self.shutdown.notify_one();
                     Ok(json!({}))
@@ -402,6 +413,8 @@ pub async fn serve(root: &Path) -> Result<()> {
     };
 
     repo.scan()?;
+    // Files known only as text (imported, or captured by an older version) get their symbols now.
+    repo.analyze()?;
 
     let socket = rpc::socket_path(&root);
     let _ = std::fs::remove_file(&socket);

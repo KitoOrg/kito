@@ -184,13 +184,9 @@ impl SymbolTable {
                     self.by_file.entry(to.clone()).or_default().extend(ids);
                 }
             }
-            // Whatever is still registered in a removed file dies with it.
-            OpKind::FileRemove { path } => {
-                for id in self.by_file.remove(path).unwrap_or_default() {
-                    self.symbols.remove(&id);
-                }
-            }
-            OpKind::FileAdd { .. } | OpKind::TextEdit { .. } => {}
+            // Removing a file says nothing about its symbols: each of them is
+            // removed, or moved elsewhere, by an op of its own.
+            OpKind::FileRemove { .. } | OpKind::FileAdd { .. } | OpKind::TextEdit { .. } => {}
         }
         Ok(())
     }
@@ -253,12 +249,16 @@ mod tests {
         );
         assert_eq!(t.in_file(Path::new("b.ts")).count(), 0);
 
-        // A renamed file takes its symbols along; a removed one takes them away.
+        // A renamed file takes its symbols along.
         t.apply(&OpKind::FileRename { from: "a.ts".into(), to: "src/c.ts".into() }).unwrap();
         assert_eq!(t.get(id(0)).unwrap().file, PathBuf::from("src/c.ts"));
         t.apply(&OpKind::RemoveSymbol { id: id(2) }).unwrap();
         assert_eq!(t.len(), 2);
+        // Removing the file does not remove them: that takes their own ops.
         t.apply(&OpKind::FileRemove { path: "src/c.ts".into() }).unwrap();
+        assert_eq!(t.len(), 2);
+        t.apply(&OpKind::RemoveSymbol { id: id(1) }).unwrap();
+        t.apply(&OpKind::RemoveSymbol { id: id(0) }).unwrap();
         assert!(t.is_empty());
         // IDs are never reused.
         assert_eq!(t.next_seq(LaneId(3)), 3);

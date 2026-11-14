@@ -81,7 +81,7 @@ fn every_kind_of_change_on_disk_becomes_the_right_op() {
     let mut repo = Repo::init(root).unwrap();
     assert!(repo.scan().unwrap().is_empty(), "empty directory: no ops");
 
-    write(root, "src/main.rs", "fn main() {\n    println!(\"one\");\n}\n");
+    write(root, "src/main.txt", "fn main() {\n    println!(\"one\");\n}\n");
     write(root, "README.md", "# title\n");
     write(root, "data.bin", "\0\u{1}\u{2}");
     let ops = repo.scan().unwrap();
@@ -89,11 +89,11 @@ fn every_kind_of_change_on_disk_becomes_the_right_op() {
     assert_eq!(kito_state(&repo), disk(root));
 
     // Edit: a TextEdit with line-based edits.
-    write(root, "src/main.rs", "fn main() {\n    println!(\"two\");\n}\n");
+    write(root, "src/main.txt", "fn main() {\n    println!(\"two\");\n}\n");
     let ops = repo.scan().unwrap();
     match &ops[..] {
         [Op { kind: OpKind::TextEdit { file, edits, .. }, .. }] => {
-            assert_eq!(file, Path::new("src/main.rs"));
+            assert_eq!(file, Path::new("src/main.txt"));
             assert_eq!(edits, &vec![TextEdit::new(12, 33, "    println!(\"two\");\n")]);
         }
         other => panic!("{other:?}"),
@@ -108,9 +108,11 @@ fn every_kind_of_change_on_disk_becomes_the_right_op() {
     fs::rename(root.join("src"), root.join("sources")).unwrap();
     let ops = repo.scan().unwrap();
     assert_eq!(kinds(&ops), ["FileRename", "FileRename"]);
-    assert!(ops
-        .iter()
-        .any(|o| o.kind == OpKind::FileRename { from: "src/main.rs".into(), to: "sources/main.rs".into() }));
+    assert!(
+        ops.iter()
+            .any(|o| o.kind
+                == OpKind::FileRename { from: "src/main.txt".into(), to: "sources/main.txt".into() })
+    );
 
     // Permissions and links.
     fs::set_permissions(root.join("GUIDE.md"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -178,11 +180,11 @@ fn ignored_paths_are_not_captured() {
     write(root, "target/debug/app", "binary");
     write(root, "debug.log", "noise\n");
     write(root, ".git/HEAD", "ref: refs/heads/main\n");
-    write(root, "src/lib.rs", "pub fn f() {}\n");
+    write(root, "src/lib.txt", "pub fn f() {}\n");
 
     let ops = repo.scan().unwrap();
     let paths: Vec<String> = repo.tree().iter().map(|(p, _)| p.display().to_string()).collect();
-    assert_eq!(paths, [".gitignore", "src/lib.rs"]);
+    assert_eq!(paths, [".gitignore", "src/lib.txt"]);
     assert_eq!(ops.len(), 2);
     // The same holds for the watcher events.
     assert!(repo
@@ -264,15 +266,15 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
     assert!(matches!(repo.checkpoint("empty"), Err(kitod::Error::NothingToCheckpoint)));
 
     write(root, ".gitignore", ".kito/\n");
-    write(root, "src/app.ts", "export const a = 1;\n");
+    write(root, "src/app.txt", "export const a = 1;\n");
     // The checkpoint captures by itself what is on disk: no explicit scan.
     let first = repo.checkpoint("initial structure").unwrap();
     assert_eq!(first.id, "ckpt#1");
     assert!(first.git_error.is_none(), "{:?}", first.git_error);
 
-    write(root, "src/app.ts", "export const a = 1;\nexport const b = 2;\n");
+    write(root, "src/app.txt", "export const a = 1;\nexport const b = 2;\n");
     repo.scan().unwrap();
-    write(root, "src/util.ts", "export function id<T>(x: T) { return x; }\n");
+    write(root, "src/util.txt", "export function id<T>(x: T) { return x; }\n");
     let second = repo.checkpoint("adds b and util").unwrap();
 
     // git sees the checkpoints as commits, and the working directory is clean.
@@ -297,10 +299,10 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
         shape,
         [
             "ckpt#2 adds b and util",
-            "FileAdd src/util.ts",
-            "TextEdit src/app.ts",
+            "FileAdd src/util.txt",
+            "TextEdit src/app.txt",
             "ckpt#1 initial structure",
-            "FileAdd src/app.ts",
+            "FileAdd src/app.txt",
             "FileAdd .gitignore",
         ]
     );
@@ -311,7 +313,7 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
         other => panic!("{other:?}"),
     }
     // Filter by file, and limit.
-    let only: Vec<_> = repo.log(50, Some(Path::new("src/app.ts"))).unwrap();
+    let only: Vec<_> = repo.log(50, Some(Path::new("src/app.txt"))).unwrap();
     assert_eq!(only.iter().filter(|i| matches!(i, LogItem::Op { .. })).count(), 2);
     assert_eq!(repo.log(1, None).unwrap().iter().filter(|i| matches!(i, LogItem::Op { .. })).count(), 1);
 
@@ -320,7 +322,7 @@ fn checkpoints_show_up_in_git_log_and_in_kito_log() {
         (status.ops, status.files, status.checkpoints, status.unexported, status.ops_since_checkpoint),
         (4, 3, 2, 0, 0)
     );
-    write(root, "src/app.ts", "export const a = 3;\n");
+    write(root, "src/app.txt", "export const a = 3;\n");
     repo.scan().unwrap();
     assert_eq!(repo.status().unwrap().ops_since_checkpoint, 1);
 }
@@ -332,14 +334,14 @@ fn a_git_repository_is_imported_and_then_continued() {
     let root = tmp.path();
     git(root, &["init", "-q", "-b", "main"]);
     write(root, ".gitignore", ".kito/\n");
-    write(root, "lib.py", "def f():\n    return 1\n");
+    write(root, "lib.txt", "def f():\n    return 1\n");
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "first"]);
-    write(root, "lib.py", "def f():\n    return 2\n");
+    write(root, "lib.txt", "def f():\n    return 2\n");
     git(root, &["commit", "-q", "-am", "second"]);
     let head = git(root, &["rev-parse", "HEAD"]).trim().to_owned();
     // A change not yet in git.
-    write(root, "lib.py", "def f():\n    return 3\n");
+    write(root, "lib.txt", "def f():\n    return 3\n");
 
     let mut repo = Repo::init(root).unwrap();
     let report = repo.import_git().unwrap();
@@ -543,4 +545,210 @@ fn rollback_of_selected_paths_and_its_refusals() {
     let err = repo.rollback("ckpt#1", &["a.txt".into()], false).unwrap_err().to_string();
     assert!(err.contains("is not tracked"), "{err}");
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "content never recorded\n");
+}
+
+const AUTH_TS: &str = r#"import { db } from "./db";
+
+export function getUser(id: string): User {
+  const cached = cache.get(id);
+  if (cached) {
+    return cached;
+  }
+  const user = db.find(id);
+  cache.set(id, user);
+  return user;
+}
+
+export class Session {
+  constructor(private user: User) {}
+
+  isValid(now: number): boolean {
+    return this.user.expires > now && !this.user.revoked;
+  }
+}
+"#;
+
+/// The steps of a symbol's history, in words.
+fn story(repo: &Repo, file: &str, name: &str) -> Vec<String> {
+    let histories = repo.why(Path::new(file), name).unwrap();
+    assert_eq!(histories.len(), 1, "{name} in {file}");
+    histories[0].steps.iter().map(|s| s.what.clone()).collect()
+}
+
+#[test]
+fn a_function_is_followed_through_a_rename_and_a_move() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+
+    write(root, "src/auth.ts", AUTH_TS);
+    let ops = repo.scan().unwrap();
+    assert_eq!(kinds(&ops), ["FileAdd", "AddSymbol", "AddSymbol", "AddSymbol", "AddSymbol"]);
+    let id = repo.symbols().find(Path::new("src/auth.ts"), "getUser")[0];
+
+    // A reformat changes the file but means nothing for its symbols.
+    write(
+        root,
+        "src/auth.ts",
+        &AUTH_TS.replace(
+            "  const cached = cache.get(id);",
+            "  // look in the cache first\n  const cached =\n    cache.get(id);",
+        ),
+    );
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit"]);
+    write(root, "src/auth.ts", AUTH_TS);
+    repo.scan().unwrap();
+
+    // 1. Rename the function.
+    let renamed = AUTH_TS.replace("getUser", "fetchUser");
+    write(root, "src/auth.ts", &renamed);
+    let ops = repo.scan().unwrap();
+    assert_eq!(kinds(&ops), ["TextEdit", "Rename"]);
+    assert!(
+        matches!(&ops[1].kind, OpKind::Rename { id: i, from, to } if *i == id && from == "getUser" && to == "fetchUser")
+    );
+
+    // 2. Move it to another file.
+    let start = renamed.find("export function fetchUser").unwrap();
+    let end = renamed.find("export class Session").unwrap();
+    write(root, "src/auth.ts", &format!("{}{}", &renamed[..start], &renamed[end..]));
+    write(root, "src/users.ts", &renamed[start..end]);
+    let ops = repo.scan().unwrap();
+    assert_eq!(kinds(&ops), ["FileAdd", "TextEdit", "Move"]);
+
+    // 3. Change its body there.
+    let moved = fs::read_to_string(root.join("src/users.ts")).unwrap();
+    write(root, "src/users.ts", &moved.replace("cache.set(id, user);", "cache.set(id, user, TTL);"));
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit", "ModifyBody"]);
+
+    // `kito why` follows the whole story from the name it has today.
+    assert_eq!(repo.symbols().find(Path::new("src/users.ts"), "fetchUser"), [id]);
+    assert_eq!(
+        story(&repo, "src/users.ts", "fetchUser"),
+        [
+            "function `getUser` created in src/auth.ts",
+            "renamed `getUser` → `fetchUser`",
+            "moved from src/auth.ts to src/users.ts",
+            "body changed (+1 −1)",
+        ]
+    );
+    // The method that never moved has a short one, and is found by its qualified name.
+    assert_eq!(story(&repo, "src/auth.ts", "Session.isValid"), ["method `isValid` created in src/auth.ts"]);
+    let missing = repo.why(Path::new("src/auth.ts"), "fetchUser").unwrap_err().to_string();
+    assert!(
+        missing.contains("no symbol named `fetchUser`") && missing.contains("Session.isValid"),
+        "{missing}"
+    );
+
+    // The state survives a restart, from the saved file and from the log alone.
+    let (symbols, status) = (repo.symbols().clone(), repo.status().unwrap());
+    assert_eq!(status.symbols, 4);
+    repo.close().unwrap();
+    let repo = Repo::open(root).unwrap();
+    assert_eq!(repo.symbols(), &symbols);
+    repo.close().unwrap();
+    fs::remove_file(root.join(".kito/lanes/main/state")).unwrap();
+    let mut repo = Repo::open(root).unwrap();
+    assert_eq!(repo.symbols(), &symbols);
+    assert!(repo.scan().unwrap().is_empty());
+    assert!(repo.store().verify().unwrap().is_ok());
+
+    // The log tells the same story, newest first.
+    let items = repo.log(3, None).unwrap();
+    let details: Vec<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            LogItem::Op { op, detail, .. } => Some(format!("{op}: {}", detail.clone().unwrap_or_default())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        details,
+        [
+            "ModifyBody: `fetchUser` body changed (+1 −1)",
+            "TextEdit: ",
+            "Move: `fetchUser` moved from src/auth.ts to src/users.ts"
+        ]
+    );
+}
+
+#[test]
+fn half_written_code_does_not_disturb_the_symbols() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    write(root, "src/auth.ts", AUTH_TS);
+    repo.scan().unwrap();
+    let before = repo.symbols().clone();
+
+    // Saved in the middle of typing: the file is recorded, the symbols wait.
+    let broken = AUTH_TS
+        .replace("export class Session {", "export class Session { isValid(now: number): boolean { return (");
+    write(root, "src/auth.ts", &broken);
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit"]);
+    assert_eq!(repo.symbols(), &before);
+
+    // Once it parses again, the comparison picks up where it left off: one
+    // rename, nothing removed, nothing invented.
+    write(root, "src/auth.ts", &AUTH_TS.replace("isValid", "stillValid"));
+    let id = before.find(Path::new("src/auth.ts"), "Session.isValid")[0];
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit", "Rename"]);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "Session.stillValid"), [id]);
+}
+
+#[test]
+fn rollback_and_git_keep_working_with_symbols() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    write(root, ".gitignore", ".kito/\n");
+    write(root, "src/auth.ts", AUTH_TS);
+    repo.checkpoint("one").unwrap();
+    let id = repo.symbols().find(Path::new("src/auth.ts"), "getUser")[0];
+
+    write(root, "src/auth.ts", &AUTH_TS.replace("getUser", "fetchUser"));
+    repo.checkpoint("renamed").unwrap();
+    assert_eq!(git(root, &["log", "--format=%s"]).lines().collect::<Vec<_>>(), ["renamed", "one"]);
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+    // Rolling the rename back is itself a rename: the symbol is the same one.
+    let done = repo.rollback("ckpt#1", &[], false).unwrap();
+    assert!(done.applied);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "getUser"), [id]);
+    assert_eq!(
+        story(&repo, "src/auth.ts", "getUser"),
+        [
+            "function `getUser` created in src/auth.ts",
+            "renamed `getUser` → `fetchUser`",
+            "renamed `fetchUser` → `getUser`"
+        ]
+    );
+    // `~1` counts file changes, not the symbolic ops that follow them.
+    let back = repo.rollback("~1", &[], false).unwrap();
+    assert!(back.applied);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "fetchUser"), [id]);
+}
+
+#[test]
+fn an_imported_repository_gets_its_symbols_analyzed() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    write(root, ".gitignore", ".kito/\n");
+    write(root, "server.go", "package demo\n\ntype Server struct {\n\tport int\n}\n\nfunc (s *Server) Start() error {\n\treturn listen(s.port)\n}\n");
+    write(root, "notes.md", "# notes\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "first"]);
+
+    let mut repo = Repo::init(root).unwrap();
+    repo.import_git().unwrap();
+    // History is imported as text; the state it ends in is analyzed in full.
+    assert_eq!(repo.status().unwrap().symbols, 2);
+    assert_eq!(story(&repo, "server.go", "Server.Start"), ["method `Server.Start` created in server.go"]);
+    assert_eq!(repo.analyze().unwrap(), 0, "nothing left to analyze");
+    assert!(repo.scan().unwrap().is_empty());
 }

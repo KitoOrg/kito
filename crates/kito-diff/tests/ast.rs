@@ -85,8 +85,8 @@ impl World {
                 None => self.files.remove(Path::new(path)),
             };
         }
-        // File-level ops would follow the symbolic ones: a removed file takes
-        // along whatever the differ did not move elsewhere.
+        // The file-level ops of the batch do not touch the symbols: whatever
+        // lived in a removed file was removed or moved by the differ.
         for (path, content) in changes {
             if content.is_none() {
                 self.table.apply(&OpKind::FileRemove { path: path.into() }).unwrap();
