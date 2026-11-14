@@ -1,4 +1,4 @@
-//! Lo store: pack dei blob, oplog, checkpoint e indici, con un solo scrittore.
+//! The store: blob packs, oplog, checkpoints and indexes, with a single writer.
 
 use crate::checkpoints::CheckpointLog;
 use crate::error::{IoContext, Result, StoreError};
@@ -16,38 +16,38 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Nome convenzionale della cartella dello store dentro un repository.
+/// Conventional name of the store directory inside a repository.
 pub const STORE_DIR: &str = ".kito";
 
 const FORMAT_FILE: &str = "format";
 const FORMAT: &str = "kito-store 1\n";
 const LOCK_FILE: &str = "lock";
 const LOST_FOUND: &str = "lost+found";
-/// Record per transazione quando l'indice viene portato in pari o ricostruito.
+/// Records per transaction when the index is caught up or rebuilt.
 const INDEX_BATCH: usize = 20_000;
 
-/// Parametri dello store. I default sono quelli della specifica.
+/// Parameters of the store. The defaults are those of the specification.
 #[derive(Clone, Debug)]
 pub struct StoreOptions {
-    /// Dimensione dei segmenti dell'oplog (default 64 MiB).
+    /// Size of the oplog segments (default 64 MiB).
     pub segment_size: u64,
-    /// Dimensione dei pack dei blob (default 64 MiB).
+    /// Size of the blob packs (default 64 MiB).
     pub pack_size: u64,
-    /// Livello di compressione zstd dei blob.
+    /// zstd compression level of the blobs.
     pub zstd_level: i32,
-    /// Byte di op non confermate oltre i quali `append_op` fa un commit da sé.
+    /// Bytes of unconfirmed ops beyond which `append_op` commits on its own.
     pub max_buffered: usize,
-    /// Ogni quanto l'indice viene reso durevole. Tra un fsync e l'altro i
-    /// commit dell'indice restano in memoria: dopo un crash si recuperano
-    /// rileggendo la coda dei log.
+    /// How often the index is made durable. Between one fsync and the next
+    /// the commits of the index stay in memory: after a crash they are
+    /// recovered by rereading the tail of the logs.
     pub index_sync_interval: Duration,
-    /// Modalità riparazione. Normalmente l'apertura si rifiuta di scartare
-    /// dati che risultavano già confermati (file troncati o danneggiati
-    /// dall'esterno) e restituisce [`StoreError::Corrupt`]. Con `repair` li
-    /// scarta comunque, conserva ciò che precede il danno e ricostruisce gli
-    /// indici: è una perdita di dati accettata esplicitamente.
+    /// Repair mode. Normally opening refuses to discard data that was
+    /// recorded as already confirmed (files truncated or damaged from
+    /// outside) and returns [`StoreError::Corrupt`]. With `repair` it
+    /// discards that data anyway, keeps what precedes the damage and
+    /// rebuilds the indexes: it is a data loss that is accepted explicitly.
     pub repair: bool,
-    /// File system usato per le scritture (sostituibile nei test).
+    /// File system used for the writes (replaceable in tests).
     pub fs: Arc<dyn FileSystem>,
 }
 
@@ -72,7 +72,7 @@ impl StoreOptions {
         for (name, size) in [("segment_size", self.segment_size), ("pack_size", self.pack_size)] {
             if !(MIN..=MAX).contains(&size) {
                 return Err(StoreError::InvalidOp(format!(
-                    "{name} = {size} fuori dall'intervallo {MIN}..={MAX}"
+                    "{name} = {size} outside the range {MIN}..={MAX}"
                 )));
             }
         }
@@ -80,18 +80,18 @@ impl StoreOptions {
     }
 }
 
-/// Cosa ha fatto l'apertura per riportare l'indice in pari con i log.
+/// What opening did to catch the index up with the logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexRecovery {
-    /// L'indice rifletteva già tutti i log.
+    /// The index already reflected all the logs.
     UpToDate,
-    /// L'indice era indietro: è stata riletta la coda dei log.
+    /// The index was behind: the tail of the logs was reread.
     CaughtUp { ops: u64, blobs: u64 },
-    /// L'indice mancava o non era coerente con i log: ricostruito da zero.
+    /// The index was missing or not consistent with the logs: rebuilt from scratch.
     Rebuilt { reason: String, ops: u64, blobs: u64 },
 }
 
-/// Resoconto del recupero eseguito da [`Store::open`].
+/// Report of the recovery performed by [`Store::open`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryReport {
     pub oplog: LogRecovery,
@@ -102,7 +102,7 @@ pub struct RecoveryReport {
 }
 
 impl RecoveryReport {
-    /// Byte di coda scartati in totale (record mai confermati).
+    /// Tail bytes discarded in total (records never confirmed).
     pub fn discarded_bytes(&self) -> u64 {
         self.oplog.discarded_bytes
             + self.packs.discarded_bytes
@@ -111,13 +111,13 @@ impl RecoveryReport {
     }
 }
 
-/// Stato di una lane secondo il log.
+/// State of a lane according to the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaneSummary {
     pub lane: LaneId,
-    /// Numero di op registrate nella lane.
+    /// Number of ops recorded in the lane.
     pub ops: u64,
-    /// Ultima op registrata nella lane.
+    /// Last op recorded in the lane.
     pub head: OpId,
 }
 
@@ -130,7 +130,7 @@ pub struct StoreStats {
     pub checkpoints: usize,
 }
 
-/// Esito di [`Store::verify`].
+/// Outcome of [`Store::verify`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VerifyReport {
     pub ops: u64,
@@ -146,7 +146,7 @@ impl VerifyReport {
     }
 }
 
-/// Op e blob accodati ma non ancora confermati né indicizzati.
+/// Ops and blobs appended but not yet confirmed or indexed.
 #[derive(Default)]
 struct Pending {
     ops: HashMap<OpId, Pos>,
@@ -155,11 +155,11 @@ struct Pending {
     blob_list: Vec<(BlobId, Pos)>,
 }
 
-/// Lo store di un repository. Un solo processo alla volta può aprirlo.
+/// The store of a repository. Only one process at a time can open it.
 ///
-/// Le scritture ([`Store::put_blob`], [`Store::append_op`]) vengono accodate;
-/// [`Store::commit`] le rende durevoli. Un'op è *confermata* quando il
-/// `commit` che la segue ha restituito `Ok`.
+/// Writes ([`Store::put_blob`], [`Store::append_op`]) are queued;
+/// [`Store::commit`] makes them durable. An op is *confirmed* once the
+/// `commit` that follows it has returned `Ok`.
 pub struct Store {
     dir: PathBuf,
     opts: StoreOptions,
@@ -177,7 +177,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Crea un nuovo store nella cartella `dir` (di solito `<repo>/.kito`).
+    /// Creates a new store in the directory `dir` (usually `<repo>/.kito`).
     pub fn init(dir: &Path) -> Result<Store> {
         Store::init_with(dir, StoreOptions::default())
     }
@@ -192,15 +192,15 @@ impl Store {
             let path = dir.join(sub);
             fs::create_dir_all(&path).at(&path)?;
         }
-        // Il file `format` è l'ultimo a nascere: una cartella senza di esso è
-        // un'inizializzazione interrotta, che si può ripetere.
+        // The `format` file is the last one to be created: a directory
+        // without it is an interrupted initialization, which can be repeated.
         let format = dir.join(FORMAT_FILE);
         atomic_write(&format, FORMAT.as_bytes()).at(&format)?;
         Store::open_with(dir, opts)
     }
 
-    /// Apre uno store esistente ed esegue il recupero: scarta l'eventuale
-    /// record finale troncato e riporta gli indici in pari con i log.
+    /// Opens an existing store and runs recovery: discards the torn final
+    /// record, if there is one, and catches the indexes up with the logs.
     pub fn open(dir: &Path) -> Result<Store> {
         Store::open_with(dir, StoreOptions::default())
     }
@@ -225,9 +225,9 @@ impl Store {
         remove_stray_tmp(dir).at(dir)?;
         let lost_found = dir.join(LOST_FOUND);
 
-        // L'indice si apre per primo: il suo watermark dice fin dove i log
-        // erano già confermati, e il recupero dei log lo usa come soglia sotto
-        // la quale non scarta nulla (a meno della modalità riparazione).
+        // The index is opened first: its watermark says how far the logs
+        // were already confirmed, and the recovery of the logs uses it as the
+        // floor below which it discards nothing (except in repair mode).
         let index_dir = dir.join("index");
         fs::create_dir_all(&index_dir).at(&index_dir)?;
         let index = Index::open(&index_dir.join("index.redb"))?;
@@ -257,9 +257,8 @@ impl Store {
             floor.map(|w| w.checkpoints_end),
         )?;
 
-        // Ciò che il recupero ha trovato nei log potrebbe non essere mai
-        // stato sincronizzato. Lo si rende durevole prima che l'indice lo
-        // registri come confermato.
+        // What recovery found in the logs may never have been synced. It is
+        // made durable before the index records it as confirmed.
         packs.sync()?;
         oplog.sync()?;
         let (intents, intents_recovery) =
@@ -294,13 +293,13 @@ impl Store {
         &self.dir
     }
 
-    /// Cosa ha fatto il recupero all'apertura.
+    /// What recovery did on open.
     pub fn recovery(&self) -> &RecoveryReport {
         &self.recovery
     }
 
-    /// `true` dopo un errore di scrittura: lo store accetta solo letture e
-    /// va riaperto.
+    /// `true` after a write error: the store accepts only reads and must be
+    /// reopened.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
@@ -313,7 +312,7 @@ impl Store {
         }
     }
 
-    /// Dopo un errore di I/O lo stato dei file è incerto: si smette di scrivere.
+    /// After an I/O error the state of the files is uncertain: writing stops.
     fn guard<T>(&mut self, result: Result<T>) -> Result<T> {
         if matches!(result, Err(StoreError::Io { .. } | StoreError::Poisoned | StoreError::Index(_))) {
             self.poisoned = true;
@@ -323,8 +322,8 @@ impl Store {
 
     // ---------------------------------------------------------------- blob
 
-    /// Accoda un blob e ne restituisce l'ID (BLAKE3 del contenuto). Un blob
-    /// già presente non viene riscritto.
+    /// Appends a blob and returns its ID (BLAKE3 of the content). A blob that
+    /// is already present is not rewritten.
     pub fn put_blob(&mut self, data: &[u8]) -> Result<BlobId> {
         self.check()?;
         let id = BlobId::of(data);
@@ -349,7 +348,7 @@ impl Store {
         Ok(self.blob_pos(id)?.is_some())
     }
 
-    /// Contenuto di un blob, verificato contro il suo hash.
+    /// Content of a blob, verified against its hash.
     pub fn get_blob(&self, id: &BlobId) -> Result<Option<Vec<u8>>> {
         match self.blob_pos(id)? {
             Some(pos) => self.packs.read(pos, id).map(Some),
@@ -359,16 +358,16 @@ impl Store {
 
     // ------------------------------------------------------------------ op
 
-    /// Accoda un'operazione. Restituisce `false` se era già nel log.
+    /// Appends an operation. Returns `false` if it was already in the log.
     ///
-    /// L'op viene rifiutata se il suo ID non corrisponde al contenuto, o se
-    /// un genitore o un blob a cui fa riferimento non è nello store: il log è
-    /// sempre un ordinamento topologico del DAG.
+    /// The op is rejected if its ID does not match its content, or if a
+    /// parent or a blob it refers to is not in the store: the log is always
+    /// a topological ordering of the DAG.
     pub fn append_op(&mut self, op: &Op) -> Result<bool> {
         self.check()?;
         if !op.verify_id() {
             return Err(StoreError::InvalidOp(format!(
-                "l'ID {} non corrisponde al contenuto dell'op",
+                "the ID {} does not match the content of the op",
                 op.id
             )));
         }
@@ -377,23 +376,23 @@ impl Store {
         }
         for parent in &op.parents {
             if !self.has_op(parent)? {
-                return Err(StoreError::InvalidOp(format!("op {}: genitore {parent} sconosciuto", op.id)));
+                return Err(StoreError::InvalidOp(format!("op {}: unknown parent {parent}", op.id)));
             }
         }
         for blob in op.kind.blobs() {
             if !self.has_blob(&blob)? {
-                return Err(StoreError::InvalidOp(format!("op {}: blob {blob} sconosciuto", op.id)));
+                return Err(StoreError::InvalidOp(format!("op {}: unknown blob {blob}", op.id)));
             }
         }
         if let Some(intent) = &op.intent {
             if self.intents.get(intent).is_none() {
-                return Err(StoreError::InvalidOp(format!("op {}: intent {intent} sconosciuto", op.id)));
+                return Err(StoreError::InvalidOp(format!("op {}: unknown intent {intent}", op.id)));
             }
         }
         let bytes = codec::to_vec(op)?;
-        // Il buffer dell'oplog arriva al file solo dentro `commit`, dopo che i
-        // pack sono durevoli. Se accodare questa op chiuderebbe il segmento
-        // (e quindi lo scriverebbe), o se il buffer è pieno, si conferma prima.
+        // The oplog buffer reaches the file only inside `commit`, after the
+        // packs are durable. If appending this op would close the segment
+        // (and therefore write it), or if the buffer is full, confirm first.
         if self.oplog.needs_roll(bytes.len()) || self.oplog.buffered() + bytes.len() > self.opts.max_buffered
         {
             self.commit()?;
@@ -405,8 +404,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Rende durevole tutto ciò che è stato accodato. Quando restituisce
-    /// `Ok`, le op e i blob accodati finora sono confermati.
+    /// Makes durable everything that has been appended. When it returns
+    /// `Ok`, the ops and blobs appended so far are confirmed.
     pub fn commit(&mut self) -> Result<()> {
         self.check()?;
         let result = self.commit_inner();
@@ -417,11 +416,11 @@ impl Store {
     }
 
     fn commit_inner(&mut self) -> Result<()> {
-        // Ordine obbligato: prima i blob, poi le op che li citano. Così
-        // un'op presente su disco non cita mai un blob assente.
+        // Mandatory order: first the blobs, then the ops that cite them. That
+        // way an op present on disk never cites a missing blob.
         self.packs.sync()?;
         self.oplog.sync()?;
-        // Da qui le op sono confermate; l'indice è un derivato.
+        // From here on the ops are confirmed; the index is derived data.
         let due = self.last_index_sync.elapsed() >= self.opts.index_sync_interval;
         if self.pending.op_list.is_empty() && self.pending.blob_list.is_empty() {
             if due && self.index_dirty {
@@ -467,8 +466,8 @@ impl Store {
         Ok(())
     }
 
-    /// Conferma tutto e chiude lo store lasciando l'indice durevole, così la
-    /// prossima apertura non deve rileggere i log.
+    /// Confirms everything and closes the store leaving the index durable, so
+    /// that the next open does not have to reread the logs.
     pub fn close(mut self) -> Result<()> {
         self.commit()?;
         self.sync_index()
@@ -493,23 +492,23 @@ impl Store {
     }
 
     fn read_op(&self, pos: Pos) -> Result<Op> {
-        self.oplog.read_with(pos, |payload, _| codec::from_slice::<Op>(payload))?.map_err(|e| {
-            StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("op illeggibile: {e}"))
-        })
+        self.oplog
+            .read_with(pos, |payload, _| codec::from_slice::<Op>(payload))?
+            .map_err(|e| StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("unreadable op: {e}")))
     }
 
-    /// Numero totale di op nel log (comprese quelle non ancora confermate).
+    /// Total number of ops in the log (including those not yet confirmed).
     pub fn op_count(&self) -> Result<u64> {
         Ok(self.index.op_count()? + self.pending.op_list.len() as u64)
     }
 
-    /// Numero di op registrate in una lane.
+    /// Number of ops recorded in a lane.
     pub fn lane_len(&self, lane: LaneId) -> Result<u64> {
         let indexed = self.index.lane(lane)?.map_or(0, |(n, _)| n);
         Ok(indexed + self.pending.op_list.iter().filter(|op| op.lane == lane).count() as u64)
     }
 
-    /// Ultima op registrata in una lane.
+    /// Last op recorded in a lane.
     pub fn lane_head(&self, lane: LaneId) -> Result<Option<OpId>> {
         if let Some(op) = self.pending.op_list.iter().rev().find(|op| op.lane == lane) {
             return Ok(Some(op.id));
@@ -517,7 +516,7 @@ impl Store {
         Ok(self.index.lane(lane)?.map(|(_, head)| head))
     }
 
-    /// Le lane che hanno almeno un'op nel log.
+    /// The lanes that have at least one op in the log.
     pub fn lanes(&self) -> Result<Vec<LaneSummary>> {
         let mut lanes: Vec<LaneSummary> = self
             .index
@@ -538,7 +537,7 @@ impl Store {
         Ok(lanes)
     }
 
-    /// Op di una lane in ordine di registrazione, dalla `start`-esima, al più `limit`.
+    /// Ops of a lane in recording order, from the `start`-th, at most `limit`.
     pub fn lane_ops(&self, lane: LaneId, start: u64, limit: usize) -> Result<Vec<Op>> {
         let indexed = self.index.lane(lane)?.map_or(0, |(n, _)| n);
         let mut positions =
@@ -551,18 +550,18 @@ impl Store {
         positions.into_iter().map(|pos| self.read_op(pos)).collect()
     }
 
-    /// Op che toccano un simbolo, in ordine di log.
+    /// Ops that touch a symbol, in log order.
     pub fn symbol_ops(&self, sym: SymbolId) -> Result<Vec<Op>> {
         let mut positions = self.index.symbol_positions(sym)?;
         positions.extend(self.pending.op_list.iter().filter(|op| op.symbol == Some(sym)).map(|op| op.pos));
         positions.into_iter().map(|pos| self.read_op(pos)).collect()
     }
 
-    /// Visita tutte le op in ordine di log.
+    /// Visits all the ops in log order.
     pub fn scan_ops(&self, mut f: impl FnMut(Pos, Op) -> Result<()>) -> Result<()> {
         self.oplog.scan(self.oplog.start(), |pos, payload, _| {
             let op = codec::from_slice::<Op>(payload).map_err(|e| {
-                StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("op illeggibile: {e}"))
+                StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("unreadable op: {e}"))
             })?;
             f(pos, op)
         })
@@ -570,17 +569,17 @@ impl Store {
 
     // ---------------------------------------------------------- checkpoint
 
-    /// Registra (o aggiorna) un checkpoint in modo durevole. Prima conferma
-    /// tutto ciò che è accodato, così il checkpoint punta a un'op durevole.
+    /// Records (or updates) a checkpoint durably. It first confirms everything
+    /// that has been appended, so that the checkpoint points to a durable op.
     pub fn put_checkpoint(&mut self, ck: &Checkpoint) -> Result<()> {
         self.check()?;
         if !self.has_op(&ck.head)? {
-            return Err(StoreError::InvalidOp(format!("{}: op {} sconosciuta", ck.id, ck.head)));
+            return Err(StoreError::InvalidOp(format!("{}: unknown op {}", ck.id, ck.head)));
         }
         self.commit()?;
         let put = self.checkpoints.put(ck);
         self.guard(put)?;
-        // Il checkpoint è durevole; l'indice ne prende nota come soglia.
+        // The checkpoint is durable; the index takes note of it as a floor.
         let noted = self.watermark(None).and_then(|wm| self.index.apply(&IndexBatch::default(), wm, false));
         self.guard(noted)?;
         self.index_dirty = true;
@@ -591,24 +590,24 @@ impl Store {
         self.checkpoints.get(id)
     }
 
-    /// Tutti i checkpoint, in ordine di ID.
+    /// All the checkpoints, in ID order.
     pub fn checkpoints(&self) -> impl DoubleEndedIterator<Item = &Checkpoint> {
         self.checkpoints.iter()
     }
 
-    /// ID da assegnare al prossimo checkpoint.
+    /// ID to assign to the next checkpoint.
     pub fn next_checkpoint_id(&self) -> CheckpointId {
         self.checkpoints.next_id()
     }
 
     // -------------------------------------------------------------- intent
 
-    /// Registra un intent in modo durevole: le op successive possono citarlo.
+    /// Records an intent durably: later ops can cite it.
     pub fn put_intent(&mut self, intent: &Intent) -> Result<()> {
         self.check()?;
         if !intent.verify_id() {
             return Err(StoreError::InvalidOp(format!(
-                "l'ID {} non corrisponde al contenuto dell'intent",
+                "the ID {} does not match the content of the intent",
                 intent.id
             )));
         }
@@ -620,7 +619,7 @@ impl Store {
         self.intents.get(id)
     }
 
-    // ------------------------------------------------------- manutenzione
+    // -------------------------------------------------------- maintenance
 
     pub fn stats(&self) -> Result<StoreStats> {
         Ok(StoreStats {
@@ -632,12 +631,12 @@ impl Store {
         })
     }
 
-    /// Scarta gli indici e li ricostruisce da `objects/` e `oplog/`.
+    /// Discards the indexes and rebuilds them from `objects/` and `oplog/`.
     pub fn rebuild_index(&mut self) -> Result<()> {
         self.commit()?;
         let path = self.dir.join("index").join("index.redb");
-        // L'indice va chiuso prima di poterlo ricreare: lo si sostituisce
-        // per un momento con uno temporaneo.
+        // The index must be closed before it can be recreated: it is replaced
+        // for a moment with a temporary one.
         let placeholder_path = self.dir.join("index").join("index.redb.rebuild");
         let placeholder = Index::open(&placeholder_path)?;
         let old = std::mem::replace(&mut self.index, placeholder);
@@ -661,8 +660,8 @@ impl Store {
                 Ok(())
             }
             Err(e) => {
-                // Lo store resta inutilizzabile finché non viene riaperto:
-                // l'apertura ricostruirà l'indice da `path`.
+                // The store stays unusable until it is reopened: opening
+                // will rebuild the index from `path`.
                 self.poisoned = true;
                 let _ = path;
                 Err(e)
@@ -670,9 +669,9 @@ impl Store {
         }
     }
 
-    /// Controllo completo di integrità (`fsck`): rilegge tutti i record,
-    /// verifica CRC, hash dei blob, ID e genitori delle op, e che gli indici
-    /// corrispondano ai log. Non modifica nulla.
+    /// Full integrity check (`fsck`): rereads all the records, verifies
+    /// CRCs, blob hashes, IDs and parents of the ops, and that the indexes
+    /// match the logs. It modifies nothing.
     pub fn verify(&self) -> Result<VerifyReport> {
         let mut report = VerifyReport { checkpoints: self.checkpoints.iter().count(), ..Default::default() };
         let mut problems = Vec::new();
@@ -682,10 +681,9 @@ impl Store {
             if blobs.insert(id) {
                 match self.blob_pos(&id) {
                     Ok(Some(found)) if found == pos => {}
-                    Ok(found) => {
-                        problems.push(format!("blob {id}: nei pack a {pos:?}, nell'indice a {found:?}"))
-                    }
-                    Err(e) => problems.push(format!("blob {id}: indice illeggibile: {e}")),
+                    Ok(found) => problems
+                        .push(format!("blob {id}: in the packs at {pos:?}, in the index at {found:?}")),
+                    Err(e) => problems.push(format!("blob {id}: unreadable index: {e}")),
                 }
             }
             Ok(())
@@ -699,25 +697,26 @@ impl Store {
         let mut per_lane: HashMap<LaneId, (u64, OpId)> = HashMap::new();
         let scan = self.scan_ops(|pos, op| {
             if !op.verify_id() {
-                problems.push(format!("op a {pos:?}: l'ID {} non corrisponde al contenuto", op.id));
+                problems.push(format!("op at {pos:?}: the ID {} does not match the content", op.id));
             }
             for parent in &op.parents {
                 if !ops.contains(parent) {
-                    problems.push(format!("op {}: il genitore {parent} non la precede nel log", op.id));
+                    problems
+                        .push(format!("op {}: the parent {parent} does not precede it in the log", op.id));
                 }
             }
             for blob in op.kind.blobs() {
                 if !blobs.contains(&blob) {
-                    problems.push(format!("op {}: blob {blob} assente dai pack", op.id));
+                    problems.push(format!("op {}: blob {blob} missing from the packs", op.id));
                 }
             }
             if let Some(intent) = &op.intent {
                 if self.intents.get(intent).is_none() {
-                    problems.push(format!("op {}: intent {intent} assente", op.id));
+                    problems.push(format!("op {}: intent {intent} missing", op.id));
                 }
             }
             if !ops.insert(op.id) {
-                problems.push(format!("op {}: duplicata nel log a {pos:?}", op.id));
+                problems.push(format!("op {}: duplicated in the log at {pos:?}", op.id));
                 return Ok(());
             }
             let entry = per_lane.entry(op.lane).or_insert((0, op.id));
@@ -726,9 +725,9 @@ impl Store {
             match self.op_pos(&op.id) {
                 Ok(Some(found)) if found == pos => {}
                 Ok(found) => {
-                    problems.push(format!("op {}: nel log a {pos:?}, nell'indice a {found:?}", op.id))
+                    problems.push(format!("op {}: in the log at {pos:?}, in the index at {found:?}", op.id))
                 }
-                Err(e) => problems.push(format!("op {}: indice illeggibile: {e}", op.id)),
+                Err(e) => problems.push(format!("op {}: unreadable index: {e}", op.id)),
             }
             Ok(())
         });
@@ -740,28 +739,32 @@ impl Store {
 
         match self.op_count() {
             Ok(n) if n == report.ops => {}
-            Ok(n) => problems.push(format!("l'indice conta {n} op, il log ne contiene {}", report.ops)),
-            Err(e) => problems.push(format!("indice illeggibile: {e}")),
+            Ok(n) => problems.push(format!("the index counts {n} ops, the log contains {}", report.ops)),
+            Err(e) => problems.push(format!("unreadable index: {e}")),
         }
         match self.lanes() {
             Ok(lanes) => {
                 if lanes.len() != per_lane.len() {
-                    problems.push(format!("l'indice conta {} lane, il log {}", lanes.len(), per_lane.len()));
+                    problems.push(format!(
+                        "the index counts {} lanes, the log {}",
+                        lanes.len(),
+                        per_lane.len()
+                    ));
                 }
                 for l in lanes {
                     match per_lane.get(&l.lane) {
                         Some(&(n, head)) if n == l.ops && head == l.head => {}
                         other => {
-                            problems.push(format!("{}: indice {:?}, log {other:?}", l.lane, (l.ops, l.head)))
+                            problems.push(format!("{}: index {:?}, log {other:?}", l.lane, (l.ops, l.head)))
                         }
                     }
                 }
             }
-            Err(e) => problems.push(format!("indice illeggibile: {e}")),
+            Err(e) => problems.push(format!("unreadable index: {e}")),
         }
         for ck in self.checkpoints.iter() {
             if !ops.contains(&ck.head) {
-                problems.push(format!("{}: punta all'op {} che non è nel log", ck.id, ck.head));
+                problems.push(format!("{}: points to the op {}, which is not in the log", ck.id, ck.head));
             }
         }
 
@@ -770,7 +773,7 @@ impl Store {
     }
 }
 
-/// Porta l'indice in pari con i log, o lo ricostruisce se non è coerente.
+/// Catches the index up with the logs, or rebuilds it if it is not consistent.
 fn reconcile_index(
     index: Index,
     oplog: &SegmentedLog,
@@ -787,12 +790,12 @@ fn reconcile_index(
     let logs_end = (oplog.end(), packs.log().end());
 
     let (from, stale) = match index.watermark()? {
-        None => (start, Some("indice assente o di un altro schema")),
-        Some(wm) if !oplog.contains(wm.oplog_end) => (start, Some("l'indice è più avanti dell'oplog")),
-        Some(wm) if !packs.log().contains(wm.packs_end) => (start, Some("l'indice è più avanti dei pack")),
+        None => (start, Some("index missing or of another schema")),
+        Some(wm) if !oplog.contains(wm.oplog_end) => (start, Some("the index is ahead of the oplog")),
+        Some(wm) if !packs.log().contains(wm.packs_end) => (start, Some("the index is ahead of the packs")),
         Some(wm) => match wm.tail {
             Some((pos, crc)) if !matches!(oplog.read_with(pos, |_, c| c), Ok(found) if found == crc) => {
-                (start, Some("l'ultima op indicizzata non è più nel log"))
+                (start, Some("the last indexed op is no longer in the log"))
             }
             _ => (Watermark { checkpoints_end, intents_end, ..wm }, None),
         },
@@ -807,7 +810,7 @@ fn reconcile_index(
         Some(reason) => {
             let index = index.recreate()?;
             let (ops, blobs) = catch_up(&index, oplog, packs, start)?;
-            // Uno store appena creato non ha niente da "ricostruire".
+            // A newly created store has nothing to "rebuild".
             if ops == 0 && blobs == 0 {
                 Ok((index, IndexRecovery::UpToDate))
             } else {
@@ -817,8 +820,8 @@ fn reconcile_index(
     }
 }
 
-/// Indicizza i record dei log da `from` in poi; l'ultima transazione è
-/// durevole. Restituisce quante op e quanti blob ha indicizzato.
+/// Indexes the records of the logs from `from` onwards; the last transaction
+/// is durable. Returns how many ops and how many blobs it indexed.
 fn catch_up(index: &Index, oplog: &SegmentedLog, packs: &Packs, from: Watermark) -> Result<(u64, u64)> {
     let mut wm = from;
     let mut batch = IndexBatch::default();
@@ -839,7 +842,7 @@ fn catch_up(index: &Index, oplog: &SegmentedLog, packs: &Packs, from: Watermark)
     let mut ops = 0u64;
     oplog.scan(from.oplog_end, |pos, payload, crc| {
         let op: Op = codec::from_slice(payload).map_err(|e| {
-            StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("op illeggibile: {e}"))
+            StoreError::corrupt(Path::new("oplog"), pos.to_u64(), format!("unreadable op: {e}"))
         })?;
         batch.ops.push(IndexedOp { id: op.id, pos, lane: op.lane, symbol: op.kind.symbol() });
         ops += 1;

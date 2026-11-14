@@ -1,52 +1,52 @@
-//! Lettura dei file di log tramite `mmap`.
+//! Reading log files through `mmap`.
 //!
-//! È l'unico modulo del progetto con codice `unsafe`.
+//! It is the only module of the project with `unsafe` code.
 
 use memmap2::{Mmap, MmapOptions};
 use std::fs::File;
 use std::io;
 
-/// Mappatura in sola lettura di un prefisso di un file di log.
+/// Read-only mapping of a prefix of a log file.
 pub(crate) struct MappedFile {
-    /// `None` per un prefisso vuoto (una mappatura lunga zero non è valida).
+    /// `None` for an empty prefix (a zero-length mapping is not valid).
     map: Option<Mmap>,
 }
 
 impl MappedFile {
-    /// Mappa in sola lettura i primi `len` byte di `file`.
+    /// Maps the first `len` bytes of `file` read-only.
     ///
-    /// Chi chiama deve rispettare l'invariante dei log append-only: i byte
-    /// `0..len` sono già stati scritti e non verranno mai più modificati né
-    /// rimossi finché la mappatura esiste.
+    /// The caller must uphold the invariant of append-only logs: the bytes
+    /// `0..len` have already been written and will never again be modified
+    /// or removed for as long as the mapping exists.
     pub(crate) fn map_prefix(file: &File, len: u64) -> io::Result<MappedFile> {
         let actual = file.metadata()?.len();
         if actual < len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("file di {actual} byte, più corto dei {len} da mappare"),
+                format!("file of {actual} bytes, shorter than the {len} to map"),
             ));
         }
         if len == 0 {
             return Ok(MappedFile { map: None });
         }
-        let len = usize::try_from(len).map_err(|_| io::Error::other("file troppo grande per mmap"))?;
-        // SAFETY: mappare un file è unsafe perché, se il file viene troncato
-        // sotto la lunghezza mappata o modificato mentre la mappatura è viva,
-        // leggere la slice è comportamento indefinito (SIGBUS, o dati che
-        // cambiano sotto un `&[u8]`). Qui non può accadere perché:
-        //   1. il controllo sopra garantisce che il file contiene almeno `len` byte;
-        //   2. i file di log sono append-only: i byte già scritti non vengono
-        //      mai riscritti (i file sono aperti in scrittura solo con O_APPEND);
-        //   3. l'unico scrittore è il processo che detiene il lock esclusivo
-        //      dello store, e tronca un file solo (a) durante il recupero,
-        //      dopo aver rilasciato la propria mappatura e prima di crearne
-        //      altre, oppure (b) per annullare una scrittura parziale fallita,
-        //      tornando alla lunghezza `written`, che non è mai inferiore a
-        //      quella di una mappatura esistente (si mappa al più `written`);
-        //   4. la compattazione rimuove file interi con unlink, che lascia
-        //      valide le mappature esistenti.
-        // Il test `mapping_is_stable_while_the_file_grows` esercita il caso 2,
-        // `refuses_to_map_beyond_end_of_file` il caso 1.
+        let len = usize::try_from(len).map_err(|_| io::Error::other("file too large for mmap"))?;
+        // SAFETY: mapping a file is unsafe because, if the file is truncated
+        // below the mapped length or modified while the mapping is alive,
+        // reading the slice is undefined behavior (SIGBUS, or data changing
+        // underneath a `&[u8]`). It cannot happen here because:
+        //   1. the check above guarantees that the file holds at least `len` bytes;
+        //   2. log files are append-only: bytes already written are never
+        //      rewritten (files are opened for writing only with O_APPEND);
+        //   3. the only writer is the process that holds the store's exclusive
+        //      lock, and it truncates a file only (a) during recovery, after
+        //      releasing its own mapping and before creating any others, or
+        //      (b) to undo a failed partial write, going back to the length
+        //      `written`, which is never less than that of an existing
+        //      mapping (at most `written` bytes are mapped);
+        //   4. compaction removes whole files with unlink, which leaves the
+        //      existing mappings valid.
+        // The test `mapping_is_stable_while_the_file_grows` exercises case 2,
+        // `refuses_to_map_beyond_end_of_file` case 1.
         let map = unsafe { MmapOptions::new().len(len).map(file)? };
         Ok(MappedFile { map: Some(map) })
     }
@@ -78,23 +78,23 @@ mod tests {
         let old = MappedFile::map_prefix(&r, first.len() as u64).unwrap();
         assert_eq!(old.bytes(), &first[..]);
 
-        // Il file cresce di molte pagine: la vecchia mappatura non cambia.
+        // The file grows by many pages: the old mapping does not change.
         let more = vec![0xabu8; 1 << 20];
         w.write_all(&more).unwrap();
         w.sync_data().unwrap();
         assert_eq!(old.len(), first.len() as u64);
         assert_eq!(old.bytes(), &first[..]);
 
-        // Una nuova mappatura vede anche i dati aggiunti, e il prefisso coincide.
+        // A new mapping also sees the appended data, and the prefix matches.
         let new = MappedFile::map_prefix(&r, (first.len() + more.len()) as u64).unwrap();
         assert_eq!(&new.bytes()[..first.len()], &first[..]);
         assert_eq!(&new.bytes()[first.len()..], &more[..]);
 
-        // Si può mappare anche un prefisso che non finisce su un confine di pagina.
+        // A prefix that does not end on a page boundary can be mapped too.
         let partial = MappedFile::map_prefix(&r, 4097).unwrap();
         assert_eq!(partial.bytes(), &first[..4097]);
 
-        // La mappatura sopravvive alla rimozione del file (caso della compattazione).
+        // The mapping survives the removal of the file (the compaction case).
         std::fs::remove_file(&path).unwrap();
         assert_eq!(old.bytes(), &first[..]);
     }

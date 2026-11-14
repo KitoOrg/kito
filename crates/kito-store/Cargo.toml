@@ -1,6 +1,6 @@
 [package]
 name = "kito-store"
-description = "Kito: objects, oplog, indici ricostruibili"
+description = "Kito: objects, oplog, rebuildable indexes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

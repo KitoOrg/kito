@@ -1,7 +1,7 @@
-//! Blob indirizzati per contenuto (BLAKE3), compressi con zstd, in pack
-//! append-only.
+//! Content-addressed blobs (BLAKE3), compressed with zstd, in append-only
+//! packs.
 //!
-//! Payload di un record: `hash[32] codec:u8 raw_len:u32le dati`.
+//! Payload of a record: `hash[32] codec:u8 raw_len:u32le data`.
 
 use crate::error::{Result, StoreError};
 use crate::fs::FileSystem;
@@ -16,23 +16,23 @@ use std::sync::Arc;
 const CODEC_RAW: u8 = 0;
 const CODEC_ZSTD: u8 = 1;
 const BLOB_HEADER: usize = 32 + 1 + 4;
-/// Sotto questa dimensione la compressione non ripaga l'intestazione zstd.
+/// Below this size compression does not pay for the zstd header.
 const MIN_COMPRESS: usize = 64;
-/// Dimensione massima di un blob.
+/// Maximum size of a blob.
 pub const MAX_BLOB: usize = MAX_PAYLOAD - BLOB_HEADER;
-/// Soglia oltre la quale il buffer dei pack viene scritto nel file.
+/// Threshold beyond which the pack buffer is written to the file.
 const PACK_AUTO_FLUSH: usize = 4 << 20;
 
 pub(crate) struct Packs {
     log: SegmentedLog,
-    /// Contesto di compressione riusato tra un blob e l'altro: crearne uno a
-    /// ogni chiamata dominava il costo di un blob piccolo (benchmark
-    /// `write/put_blob_512_bytes`, vedi `docs/benchmarks.md`).
+    /// Compression context reused from one blob to the next: creating one on
+    /// every call dominated the cost of a small blob (benchmark
+    /// `write/put_blob_512_bytes`, see `docs/benchmarks.md`).
     compressor: zstd::bulk::Compressor<'static>,
 }
 
 thread_local! {
-    /// Contesto di decompressione riusato dalle letture di questo thread
+    /// Decompression context reused by the reads of this thread
     /// (benchmark `read/get_blob`).
     static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { RefCell::new(None) };
 }
@@ -61,7 +61,7 @@ impl Packs {
             LogOptions { kind: LogKind::Pack, ext: "pack", target_size, auto_flush: Some(PACK_AUTO_FLUSH) };
         let (log, recovery) = SegmentedLog::open(dir, opts, fs, lost_found, floor)?;
         let compressor = zstd::bulk::Compressor::new(level)
-            .map_err(|e| StoreError::InvalidOp(format!("livello zstd {level} non valido: {e}")))?;
+            .map_err(|e| StoreError::InvalidOp(format!("invalid zstd level {level}: {e}")))?;
         Ok((Packs { log, compressor }, recovery))
     }
 
@@ -73,7 +73,7 @@ impl Packs {
         self.log.sync()
     }
 
-    /// Accoda un blob. `id` deve essere l'hash di `data`.
+    /// Appends a blob. `id` must be the hash of `data`.
     pub(crate) fn append(&mut self, id: &BlobId, data: &[u8]) -> Result<Pos> {
         if data.len() > MAX_BLOB {
             return Err(StoreError::RecordTooLarge(data.len()));
@@ -83,7 +83,7 @@ impl Packs {
             let c = self
                 .compressor
                 .compress(data)
-                .map_err(|e| StoreError::InvalidOp(format!("compressione zstd fallita: {e}")))?;
+                .map_err(|e| StoreError::InvalidOp(format!("zstd compression failed: {e}")))?;
             (c.len() < data.len()).then_some(c)
         } else {
             None
@@ -95,15 +95,15 @@ impl Packs {
         self.log.append(&[&header, compressed.as_deref().unwrap_or(data)])
     }
 
-    /// Legge il blob in `pos`, verificando che il contenuto abbia l'hash atteso.
+    /// Reads the blob at `pos`, verifying that the content has the expected hash.
     pub(crate) fn read(&self, pos: Pos, expect: &BlobId) -> Result<Vec<u8>> {
         self.log
             .read_with(pos, |payload, _| decode(payload, Some(expect)))?
             .map_err(|reason| self.corrupt(pos, reason))
     }
 
-    /// Visita tutti i blob da `from`: `f` riceve posizione, ID dichiarato e
-    /// lunghezza del payload del record.
+    /// Visits all the blobs from `from`: `f` receives the position, the
+    /// declared ID and the length of the record's payload.
     pub(crate) fn scan_ids(
         &self,
         from: Pos,
@@ -112,12 +112,12 @@ impl Packs {
         self.log.scan(from, |pos, payload, _| {
             let id = payload
                 .first_chunk::<32>()
-                .ok_or_else(|| self.corrupt(pos, "record di blob troppo corto".into()))?;
+                .ok_or_else(|| self.corrupt(pos, "blob record too short".into()))?;
             f(pos, BlobId::from_bytes(*id), payload.len())
         })
     }
 
-    /// Visita tutti i blob da `from` decomprimendoli e verificandone l'hash.
+    /// Visits all the blobs from `from`, decompressing them and verifying their hash.
     pub(crate) fn scan_verified(
         &self,
         from: Pos,
@@ -134,30 +134,30 @@ impl Packs {
     }
 }
 
-/// Decodifica il payload di un record di blob e ne verifica l'hash: contro
-/// `expect` se dato, altrimenti contro l'ID scritto nel record.
+/// Decodes the payload of a blob record and verifies its hash: against
+/// `expect` if given, otherwise against the ID written in the record.
 fn decode(payload: &[u8], expect: Option<&BlobId>) -> std::result::Result<Vec<u8>, String> {
     if payload.len() < BLOB_HEADER {
-        return Err("record di blob troppo corto".into());
+        return Err("blob record too short".into());
     }
     let declared = BlobId::from_bytes(payload[..32].try_into().unwrap());
     if let Some(expect) = expect {
         if declared != *expect {
-            return Err(format!("il record contiene il blob {declared}, atteso {expect}"));
+            return Err(format!("the record contains blob {declared}, expected {expect}"));
         }
     }
     let raw_len = u32::from_le_bytes(payload[33..37].try_into().unwrap()) as usize;
     let body = &payload[BLOB_HEADER..];
     let data = match payload[32] {
         CODEC_RAW => body.to_vec(),
-        CODEC_ZSTD => decompress(body, raw_len).map_err(|e| format!("decompressione zstd fallita: {e}"))?,
-        other => return Err(format!("codec {other} sconosciuto")),
+        CODEC_ZSTD => decompress(body, raw_len).map_err(|e| format!("zstd decompression failed: {e}"))?,
+        other => return Err(format!("unknown codec {other}")),
     };
     if data.len() != raw_len {
-        return Err(format!("lunghezza {} diversa da quella dichiarata {raw_len}", data.len()));
+        return Err(format!("length {} differs from the declared length {raw_len}", data.len()));
     }
     if Hash::of(&data) != *declared.hash() {
-        return Err(format!("il contenuto non ha l'hash {declared}"));
+        return Err(format!("the content does not have the hash {declared}"));
     }
     Ok(data)
 }

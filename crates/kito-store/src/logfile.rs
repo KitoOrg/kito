@@ -1,4 +1,4 @@
-//! Un singolo file di log append-only: header, poi record con CRC.
+//! A single append-only log file: header, then records with a CRC.
 
 use crate::error::{IoContext, Result, StoreError};
 use crate::fs::{FileSystem, RawFile};
@@ -9,30 +9,30 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Esito del recupero di un file di log all'apertura.
+/// Outcome of the recovery of a log file on open.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogRecovery {
-    /// Record validi trovati nel file attivo.
+    /// Valid records found in the active file.
     pub records: u64,
-    /// Byte di coda scartati perché non formavano un record valido.
+    /// Tail bytes discarded because they did not form a valid record.
     pub discarded_bytes: u64,
-    /// Dove è stata salvata la coda scartata (`lost+found/`), se è stato possibile.
+    /// Where the discarded tail was saved (`lost+found/`), if that was possible.
     pub saved_to: Option<PathBuf>,
 }
 
-/// File di log aperto in scrittura.
+/// Log file open for writing.
 ///
-/// I record passano per tre stati: nel buffer in memoria (`append`), scritti
-/// nel file (`flush`), durevoli (`sync`). Un errore di scrittura avvelena il
-/// file: ogni chiamata successiva fallisce finché lo store non viene riaperto,
-/// e il recupero all'apertura scarta l'eventuale record parziale.
+/// Records go through three states: in the in-memory buffer (`append`),
+/// written to the file (`flush`), durable (`sync`). A write error poisons the
+/// file: every later call fails until the store is reopened, and recovery on
+/// open discards the partial record, if there is one.
 pub(crate) struct LogFile {
     path: PathBuf,
     raw: Box<dyn RawFile>,
     reader: File,
-    /// Byte validi nel file (header + record interi).
+    /// Valid bytes in the file (header + whole records).
     written: u64,
-    /// Ci sono byte scritti ma non ancora resi durevoli.
+    /// There are bytes written but not yet made durable.
     dirty: bool,
     buf: Vec<u8>,
     map: Mutex<Option<Arc<MappedFile>>>,
@@ -40,7 +40,7 @@ pub(crate) struct LogFile {
 }
 
 impl LogFile {
-    /// Crea un nuovo file con il solo header, in modo atomico.
+    /// Creates a new file with just the header, atomically.
     pub(crate) fn create(fs: &dyn FileSystem, path: &Path, kind: LogKind, segment: u32) -> Result<LogFile> {
         fs.create_atomic(path, &encode_header(kind, segment)).at(path)?;
         LogFile::open_at(fs, path, HEADER_LEN as u64)
@@ -59,14 +59,15 @@ impl LogFile {
         })
     }
 
-    /// Apre un file esistente come file attivo: verifica tutti i record e
-    /// tronca la coda che non forma un record valido (scrittura interrotta da
-    /// un crash). La coda scartata viene prima copiata in `lost_found`.
+    /// Opens an existing file as the active file: verifies all the records
+    /// and truncates the tail that does not form a valid record (a write
+    /// interrupted by a crash). The discarded tail is first copied into
+    /// `lost_found`.
     ///
-    /// `floor` è il numero di byte del file che risultano già confermati
-    /// (dal watermark dell'indice). Un record non valido prima di quella
-    /// soglia non è una coda troncata ma un danno a dati confermati: il
-    /// recupero si rifiuta di scartarli e restituisce un errore.
+    /// `floor` is the number of bytes of the file that are recorded as
+    /// already confirmed (by the index watermark). An invalid record before
+    /// that floor is not a torn tail but damage to confirmed data: recovery
+    /// refuses to discard it and returns an error.
     pub(crate) fn recover(
         fs: &dyn FileSystem,
         path: &Path,
@@ -88,7 +89,7 @@ impl LogFile {
                 records += 1;
             }
             (off as u64, records, data[off..].to_vec())
-            // La mappatura viene rilasciata qui, prima di qualsiasi troncamento.
+            // The mapping is released here, before any truncation.
         };
         drop(reader);
 
@@ -97,8 +98,8 @@ impl LogFile {
                 path,
                 valid,
                 format!(
-                    "record non valido in una zona già confermata (confermati {floor} byte, validi {valid}): \
-                     per accettare la perdita riaprire lo store in modalità riparazione"
+                    "invalid record in an already confirmed region (confirmed {floor} bytes, valid {valid}): \
+                     to accept the loss, reopen the store in repair mode"
                 ),
             ));
         }
@@ -111,9 +112,9 @@ impl LogFile {
             raw.sync().at(path)?;
         }
         let mut file = LogFile::open_at(fs, path, valid)?;
-        // Non si sa se i byte trovati siano mai stati sincronizzati (dopo un
-        // `kill -9` possono essere solo nella cache del sistema operativo):
-        // il primo `sync` deve fare davvero fsync.
+        // There is no telling whether the bytes found were ever synced (after
+        // a `kill -9` they may be only in the operating system's cache): the
+        // first `sync` must really fsync.
         file.dirty = true;
         Ok((file, recovery))
     }
@@ -122,12 +123,12 @@ impl LogFile {
         &self.path
     }
 
-    /// Lunghezza logica: byte scritti più quelli ancora nel buffer.
+    /// Logical length: bytes written plus those still in the buffer.
     pub(crate) fn len(&self) -> u64 {
         self.written + self.buf.len() as u64
     }
 
-    /// Byte nel buffer, non ancora scritti nel file.
+    /// Bytes in the buffer, not yet written to the file.
     pub(crate) fn buffered(&self) -> usize {
         self.buf.len()
     }
@@ -140,7 +141,7 @@ impl LogFile {
         }
     }
 
-    /// Accoda un record (nel buffer) e ne restituisce l'offset.
+    /// Appends a record (to the buffer) and returns its offset.
     pub(crate) fn append(&mut self, parts: &[&[u8]]) -> Result<u64> {
         self.check()?;
         let off = self.len();
@@ -148,7 +149,7 @@ impl LogFile {
         Ok(off)
     }
 
-    /// Scrive il buffer nel file.
+    /// Writes the buffer to the file.
     pub(crate) fn flush(&mut self) -> Result<()> {
         self.check()?;
         if self.buf.is_empty() {
@@ -162,9 +163,9 @@ impl LogFile {
                 Ok(())
             }
             Err(e) => {
-                // La scrittura può essere arrivata a metà: si prova ad
-                // annullarla. Se anche questo fallisce, ci pensa il recupero
-                // alla prossima apertura.
+                // The write may have got only halfway: try to undo it. If
+                // that fails too, recovery takes care of it on the next
+                // open.
                 self.poisoned = true;
                 let _ = self.raw.truncate(self.written);
                 Err(e).at(&self.path)
@@ -172,12 +173,12 @@ impl LogFile {
         }
     }
 
-    /// Scrive il buffer e rende tutto durevole.
+    /// Writes the buffer and makes everything durable.
     pub(crate) fn sync(&mut self) -> Result<()> {
         self.flush()?;
         if self.dirty {
             if let Err(e) = self.raw.sync() {
-                // Dopo un fsync fallito non si sa cosa sia arrivato su disco.
+                // After a failed fsync there is no telling what reached the disk.
                 self.poisoned = true;
                 return Err(e).at(&self.path);
             }
@@ -193,17 +194,17 @@ impl LogFile {
                 return Ok(map.clone());
             }
         }
-        // I record vengono scritti interi (`flush`), quindi ogni record che
-        // inizia prima di `written` è contenuto per intero nella mappatura.
+        // Records are written whole (`flush`), so every record that starts
+        // before `written` is entirely contained in the mapping.
         let map = Arc::new(MappedFile::map_prefix(&self.reader, self.written).at(&self.path)?);
         *guard = Some(map.clone());
         Ok(map)
     }
 
-    /// Legge il record all'offset `off` (anche se è ancora nel buffer).
+    /// Reads the record at offset `off` (even if it is still in the buffer).
     pub(crate) fn read_with<R>(&self, off: u64, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
         if off < HEADER_LEN as u64 {
-            return Err(StoreError::corrupt(&self.path, off, "offset dentro l'header"));
+            return Err(StoreError::corrupt(&self.path, off, "offset inside the header"));
         }
         if off >= self.written {
             record_at(&self.path, &self.buf, off, self.written, f)
@@ -213,7 +214,7 @@ impl LogFile {
         }
     }
 
-    /// Visita in ordine i record a partire da `from`, compresi quelli nel buffer.
+    /// Visits in order the records starting at `from`, including those in the buffer.
     pub(crate) fn scan(&self, from: u64, f: &mut Visit<'_>) -> Result<()> {
         let mut off = from.max(HEADER_LEN as u64);
         if off < self.written {
@@ -224,31 +225,31 @@ impl LogFile {
         Ok(())
     }
 
-    /// Converte il file attivo in un segmento sigillato (dopo `sync`).
+    /// Converts the active file into a sealed segment (after `sync`).
     pub(crate) fn seal(self) -> SealedFile {
         debug_assert!(self.buf.is_empty() && !self.dirty);
         SealedFile { path: self.path, reader: self.reader, len: self.written, map: self.map }
     }
 }
 
-/// Callback di una scansione: offset del record, payload, CRC.
+/// Callback of a scan: record offset, payload, CRC.
 pub(crate) type Visit<'a> = dyn FnMut(u64, &[u8], u32) -> Result<()> + 'a;
 
-/// Legge il record all'offset di file `off` da `data`, i cui byte
-/// corrispondono agli offset di file `base..`.
+/// Reads the record at file offset `off` from `data`, whose bytes
+/// correspond to the file offsets `base..`.
 fn record_at<R>(path: &Path, data: &[u8], off: u64, base: u64, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
     match usize::try_from(off - base).map(|at| read_frame(data, at)) {
         Ok(Frame::Record { payload, crc, .. }) => Ok(f(payload, crc)),
-        Ok(Frame::End) | Err(_) => Err(StoreError::corrupt(path, off, "nessun record a questo offset")),
+        Ok(Frame::End) | Err(_) => Err(StoreError::corrupt(path, off, "no record at this offset")),
         Ok(Frame::Torn(reason)) => Err(StoreError::corrupt(path, off, reason)),
     }
 }
 
-/// Visita i record di `data`, i cui byte corrispondono agli offset di file
-/// `base..`. Restituisce l'offset di file dopo l'ultimo record.
+/// Visits the records of `data`, whose bytes correspond to the file offsets
+/// `base..`. Returns the file offset after the last record.
 fn scan_slice(path: &Path, data: &[u8], from: u64, base: u64, f: &mut Visit<'_>) -> Result<u64> {
     let mut off =
-        usize::try_from(from - base).map_err(|_| StoreError::corrupt(path, from, "offset troppo grande"))?;
+        usize::try_from(from - base).map_err(|_| StoreError::corrupt(path, from, "offset too large"))?;
     loop {
         match read_frame(data, off) {
             Frame::Record { payload, crc, end } => {
@@ -261,7 +262,7 @@ fn scan_slice(path: &Path, data: &[u8], from: u64, base: u64, f: &mut Visit<'_>)
     }
 }
 
-/// Segmento sigillato: completo, durevole, mai più modificato.
+/// Sealed segment: complete, durable, never modified again.
 pub(crate) struct SealedFile {
     path: PathBuf,
     reader: File,
@@ -270,8 +271,8 @@ pub(crate) struct SealedFile {
 }
 
 impl SealedFile {
-    /// Apre un segmento sigillato controllandone solo l'header: i record si
-    /// verificano con il CRC a ogni lettura.
+    /// Opens a sealed segment checking only its header: the records are
+    /// verified with the CRC on every read.
     pub(crate) fn open(path: &Path, kind: LogKind, segment: u32) -> Result<SealedFile> {
         use std::io::Read;
         let mut reader = File::open(path).at(path)?;
@@ -300,14 +301,14 @@ impl SealedFile {
 
     pub(crate) fn read_with<R>(&self, off: u64, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
         if off < HEADER_LEN as u64 {
-            return Err(StoreError::corrupt(&self.path, off, "offset dentro l'header"));
+            return Err(StoreError::corrupt(&self.path, off, "offset inside the header"));
         }
         let map = self.map()?;
         record_at(&self.path, map.bytes(), off, 0, f)
     }
 
-    /// Visita i record da `from`. In un segmento sigillato un record non
-    /// valido è corruzione di dati confermati, non una coda da scartare.
+    /// Visits the records from `from`. In a sealed segment an invalid record
+    /// is corruption of confirmed data, not a tail to discard.
     pub(crate) fn scan(&self, from: u64, f: &mut Visit<'_>) -> Result<()> {
         let map = self.map()?;
         scan_slice(&self.path, map.bytes(), from.max(HEADER_LEN as u64), 0, f)?;
@@ -315,9 +316,9 @@ impl SealedFile {
     }
 }
 
-/// Copia la coda scartata in `lost+found/`, per ispezione. È un salvataggio
-/// di cortesia: i byte scartati non sono mai stati confermati, quindi un
-/// fallimento (per esempio disco pieno) non blocca il recupero.
+/// Copies the discarded tail into `lost+found/`, for inspection. It is a
+/// courtesy save: the discarded bytes were never confirmed, so a failure
+/// (for example disk full) does not block recovery.
 fn save_lost_tail(lost_found: &Path, path: &Path, offset: u64, tail: &[u8]) -> Option<PathBuf> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);

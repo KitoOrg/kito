@@ -1,11 +1,11 @@
-//! Utilità condivise dai test di integrazione.
+//! Utilities shared by the integration tests.
 #![allow(dead_code)]
 
 use kito_core::*;
 use kito_store::{Store, StoreOptions};
 use std::path::PathBuf;
 
-/// Opzioni con segmenti piccoli, per esercitare il cambio di segmento.
+/// Options with small segments, to exercise the switch to a new segment.
 pub fn small_segments() -> StoreOptions {
     StoreOptions { segment_size: 4 << 10, pack_size: 8 << 10, ..StoreOptions::default() }
 }
@@ -14,12 +14,12 @@ pub fn lane_author(lane: LaneId) -> Author {
     Author::agent(format!("agent-{}", lane.0))
 }
 
-/// Genera una sequenza deterministica di op concatenate per lane.
+/// Generates a deterministic sequence of ops chained per lane.
 pub struct OpGen {
     pub n: u64,
     heads: std::collections::HashMap<LaneId, OpId>,
     lanes: u64,
-    /// Sposta i timestamp: cambia i byte dei record senza cambiarne ID e dimensioni.
+    /// Shifts the timestamps: changes the bytes of the records without changing their IDs and sizes.
     pub time_shift: u64,
 }
 
@@ -28,7 +28,7 @@ impl OpGen {
         OpGen { n: 0, heads: Default::default(), lanes, time_shift: 0 }
     }
 
-    /// Riparte dopo le op date, come se le avesse appena generate.
+    /// Resumes after the given ops, as if it had just generated them.
     pub fn resume(lanes: u64, ops: &[Op]) -> Self {
         let mut gen = OpGen::new(lanes);
         gen.n = ops.len() as u64;
@@ -38,15 +38,15 @@ impl OpGen {
         gen
     }
 
-    /// Contenuto deterministico e comprimibile per l'op `i`.
+    /// Deterministic, compressible content for the op `i`.
     pub fn content(i: u64) -> Vec<u8> {
         let lines = 1 + (i * 7) % 23;
         (0..lines)
-            .flat_map(|l| format!("riga {l} della versione {i}: let x_{l} = {};\n", i * l).into_bytes())
+            .flat_map(|l| format!("line {l} of the version {i}: let x_{l} = {};\n", i * l).into_bytes())
             .collect()
     }
 
-    /// Prossima op e blob che deve trovare nello store.
+    /// Next op and the blobs it must find in the store.
     pub fn next(&mut self) -> (Op, Vec<Vec<u8>>) {
         let i = self.n;
         self.n += 1;
@@ -92,7 +92,7 @@ impl OpGen {
         (op, blobs)
     }
 
-    /// Genera la prossima op e la accoda allo store, blob compresi.
+    /// Generates the next op and appends it to the store, blobs included.
     pub fn append_to(&mut self, store: &mut Store) -> Op {
         let (op, blobs) = self.next();
         for b in &blobs {
@@ -103,13 +103,13 @@ impl OpGen {
     }
 }
 
-/// Verifica che lo store contenga esattamente le op date, con i loro blob,
-/// e che il controllo di integrità non trovi problemi.
+/// Verifies that the store holds exactly the given ops, with their blobs,
+/// and that the integrity check finds no problems.
 pub fn assert_holds(store: &Store, ops: &[Op]) {
     for op in ops {
-        assert_eq!(store.get_op(&op.id).unwrap().as_ref(), Some(op), "op {} mancante o diversa", op.id);
+        assert_eq!(store.get_op(&op.id).unwrap().as_ref(), Some(op), "op {} missing or different", op.id);
         for blob in op.kind.blobs() {
-            let data = store.get_blob(&blob).unwrap().unwrap_or_else(|| panic!("blob {blob} mancante"));
+            let data = store.get_blob(&blob).unwrap().unwrap_or_else(|| panic!("blob {blob} missing"));
             assert_eq!(BlobId::of(&data), blob);
         }
     }
@@ -119,7 +119,7 @@ pub fn assert_holds(store: &Store, ops: &[Op]) {
     assert_eq!(report.ops, ops.len() as u64);
 }
 
-/// Copia ricorsiva di una cartella.
+/// Recursive copy of a directory.
 pub fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -133,8 +133,8 @@ pub fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// Offset di fine di ogni record di un file di log (header di 16 byte, poi
-/// record `len:u32le payload crc:u32le`). Parser indipendente da quello dello store.
+/// End offset of every record of a log file (16-byte header, then records
+/// `len:u32le payload crc:u32le`). A parser independent of the store's own.
 pub fn record_ends(file: &[u8]) -> Vec<usize> {
     let mut ends = Vec::new();
     let mut off = 16;
@@ -149,7 +149,7 @@ pub fn record_ends(file: &[u8]) -> Vec<usize> {
     ends
 }
 
-/// Segmenti di un log, in ordine.
+/// Segments of a log, in order.
 pub fn segments(dir: &std::path::Path, sub: &str) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join(sub)).unwrap().map(|e| e.unwrap().path()).collect();
     v.sort();

@@ -1,4 +1,4 @@
-//! Formato dei record nei file di log: `lunghezza + payload + CRC32C`.
+//! Format of the records in log files: `length + payload + CRC32C`.
 //!
 //! ```text
 //! file    = header record*
@@ -6,22 +6,22 @@
 //! record  = len:u32le payload[len] crc32c(len ++ payload):u32le
 //! ```
 //!
-//! Il CRC copre anche la lunghezza: una lunghezza danneggiata non può far
-//! leggere come valido un record sbagliato. Una coda di zeri non è un record
-//! valido, perché il CRC32C di quattro byte nulli non è zero.
+//! The CRC also covers the length: a damaged length cannot cause a wrong
+//! record to be read as valid. A tail of zeros is not a valid record,
+//! because the CRC32C of four zero bytes is not zero.
 
 pub(crate) const LEN_SIZE: usize = 4;
 pub(crate) const CRC_SIZE: usize = 4;
-/// Byte aggiunti a ogni payload.
+/// Bytes added to every payload.
 pub const RECORD_OVERHEAD: usize = LEN_SIZE + CRC_SIZE;
-/// Payload massimo di un record (2 GiB − 1).
+/// Maximum payload of a record (2 GiB − 1).
 pub const MAX_PAYLOAD: usize = i32::MAX as usize;
 
 pub(crate) const HEADER_LEN: usize = 16;
 const MAGIC: &[u8; 4] = b"KITO";
 const FORMAT_VERSION: u8 = 1;
 
-/// Tipo di log, scritto nell'header di ogni file.
+/// Kind of log, written in the header of every file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LogKind {
     Oplog = 1,
@@ -43,24 +43,24 @@ pub(crate) fn encode_header(kind: LogKind, segment: u32) -> [u8; HEADER_LEN] {
 
 pub(crate) fn check_header(data: &[u8], kind: LogKind, segment: u32) -> Result<(), String> {
     let Some(h) = data.get(..HEADER_LEN) else {
-        return Err(format!("header incompleto ({} byte)", data.len()));
+        return Err(format!("incomplete header ({} bytes)", data.len()));
     };
     if &h[..4] != MAGIC {
-        return Err("magic errato".into());
+        return Err("wrong magic".into());
     }
     let crc = u32::from_le_bytes(h[12..16].try_into().unwrap());
     if crc != crc32c::crc32c(&h[..12]) {
-        return Err("CRC dell'header errato".into());
+        return Err("wrong header CRC".into());
     }
     if h[5] != FORMAT_VERSION {
-        return Err(format!("versione del formato {} non supportata", h[5]));
+        return Err(format!("unsupported format version {}", h[5]));
     }
     if h[4] != kind as u8 {
-        return Err(format!("tipo di log {} inatteso (atteso {})", h[4], kind as u8));
+        return Err(format!("unexpected log kind {} (expected {})", h[4], kind as u8));
     }
     let found = u32::from_le_bytes(h[8..12].try_into().unwrap());
     if found != segment {
-        return Err(format!("numero di segmento {found} inatteso (atteso {segment})"));
+        return Err(format!("unexpected segment number {found} (expected {segment})"));
     }
     Ok(())
 }
@@ -69,13 +69,13 @@ fn crc_of(len: [u8; LEN_SIZE], parts: &[&[u8]]) -> u32 {
     parts.iter().fold(crc32c::crc32c(&len), |crc, p| crc32c::crc32c_append(crc, p))
 }
 
-/// Dimensione su disco di un record con questo payload.
+/// On-disk size of a record with this payload.
 pub(crate) fn framed_len(payload_len: usize) -> u64 {
     (payload_len + RECORD_OVERHEAD) as u64
 }
 
-/// Accoda a `out` un record il cui payload è la concatenazione di `parts`.
-/// Restituisce `Err(lunghezza)` se il payload supera [`MAX_PAYLOAD`].
+/// Appends to `out` a record whose payload is the concatenation of `parts`.
+/// Returns `Err(length)` if the payload exceeds [`MAX_PAYLOAD`].
 pub(crate) fn encode_record(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), usize> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
     if len > MAX_PAYLOAD {
@@ -91,38 +91,38 @@ pub(crate) fn encode_record(out: &mut Vec<u8>, parts: &[&[u8]]) -> Result<(), us
     Ok(())
 }
 
-/// Esito della lettura di un record a un certo offset.
+/// Outcome of reading a record at a given offset.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Frame<'a> {
-    /// Record valido; `end` è l'offset del record successivo.
+    /// Valid record; `end` is the offset of the next record.
     Record { payload: &'a [u8], crc: u32, end: usize },
-    /// Fine pulita: l'offset coincide con la fine dei dati.
+    /// Clean end: the offset coincides with the end of the data.
     End,
-    /// Da qui in poi i dati non sono un record valido (incompleto o CRC errato).
+    /// From here on the data is not a valid record (incomplete or wrong CRC).
     Torn(&'static str),
 }
 
 pub(crate) fn read_frame(data: &[u8], offset: usize) -> Frame<'_> {
     let Some(rest) = data.get(offset..) else {
-        return Frame::Torn("offset oltre la fine dei dati");
+        return Frame::Torn("offset past the end of the data");
     };
     if rest.is_empty() {
         return Frame::End;
     }
     let Some(len_le) = rest.first_chunk::<LEN_SIZE>() else {
-        return Frame::Torn("lunghezza incompleta");
+        return Frame::Torn("incomplete length");
     };
     let len = u32::from_le_bytes(*len_le) as usize;
     if len > MAX_PAYLOAD {
-        return Frame::Torn("lunghezza non plausibile");
+        return Frame::Torn("implausible length");
     }
     let Some(body) = rest.get(LEN_SIZE..LEN_SIZE + len + CRC_SIZE) else {
-        return Frame::Torn("record incompleto");
+        return Frame::Torn("incomplete record");
     };
     let (payload, crc_le) = body.split_at(len);
     let crc = u32::from_le_bytes(crc_le.try_into().unwrap());
     if crc != crc_of(*len_le, &[payload]) {
-        return Frame::Torn("CRC errato");
+        return Frame::Torn("wrong CRC");
     }
     Frame::Record { payload, crc, end: offset + LEN_SIZE + len + CRC_SIZE }
 }
@@ -177,14 +177,14 @@ mod tests {
                         prop_assert_eq!(end as u64, off as u64 + framed_len(p.len()));
                         off = end;
                     }
-                    other => prop_assert!(false, "atteso un record, trovato {:?}", other),
+                    other => prop_assert!(false, "expected a record, found {:?}", other),
                 }
             }
             prop_assert_eq!(read_frame(&buf, off), Frame::End);
         }
 
-        /// Troncare in un punto qualsiasi lascia leggibili tutti e soli i
-        /// record interamente scritti.
+        /// Truncating at any point leaves readable all and only the records
+        /// that were written in full.
         #[test]
         fn truncation_keeps_exactly_the_complete_records(
             payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 1..12),
@@ -215,7 +215,7 @@ mod tests {
             prop_assert_eq!(seen, complete);
         }
 
-        /// Un singolo bit invertito non passa mai inosservato.
+        /// A single flipped bit never goes unnoticed.
         #[test]
         fn any_bit_flip_is_detected(
             payload in prop::collection::vec(any::<u8>(), 0..200),
@@ -228,10 +228,10 @@ mod tests {
             buf[i] ^= 1 << bit;
             match read_frame(&buf, 0) {
                 Frame::Record { payload: got, end, .. } => {
-                    // L'unico modo di restare "valido" sarebbe una collisione del CRC.
-                    prop_assert!(false, "bit flip non rilevato: {} byte, fine {}", got.len(), end);
+                    // The only way to stay "valid" would be a CRC collision.
+                    prop_assert!(false, "bit flip not detected: {} bytes, end {}", got.len(), end);
                 }
-                Frame::End => prop_assert!(false, "End inatteso"),
+                Frame::End => prop_assert!(false, "unexpected End"),
                 Frame::Torn(_) => {}
             }
         }

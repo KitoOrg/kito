@@ -1,26 +1,26 @@
-//! `kito-store`: lo store su disco di Kito.
+//! `kito-store`: Kito's on-disk store.
 //!
 //! ```text
 //! .kito/
-//!   format        versione del formato dello store
-//!   lock          lock esclusivo dell'unico scrittore
-//!   objects/      blob compressi zstd, indirizzati con BLAKE3, in pack append-only
-//!   oplog/        segmenti append-only; record = lunghezza + payload + CRC32C
-//!   index/        indici ricostruibili (redb)
-//!   lanes/<id>/   stato delle lane (gestito da `kito-lane`)
-//!   checkpoints   log append-only dei checkpoint
-//!   intents       log append-only degli intent (il "perché" delle op)
-//!   lost+found/   code di log scartate dal recupero dopo un crash
+//!   format        version of the store format
+//!   lock          exclusive lock of the single writer
+//!   objects/      zstd-compressed blobs, addressed by BLAKE3, in append-only packs
+//!   oplog/        append-only segments; record = length + payload + CRC32C
+//!   index/        rebuildable indexes (redb)
+//!   lanes/<id>/   lane state (managed by `kito-lane`)
+//!   checkpoints   append-only log of the checkpoints
+//!   intents       append-only log of the intents (the "why" of the ops)
+//!   lost+found/   log tails discarded by recovery after a crash
 //! ```
 //!
-//! Due invarianti:
+//! Two invariants:
 //!
-//! 1. gli indici si possono sempre ricostruire da `objects/` e `oplog/`;
-//! 2. un crash durante una scrittura lascia al massimo un record finale
-//!    troncato, che alla riapertura viene scartato grazie al CRC. Tutto ciò
-//!    che [`Store::commit`] ha confermato sopravvive.
+//! 1. the indexes can always be rebuilt from `objects/` and `oplog/`;
+//! 2. a crash during a write leaves at most one torn final record, which is
+//!    discarded on reopening thanks to the CRC. Everything that
+//!    [`Store::commit`] has confirmed survives.
 //!
-//! `unsafe` compare solo nel modulo `mmap`.
+//! `unsafe` appears only in the `mmap` module.
 
 mod checkpoints;
 mod error;

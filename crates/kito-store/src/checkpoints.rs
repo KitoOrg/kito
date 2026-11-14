@@ -1,7 +1,7 @@
-//! Log append-only dei checkpoint (`.kito/checkpoints`).
+//! Append-only log of the checkpoints (`.kito/checkpoints`).
 //!
-//! Un checkpoint si aggiorna (per esempio con il commit git dopo l'export)
-//! accodando un nuovo record con lo stesso ID: vale l'ultimo.
+//! A checkpoint is updated (for example with the git commit after the export)
+//! by appending a new record with the same ID: the last one wins.
 
 use crate::error::{Result, StoreError};
 use crate::fs::FileSystem;
@@ -30,7 +30,7 @@ impl CheckpointLog {
                 return Err(StoreError::corrupt(
                     path,
                     0,
-                    format!("il file manca ma risultano confermati {floor} byte: per accettare la perdita riaprire lo store in modalità riparazione"),
+                    format!("the file is missing but {floor} bytes are recorded as confirmed: to accept the loss, reopen the store in repair mode"),
                 ));
             }
             (LogFile::create(fs, path, LogKind::Checkpoints, 0)?, LogRecovery::default())
@@ -38,14 +38,14 @@ impl CheckpointLog {
         let mut by_id = BTreeMap::new();
         file.scan(0, &mut |off, payload, _| {
             let ck: Checkpoint = codec::from_slice(payload)
-                .map_err(|e| StoreError::corrupt(path, off, format!("checkpoint illeggibile: {e}")))?;
+                .map_err(|e| StoreError::corrupt(path, off, format!("unreadable checkpoint: {e}")))?;
             by_id.insert(ck.id, ck);
             Ok(())
         })?;
         Ok((CheckpointLog { file, by_id }, recovery))
     }
 
-    /// Registra (o aggiorna) un checkpoint in modo durevole.
+    /// Records (or updates) a checkpoint durably.
     pub(crate) fn put(&mut self, ck: &Checkpoint) -> Result<()> {
         let bytes = codec::to_vec(ck)?;
         self.file.append(&[&bytes])?;
@@ -62,7 +62,7 @@ impl CheckpointLog {
         self.by_id.values()
     }
 
-    /// Lunghezza del file: tutto ciò che contiene è durevole.
+    /// Length of the file: everything it contains is durable.
     pub(crate) fn len(&self) -> u64 {
         self.file.len()
     }

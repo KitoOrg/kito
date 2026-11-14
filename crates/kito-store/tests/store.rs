@@ -1,4 +1,4 @@
-//! Comportamento di base dello store.
+//! Basic behavior of the store.
 
 mod common;
 
@@ -41,30 +41,30 @@ fn blobs_round_trip_deduplicate_and_compress() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = Store::init(tmp.path()).unwrap();
 
-    let text = "fn main() { println!(\"ciao\"); }\n".repeat(2_000).into_bytes();
+    let text = "fn main() { println!(\"hey!\"); }\n".repeat(2_000).into_bytes();
     let noise: Vec<u8> = (0..5_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
     let cases: Vec<Vec<u8>> = vec![vec![], b"x".to_vec(), text.clone(), noise];
 
     let ids: Vec<BlobId> = cases.iter().map(|c| store.put_blob(c).unwrap()).collect();
     for (id, data) in ids.iter().zip(&cases) {
         assert_eq!(*id, BlobId::of(data));
-        // Leggibile subito, prima del commit.
+        // Readable right away, before the commit.
         assert_eq!(store.get_blob(id).unwrap().as_deref(), Some(&data[..]));
     }
-    assert_eq!(store.put_blob(&text).unwrap(), ids[2], "stesso contenuto, stesso ID");
-    assert_eq!(store.stats().unwrap().blobs, 4, "il duplicato non viene riscritto");
-    assert_eq!(store.get_blob(&BlobId::of(b"assente")).unwrap(), None);
+    assert_eq!(store.put_blob(&text).unwrap(), ids[2], "same content, same ID");
+    assert_eq!(store.stats().unwrap().blobs, 4, "the duplicate is not rewritten");
+    assert_eq!(store.get_blob(&BlobId::of(b"missing")).unwrap(), None);
     store.close().unwrap();
 
     let pack = std::fs::metadata(tmp.path().join("objects/00000000.pack")).unwrap().len();
-    assert!(pack < 10_000, "64 kB di testo ripetitivo devono comprimersi: pack di {pack} byte");
+    assert!(pack < 10_000, "64 kB of repetitive text must compress: pack of {pack} bytes");
 
     let mut store = Store::open(tmp.path()).unwrap();
     for (id, data) in ids.iter().zip(&cases) {
         assert_eq!(store.get_blob(id).unwrap().as_deref(), Some(&data[..]));
     }
     assert_eq!(store.put_blob(&text).unwrap(), ids[2]);
-    assert_eq!(store.stats().unwrap().blobs, 4, "deduplicato anche dopo la riapertura");
+    assert_eq!(store.stats().unwrap().blobs, 4, "deduplicated after reopening too");
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn ops_are_validated_before_being_logged() {
     let author = Author::human("fra");
     let at = Hlc::new(1, 0);
 
-    let blob = BlobId::of(b"contenuto");
+    let blob = BlobId::of(b"content");
     let add = Op::new(
         [],
         LaneId::MAIN,
@@ -84,13 +84,13 @@ fn ops_are_validated_before_being_logged() {
         None,
     )
     .unwrap();
-    // Il blob non è nello store.
+    // The blob is not in the store.
     assert!(matches!(store.append_op(&add), Err(StoreError::InvalidOp(m)) if m.contains("blob")));
-    store.put_blob(b"contenuto").unwrap();
+    store.put_blob(b"content").unwrap();
     assert!(store.append_op(&add).unwrap());
-    assert!(!store.append_op(&add).unwrap(), "la stessa op due volte è un no-op");
+    assert!(!store.append_op(&add).unwrap(), "the same op twice is a no-op");
 
-    // Genitore sconosciuto.
+    // Unknown parent.
     let orphan = Op::new(
         [OpId(Hash::of(b"?"))],
         LaneId::MAIN,
@@ -100,16 +100,16 @@ fn ops_are_validated_before_being_logged() {
         None,
     )
     .unwrap();
-    assert!(matches!(store.append_op(&orphan), Err(StoreError::InvalidOp(m)) if m.contains("genitore")));
+    assert!(matches!(store.append_op(&orphan), Err(StoreError::InvalidOp(m)) if m.contains("parent")));
 
-    // ID che non corrisponde al contenuto.
+    // ID that does not match the content.
     let mut forged =
         Op::new([add.id], LaneId::MAIN, author, at, OpKind::FileRemove { path: "a.txt".into() }, None)
             .unwrap();
-    forged.id = OpId(Hash::of(b"falso"));
+    forged.id = OpId(Hash::of(b"fake"));
     assert!(matches!(store.append_op(&forged), Err(StoreError::InvalidOp(m)) if m.contains("ID")));
 
-    // Gli errori di validazione non avvelenano lo store.
+    // Validation errors do not poison the store.
     assert!(!store.is_poisoned());
     store.commit().unwrap();
     assert_holds(&store, &[add]);
@@ -126,8 +126,8 @@ fn lane_and_symbol_queries_see_pending_and_committed_ops() {
         for _ in 0..25 {
             ops.push(gen.append_to(&mut store));
         }
-        // A round alterni si interroga prima del commit: le op accodate
-        // devono essere visibili quanto quelle confermate.
+        // On alternate rounds the queries run before the commit: the appended
+        // ops must be as visible as the confirmed ones.
         if round % 2 == 0 {
             store.commit().unwrap();
         }
@@ -137,7 +137,7 @@ fn lane_and_symbol_queries_see_pending_and_committed_ops() {
             assert_eq!(store.lane_head(lane).unwrap(), expected.last().map(|o| o.id));
             let all = store.lane_ops(lane, 0, usize::MAX).unwrap();
             assert_eq!(all.iter().collect::<Vec<_>>(), expected);
-            // Paginazione a cavallo tra indice e op in attesa.
+            // Pagination straddling the index and the pending ops.
             let page = store.lane_ops(lane, 5, 20).unwrap();
             assert_eq!(page.iter().collect::<Vec<_>>(), expected[5..expected.len().min(25)].to_vec());
         }
@@ -176,10 +176,14 @@ fn everything_survives_a_clean_reopen_across_many_segments() {
         store.close().unwrap();
     }
     let store = Store::open_with(tmp.path(), small_segments()).unwrap();
-    assert_eq!(store.recovery().index, IndexRecovery::UpToDate, "dopo close() l'indice è già in pari");
+    assert_eq!(
+        store.recovery().index,
+        IndexRecovery::UpToDate,
+        "after close() the index is already caught up"
+    );
     let stats = store.stats().unwrap();
-    assert!(stats.oplog_segments > 10, "segmenti dell'oplog: {}", stats.oplog_segments);
-    assert!(stats.packs > 3, "pack: {}", stats.packs);
+    assert!(stats.oplog_segments > 10, "oplog segments: {}", stats.oplog_segments);
+    assert!(stats.packs > 3, "packs: {}", stats.packs);
     assert_holds(&store, &ops);
 
     let mut scanned = Vec::new();
@@ -189,7 +193,7 @@ fn everything_survives_a_clean_reopen_across_many_segments() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(scanned, ops, "scan_ops restituisce le op in ordine di log");
+    assert_eq!(scanned, ops, "scan_ops returns the ops in log order");
 }
 
 #[test]
@@ -202,7 +206,7 @@ fn uncommitted_work_is_lost_on_drop_but_nothing_else() {
     for _ in 0..40 {
         gen.append_to(&mut store);
     }
-    drop(store); // nessun commit: come un crash
+    drop(store); // no commit: like a crash
 
     let store = Store::open(tmp.path()).unwrap();
     assert_holds(&store, &confirmed);
@@ -213,15 +217,15 @@ fn a_blob_larger_than_a_pack_gets_its_own_pack() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = Store::init_with(tmp.path(), small_segments()).unwrap();
     let big: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8).collect();
-    let small = b"piccolo".to_vec();
+    let small = b"small".to_vec();
     let a = store.put_blob(&small).unwrap();
     let b = store.put_blob(&big).unwrap();
-    let c = store.put_blob(b"dopo").unwrap();
+    let c = store.put_blob(b"after").unwrap();
     store.close().unwrap();
     let store = Store::open_with(tmp.path(), small_segments()).unwrap();
     assert_eq!(store.get_blob(&a).unwrap().unwrap(), small);
     assert_eq!(store.get_blob(&b).unwrap().unwrap(), big);
-    assert_eq!(store.get_blob(&c).unwrap().unwrap(), b"dopo");
+    assert_eq!(store.get_blob(&c).unwrap().unwrap(), b"after");
     assert!(store.verify().unwrap().is_ok());
 }
 
@@ -236,12 +240,12 @@ fn checkpoints_are_durable_and_updatable() {
     let mut ck = Checkpoint {
         id: store.next_checkpoint_id(),
         head: first.id,
-        label: "primo".into(),
+        label: "first".into(),
         created_by: Author::human("fra"),
         verification: None,
         git_commit: None,
     };
-    // put_checkpoint conferma da sé le op accodate.
+    // put_checkpoint confirms the appended ops on its own.
     store.put_checkpoint(&ck).unwrap();
     assert_eq!(store.next_checkpoint_id(), CheckpointId(2));
 
@@ -254,7 +258,7 @@ fn checkpoints_are_durable_and_updatable() {
 
     let store = Store::open(tmp.path()).unwrap();
     assert_eq!(store.checkpoints().count(), 1);
-    assert_eq!(store.checkpoint(CheckpointId(1)), Some(&ck), "vale l'ultimo record con lo stesso ID");
+    assert_eq!(store.checkpoint(CheckpointId(1)), Some(&ck), "the last record with the same ID wins");
     assert_eq!(store.next_checkpoint_id(), CheckpointId(2));
     assert_holds(&store, &[first]);
 }
@@ -279,7 +283,7 @@ fn rebuilt_index_answers_like_the_incremental_one() {
     assert_eq!(snapshot(&store), before);
     assert_holds(&store, &ops);
 
-    // Lo store resta scrivibile dopo la ricostruzione.
+    // The store stays writable after the rebuild.
     let more = gen.append_to(&mut store);
     store.close().unwrap();
     let store = Store::open_with(tmp.path(), small_segments()).unwrap();
@@ -293,11 +297,11 @@ fn append_commits_on_its_own_when_the_buffer_fills() {
     let mut store = Store::init_with(tmp.path(), opts).unwrap();
     let mut gen = OpGen::new(1);
     let ops: Vec<Op> = (0..200).map(|_| gen.append_to(&mut store)).collect();
-    drop(store); // senza commit esplicito
+    drop(store); // without an explicit commit
 
     let store = Store::open(tmp.path()).unwrap();
     let survived = store.op_count().unwrap();
-    assert!(survived > 150 && survived < 200, "confermate dall'auto-commit: {survived}");
+    assert!(survived > 150 && survived < 200, "confirmed by the auto-commit: {survived}");
     assert_holds(&store, &ops[..survived as usize]);
 }
 
@@ -305,15 +309,15 @@ fn append_commits_on_its_own_when_the_buffer_fills() {
 fn intents_are_durable_and_ops_can_only_cite_known_ones() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = Store::init(tmp.path()).unwrap();
-    let intent = Intent::new("aggiungi cache sulle richieste utente", Some("task #55".into()), None).unwrap();
-    let kind = OpKind::FileRemove { path: "mai-esistito".into() };
+    let intent = Intent::new("add a cache on user requests", Some("task #55".into()), None).unwrap();
+    let kind = OpKind::FileRemove { path: "never-existed".into() };
 
-    // Un'op non può citare un intent che lo store non conosce.
+    // An op cannot cite an intent that the store does not know.
     let op = Op::new([], LaneId::MAIN, Author::agent("a"), Hlc::new(1, 0), kind, Some(intent.id)).unwrap();
     assert!(matches!(store.append_op(&op), Err(StoreError::InvalidOp(m)) if m.contains("intent")));
 
     store.put_intent(&intent).unwrap();
-    store.put_intent(&intent).unwrap(); // idempotente
+    store.put_intent(&intent).unwrap(); // idempotent
     assert!(store.append_op(&op).unwrap());
     let mut forged = intent.clone();
     forged.summary.push('!');

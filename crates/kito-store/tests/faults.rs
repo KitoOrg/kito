@@ -1,6 +1,6 @@
-//! Fault injection: file troncati o danneggiati, disco pieno, fsync falliti,
-//! perdita di corrente. La regola: nessuna op confermata va persa, e un danno
-//! a dati confermati non viene mai nascosto.
+//! Fault injection: truncated or damaged files, disk full, failed fsyncs,
+//! power loss. The rule: no confirmed op is ever lost, and damage to
+//! confirmed data is never hidden.
 
 mod common;
 
@@ -17,7 +17,7 @@ fn repair(opts: StoreOptions) -> StoreOptions {
     StoreOptions { repair: true, ..opts }
 }
 
-/// Crea uno store con `n` op confermate e lo chiude.
+/// Creates a store with `n` confirmed ops and closes it.
 fn build(dir: &Path, opts: &StoreOptions, n: usize) -> Vec<Op> {
     let mut store = Store::init_with(dir, opts.clone()).unwrap();
     let mut gen = OpGen::new(3);
@@ -36,10 +36,10 @@ fn truncate(path: &Path, len: usize) {
     fs::OpenOptions::new().write(true).open(path).unwrap().set_len(len as u64).unwrap();
 }
 
-/// Uno store in cui l'indice è rimasto a `first` op mentre il log ne ha
-/// `first + more`: è lo stato dopo un crash arrivato tra due sincronizzazioni
-/// dell'indice. Restituisce le op e l'offset fin dove l'indice le dava per
-/// confermate.
+/// A store in which the index was left at `first` ops while the log has
+/// `first + more` of them: it is the state after a crash that came between
+/// two syncs of the index. Returns the ops and the offset up to which the
+/// index considered them confirmed.
 fn store_with_index_behind(dir: &Path, first: usize, more: usize) -> (Vec<Op>, usize) {
     let mut ops = build(dir, &StoreOptions::default(), first);
     let index = dir.join("index/index.redb");
@@ -64,20 +64,20 @@ fn a_torn_tail_is_discarded_at_every_possible_byte() {
     assert_eq!(ends.len(), ops.len());
     assert_eq!(ends[5], confirmed_len);
 
-    // Ogni lunghezza possibile da "tutto ciò che era confermato" a "tutto".
+    // Every possible length from "everything that was confirmed" to "everything".
     for cut in confirmed_len..=log.len() {
         let dir = tmp.path().join("cut");
         let _ = fs::remove_dir_all(&dir);
         copy_dir(&base, &dir);
         truncate(&dir.join("oplog/00000000.seg"), cut);
 
-        let mut store = Store::open(&dir).unwrap_or_else(|e| panic!("taglio a {cut}: {e}"));
+        let mut store = Store::open(&dir).unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
         let complete = ends.iter().filter(|&&e| e <= cut).count();
         let valid_end = ends[complete - 1];
         let recovery = store.recovery().clone();
-        assert_eq!(recovery.oplog.discarded_bytes, (cut - valid_end) as u64, "taglio a {cut}");
+        assert_eq!(recovery.oplog.discarded_bytes, (cut - valid_end) as u64, "cut at {cut}");
         if cut > valid_end {
-            let saved = recovery.oplog.saved_to.as_ref().expect("coda salvata in lost+found");
+            let saved = recovery.oplog.saved_to.as_ref().expect("tail saved in lost+found");
             assert_eq!(fs::read(saved).unwrap(), &log[valid_end..cut]);
         }
         assert_eq!(
@@ -86,8 +86,8 @@ fn a_torn_tail_is_discarded_at_every_possible_byte() {
         );
         assert_holds(&store, &ops[..complete]);
 
-        // Dopo il recupero lo store si usa normalmente (controllato sui
-        // confini dei record e a campione, per non rifare fsync a ogni byte).
+        // After recovery the store is used normally (checked on the record
+        // boundaries and on a sample, so as not to redo fsync at every byte).
         if !ends.contains(&cut) && cut % 61 != 0 {
             continue;
         }
@@ -122,17 +122,17 @@ fn truncation_below_the_confirmed_point_is_an_error_unless_repairing() {
         let seg = dir.join("oplog/00000000.seg");
         truncate(&seg, cut);
 
-        // Senza riparazione: errore, e il file non viene toccato.
+        // Without repair: an error, and the file is not touched.
         match Store::open(&dir) {
             Err(StoreError::Corrupt { reason, .. }) => {
-                assert!(reason.contains("riparazione"), "{reason}")
+                assert!(reason.contains("repair mode"), "{reason}")
             }
-            other => panic!("taglio a {cut}: atteso Corrupt, ottenuto {:?}", other.map(|_| ())),
+            other => panic!("cut at {cut}: expected Corrupt, got {:?}", other.map(|_| ())),
         }
         assert_eq!(fs::metadata(&seg).unwrap().len(), cut as u64);
         assert!(!dir.join("lost+found").exists());
 
-        // Con riparazione: sopravvive il prefisso integro, l'indice è rifatto.
+        // With repair: the intact prefix survives, the index is rebuilt.
         let complete = ends.iter().filter(|&&e| e <= cut).count();
         let store = Store::open_with(&dir, repair(StoreOptions::default())).unwrap();
         if complete > 0 {
@@ -182,7 +182,7 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
     assert_holds(&store, &ops);
     drop(store);
 
-    // Il recupero è idempotente: la seconda apertura non trova più nulla.
+    // Recovery is idempotent: the second open finds nothing more.
     let store = Store::open(dir).unwrap();
     assert_eq!(store.recovery().discarded_bytes(), 0);
 }
@@ -196,26 +196,26 @@ fn damage_in_a_sealed_segment_is_reported_on_read_and_by_verify() {
     assert!(segs.len() > 4);
     let victim = &segs[1];
     let before = fs::metadata(victim).unwrap().len();
-    flip_byte(victim, 16 + 40); // dentro il primo record del segmento
+    flip_byte(victim, 16 + 40); // inside the first record of the segment
 
     let store = Store::open_with(dir, small_segments()).unwrap();
-    assert_eq!(fs::metadata(victim).unwrap().len(), before, "un segmento sigillato non viene mai troncato");
+    assert_eq!(fs::metadata(victim).unwrap().len(), before, "a sealed segment is never truncated");
 
     let mut unreadable = Vec::new();
     for op in &ops {
         match store.get_op(&op.id) {
             Ok(found) => assert_eq!(found.as_ref(), Some(op)),
             Err(StoreError::Corrupt { .. }) => unreadable.push(op.id),
-            Err(e) => panic!("errore inatteso: {e}"),
+            Err(e) => panic!("unexpected error: {e}"),
         }
     }
-    assert_eq!(unreadable.len(), 1, "solo l'op danneggiata è illeggibile");
+    assert_eq!(unreadable.len(), 1, "only the damaged op is unreadable");
     let report = store.verify().unwrap();
     assert!(!report.is_ok());
     assert!(report.problems.iter().any(|p| p.contains("oplog")), "{:?}", report.problems);
     drop(store);
 
-    // Senza indice bisognerebbe rileggere tutto il log: l'errore emerge subito.
+    // Without the index the whole log would have to be reread: the error surfaces right away.
     fs::remove_file(dir.join("index/index.redb")).unwrap();
     assert!(matches!(Store::open_with(dir, small_segments()), Err(StoreError::Corrupt { .. })));
 }
@@ -240,7 +240,7 @@ fn damage_to_confirmed_data_in_the_active_files_is_never_silently_dropped() {
         let len_before = fs::metadata(dir.join(file)).unwrap().len();
 
         assert!(matches!(Store::open(&dir), Err(StoreError::Corrupt { .. })), "{file}@{at}");
-        assert_eq!(fs::metadata(dir.join(file)).unwrap().len(), len_before, "{file}: nessun troncamento");
+        assert_eq!(fs::metadata(dir.join(file)).unwrap().len(), len_before, "{file}: no truncation");
 
         let store = Store::open_with(&dir, repair(StoreOptions::default())).unwrap();
         assert!(store.recovery().discarded_bytes() > 0);
@@ -248,10 +248,14 @@ fn damage_to_confirmed_data_in_the_active_files_is_never_silently_dropped() {
             let complete = ends.iter().filter(|&&e| e <= at).count();
             assert_holds(&store, &ops[..complete]);
         } else {
-            // Persi dei blob: le op restano, e verify dice quali sono rimaste orfane.
+            // Some blobs are lost: the ops remain, and verify says which ones were left orphaned.
             assert_eq!(store.op_count().unwrap(), 30);
             let report = store.verify().unwrap();
-            assert!(report.problems.iter().any(|p| p.contains("assente dai pack")), "{:?}", report.problems);
+            assert!(
+                report.problems.iter().any(|p| p.contains("missing from the packs")),
+                "{:?}",
+                report.problems
+            );
         }
     }
 }
@@ -263,18 +267,18 @@ fn missing_segments_are_detected() {
     let ops = build(&base, &small_segments(), 200);
     let all = segments(&base, "oplog");
 
-    // Manca un segmento in mezzo.
+    // A segment in the middle is missing.
     let dir = tmp.path().join("hole");
     copy_dir(&base, &dir);
     fs::remove_file(segments(&dir, "oplog")[2].clone()).unwrap();
     match Store::open_with(&dir, small_segments()) {
         Err(StoreError::Corrupt { reason, .. }) => {
-            assert!(reason.contains("manca il segmento 2"), "{reason}")
+            assert!(reason.contains("segment 2 is missing"), "{reason}")
         }
-        other => panic!("atteso Corrupt, ottenuto {:?}", other.map(|_| ())),
+        other => panic!("expected Corrupt, got {:?}", other.map(|_| ())),
     }
 
-    // Mancano gli ultimi segmenti: dati confermati spariti.
+    // The last segments are missing: confirmed data has vanished.
     let dir = tmp.path().join("short");
     copy_dir(&base, &dir);
     for seg in &segments(&dir, "oplog")[all.len() - 2..] {
@@ -312,8 +316,8 @@ fn the_index_can_always_be_rebuilt_from_the_logs() {
         truncate(p, len as usize / 2);
     })));
 
-    // Indice di un altro store con log della stessa forma: le posizioni
-    // sarebbero plausibili, ma l'ultima op indicizzata non corrisponde.
+    // Index of another store with logs of the same shape: the positions
+    // would be plausible, but the last indexed op does not match.
     let other = tmp.path().join("other");
     {
         let mut store = Store::init_with(&other, small_segments()).unwrap();
@@ -327,13 +331,13 @@ fn the_index_can_always_be_rebuilt_from_the_logs() {
     let foreign = fs::read(other.join(index)).unwrap();
     let r = reopen("foreign", &|p| fs::write(p, &foreign).unwrap());
     assert!(
-        matches!(&r, IndexRecovery::Rebuilt { reason, .. } if reason.contains("non è più nel log")),
+        matches!(&r, IndexRecovery::Rebuilt { reason, .. } if reason.contains("is no longer in the log")),
         "{r:?}"
     );
 }
 
-/// Prova ad accodare e confermare op finché una scrittura fallisce.
-/// Restituisce le op confermate e quelle tentate.
+/// Tries to append and confirm ops until a write fails.
+/// Returns the confirmed ops and the attempted ones.
 fn write_until_failure(
     store: &mut Store,
     gen: &mut OpGen,
@@ -366,8 +370,8 @@ fn write_until_failure(
 fn a_full_disk_never_loses_confirmed_ops() {
     let tmp = tempfile::tempdir().unwrap();
     let mut failures = 0;
-    // Lo spazio finisce in punti diversi: a metà di un pack, di un segmento
-    // dell'oplog, o alla creazione di un nuovo segmento.
+    // The space runs out at different points: in the middle of a pack, of an
+    // oplog segment, or at the creation of a new segment.
     for space in (0..6_000).step_by(211) {
         let dir = tmp.path().join(format!("s{space}"));
         let faulty = FaultyFs::new();
@@ -382,21 +386,21 @@ fn a_full_disk_never_loses_confirmed_ops() {
         confirmed.extend(more);
         if let Some(err) = err {
             failures += 1;
-            assert!(err.is_storage_full(), "spazio {space}: {err}");
+            assert!(err.is_storage_full(), "space {space}: {err}");
             assert!(store.is_poisoned());
             assert!(matches!(store.commit(), Err(StoreError::Poisoned)));
             assert!(matches!(store.put_blob(b"x"), Err(StoreError::Poisoned)));
-            // Le letture di ciò che era confermato continuano a funzionare.
+            // Reads of what was confirmed keep working.
             for op in &confirmed {
                 assert_eq!(store.get_op(&op.id).unwrap().as_ref(), Some(op));
             }
         }
         drop(store);
 
-        // Liberato lo spazio, lo store si riapre con tutte le op confermate.
+        // Once the space is freed, the store reopens with all the confirmed ops.
         let mut store = Store::open_with(&dir, small_segments()).unwrap();
         let survived = store.op_count().unwrap() as usize;
-        assert!(survived >= confirmed.len(), "spazio {space}: {survived} < {}", confirmed.len());
+        assert!(survived >= confirmed.len(), "space {space}: {survived} < {}", confirmed.len());
         let mut regen = OpGen::new(3);
         let all: Vec<Op> = (0..20 + attempted.len()).map(|_| regen.next().0).collect();
         assert_holds(&store, &all[..survived]);
@@ -406,7 +410,7 @@ fn a_full_disk_never_loses_confirmed_ops() {
         store.close().unwrap();
         assert_eq!(Store::open_with(&dir, small_segments()).unwrap().get_op(&next.id).unwrap(), Some(next));
     }
-    assert!(failures > 20, "il disco deve riempirsi nella maggior parte dei casi: {failures}");
+    assert!(failures > 20, "the disk must fill up in most cases: {failures}");
 }
 
 #[test]
@@ -422,7 +426,7 @@ fn a_failed_fsync_poisons_the_store_and_reopening_recovers() {
 
         faulty.fail_sync_after(syncs_before_failure);
         let (more, attempted, err) = write_until_failure(&mut store, &mut gen, 4);
-        let err = err.expect("un fsync deve fallire");
+        let err = err.expect("an fsync must fail");
         assert!(matches!(err, StoreError::Io { .. }), "{err}");
         assert!(store.is_poisoned());
         drop(store);
@@ -446,8 +450,8 @@ fn a_partial_write_that_cannot_be_undone_is_discarded_at_reopen() {
     let mut gen = OpGen::new(2);
     let (confirmed, _, _) = write_until_failure(&mut store, &mut gen, 3);
 
-    // Lo spazio finisce a metà scrittura e nemmeno il truncate riesce: nei
-    // file resta un record a metà.
+    // The space runs out in the middle of a write and not even the truncate
+    // succeeds: a half-written record is left in the files.
     faulty.set_space(150);
     faulty.fail_truncate(true);
     let (more, _, err) = write_until_failure(&mut store, &mut gen, 4);
@@ -463,16 +467,16 @@ fn a_partial_write_that_cannot_be_undone_is_discarded_at_reopen() {
 enum Action {
     Append(usize),
     Commit,
-    /// Riapertura pulita.
+    /// Clean reopen.
     Reopen,
-    /// Il processo muore: ciò che non era stato scritto nei file è perso.
+    /// The process dies: what had not been written to the files is lost.
     Kill,
-    /// Salta la corrente: anche i byte scritti ma non sincronizzati sono a rischio.
+    /// The power goes out: the bytes written but not synced are at risk too.
     PowerLoss {
         fates: Vec<(u8, u64)>,
         lose_index: bool,
     },
-    /// Un fsync fallisce durante un commit, poi salta la corrente.
+    /// An fsync fails during a commit, then the power goes out.
     FailedCommit {
         syncs_before_failure: u64,
         fates: Vec<(u8, u64)>,
@@ -509,9 +513,9 @@ fn fate_of(fates: &[(u8, u64)], i: usize) -> (Unsynced, u64) {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
 
-    /// Modello: qualunque sequenza di scritture, commit, crash e perdite di
-    /// corrente lascia nello store un prefisso della storia che contiene
-    /// almeno tutte le op confermate, con blob e indici coerenti.
+    /// Model: any sequence of writes, commits, crashes and power losses
+    /// leaves in the store a prefix of the history that contains at least
+    /// all the confirmed ops, with consistent blobs and indexes.
     #[test]
     fn confirmed_ops_survive_any_crash(
         actions in prop::collection::vec(arb_action(), 1..25),
@@ -530,7 +534,7 @@ proptest! {
 
         let mut faulty = FaultyFs::new();
         let mut store = Some(Store::init_with(dir, options(&faulty)).unwrap());
-        // `history`: tutte le op accodate; le prime `confirmed` sono confermate.
+        // `history`: all the appended ops; the first `confirmed` are confirmed.
         let mut history: Vec<Op> = Vec::new();
         let mut confirmed = 0usize;
         let mut gen = OpGen::new(LANES);
@@ -567,8 +571,8 @@ proptest! {
                 Action::FailedCommit { syncs_before_failure, fates } => {
                     history.push(gen.append_to(live));
                     faulty.fail_sync_after(syncs_before_failure);
-                    // Se il commit ha bisogno di meno fsync di quelli concessi
-                    // (per esempio un'op senza blob), riesce: è un commit normale.
+                    // If the commit needs fewer fsyncs than those granted (for
+                    // example an op without blobs), it succeeds: it is a normal commit.
                     match live.commit() {
                         Ok(()) => confirmed = history.len(),
                         Err(_) => prop_assert!(live.is_poisoned()),
@@ -584,11 +588,11 @@ proptest! {
                 faulty = FaultyFs::new();
                 let reopened = Store::open_with(dir, options(&faulty)).unwrap();
                 let survived = reopened.op_count().unwrap() as usize;
-                prop_assert!(survived >= confirmed, "perse op confermate: {} < {}", survived, confirmed);
+                prop_assert!(survived >= confirmed, "confirmed ops lost: {} < {}", survived, confirmed);
                 prop_assert!(survived <= history.len());
                 history.truncate(survived);
                 assert_holds(&reopened, &history);
-                // Tutto ciò che è sopravvissuto alla riapertura è ora durevole.
+                // Everything that survived the reopen is now durable.
                 confirmed = survived;
                 gen = OpGen::resume(LANES, &history);
                 store = Some(reopened);

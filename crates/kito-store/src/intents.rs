@@ -1,4 +1,4 @@
-//! Log append-only degli intent (`.kito/intents`): il "perché" delle op.
+//! Append-only log of the intents (`.kito/intents`): the "why" of the ops.
 
 use crate::error::{Result, StoreError};
 use crate::fs::FileSystem;
@@ -27,7 +27,7 @@ impl IntentLog {
                 return Err(StoreError::corrupt(
                     path,
                     0,
-                    format!("il file manca ma risultano confermati {floor} byte: per accettare la perdita riaprire lo store in modalità riparazione"),
+                    format!("the file is missing but {floor} bytes are recorded as confirmed: to accept the loss, reopen the store in repair mode"),
                 ));
             }
             (LogFile::create(fs, path, LogKind::Intents, 0)?, LogRecovery::default())
@@ -35,14 +35,14 @@ impl IntentLog {
         let mut by_id = HashMap::new();
         file.scan(0, &mut |off, payload, _| {
             let intent: Intent = codec::from_slice(payload)
-                .map_err(|e| StoreError::corrupt(path, off, format!("intent illeggibile: {e}")))?;
+                .map_err(|e| StoreError::corrupt(path, off, format!("unreadable intent: {e}")))?;
             by_id.insert(intent.id, intent);
             Ok(())
         })?;
         Ok((IntentLog { file, by_id }, recovery))
     }
 
-    /// Registra un intent in modo durevole. Uno già presente non viene riscritto.
+    /// Records an intent durably. One that is already present is not rewritten.
     pub(crate) fn put(&mut self, intent: &Intent) -> Result<()> {
         if self.by_id.contains_key(&intent.id) {
             return Ok(());
