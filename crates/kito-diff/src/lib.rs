@@ -1,7 +1,7 @@
-//! `kito-diff`: produzione delle modifiche.
+//! `kito-diff`: producing the changes.
 //!
-//! Per ora contiene il differ testuale ([`text`]), usato dalle op `TextEdit`.
-//! Il differ AST con il matching degli ID stabili arriva con la fase 2.
+//! For now it contains the text differ ([`text`]), used by the `TextEdit` ops.
+//! The AST differ with stable-ID matching arrives with phase 2.
 
 pub mod fileops;
 pub mod text;

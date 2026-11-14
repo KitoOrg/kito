@@ -1,12 +1,12 @@
 //! Hybrid logical clock (Kulkarni et al., 2014).
 //!
-//! Dà un ordine totale compatibile con la causalità anche quando l'orologio di
-//! sistema torna indietro o due eventi cadono nello stesso millisecondo.
+//! Gives a total order consistent with causality even when the system clock
+//! goes backwards or two events fall in the same millisecond.
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Timestamp HLC: millisecondi Unix più un contatore logico.
+/// HLC timestamp: Unix milliseconds plus a logical counter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Hlc {
     pub wall_ms: u64,
@@ -21,7 +21,7 @@ impl Hlc {
     }
 }
 
-/// Generatore di timestamp strettamente crescenti.
+/// Generator of strictly increasing timestamps.
 #[derive(Debug, Default)]
 pub struct HlcClock {
     last: Hlc,
@@ -32,7 +32,7 @@ impl HlcClock {
         Self::default()
     }
 
-    /// Riparte da un timestamp già emesso (per esempio l'ultimo nel log).
+    /// Resumes from a timestamp already issued (for example the last one in the log).
     pub fn starting_after(last: Hlc) -> Self {
         HlcClock { last }
     }
@@ -41,20 +41,20 @@ impl HlcClock {
         self.last
     }
 
-    /// Nuovo timestamp per un evento locale, con l'orologio di sistema.
+    /// New timestamp for a local event, using the system clock.
     pub fn now(&mut self) -> Hlc {
         self.tick(system_ms())
     }
 
-    /// Nuovo timestamp per un evento locale, dato l'orologio fisico.
+    /// New timestamp for a local event, given the physical clock.
     pub fn tick(&mut self, physical_ms: u64) -> Hlc {
         self.last =
             if physical_ms > self.last.wall_ms { Hlc::new(physical_ms, 0) } else { Self::bump(self.last) };
         self.last
     }
 
-    /// Nuovo timestamp dopo aver visto un evento remoto: è maggiore sia
-    /// dell'ultimo locale sia di quello remoto.
+    /// New timestamp after seeing a remote event: it is greater than both
+    /// the last local one and the remote one.
     pub fn observe(&mut self, remote: Hlc, physical_ms: u64) -> Hlc {
         let max = self.last.max(remote);
         self.last = if physical_ms > max.wall_ms { Hlc::new(physical_ms, 0) } else { Self::bump(max) };
@@ -64,7 +64,7 @@ impl HlcClock {
     fn bump(t: Hlc) -> Hlc {
         match t.logical.checked_add(1) {
             Some(logical) => Hlc::new(t.wall_ms, logical),
-            // Contatore esaurito nello stesso millisecondo: si avanza il tempo.
+            // Counter exhausted within the same millisecond: advance the time.
             None => Hlc::new(t.wall_ms + 1, 0),
         }
     }
@@ -83,7 +83,7 @@ mod tests {
         let mut c = HlcClock::new();
         let a = c.tick(1000);
         let b = c.tick(1000);
-        let d = c.tick(900); // orologio tornato indietro
+        let d = c.tick(900); // clock went backwards
         let e = c.tick(1001);
         assert!(a < b && b < d && d < e);
         assert_eq!(e, Hlc::new(1001, 0));

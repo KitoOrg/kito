@@ -1,14 +1,16 @@
-//! `kito-core`: tipi del modello dati di Kito e loro serializzazione.
+//! `kito-core`: Kito's data model types and their serialization.
 //!
-//! Il modello dati è il contratto del progetto (vedi `docs/adr/`). Regole per
-//! chi modifica questi tipi:
+//! The data model is the project's contract (see `docs/adr/`). Rules for
+//! anyone who changes these types:
 //!
-//! * si possono **aggiungere** campi, solo in coda e solo opzionali
-//!   (`#[serde(default, skip_serializing_if = "Option::is_none")]`): così i
-//!   record già scritti restano leggibili e gli hash già calcolati non cambiano;
-//! * non si rinominano né si riordinano campi e varianti dei tipi che entrano
-//!   in un hash ([`Op`], [`OpKind`], [`Symbol`], [`Intent`], [`Author`]…);
-//! * per cambiare la semantica di un tipo serve prima un ADR.
+//! * fields may be **added**, only at the end and only as optional
+//!   (`#[serde(default, skip_serializing_if = "Option::is_none")]`): that way
+//!   records already written stay readable and hashes already computed do not
+//!   change;
+//! * fields and variants of the types that go into a hash ([`Op`],
+//!   [`OpKind`], [`Symbol`], [`Intent`], [`Author`]…) are never renamed or
+//!   reordered;
+//! * changing the semantics of a type requires an ADR first.
 
 pub mod codec;
 pub mod edit;

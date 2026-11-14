@@ -1,4 +1,4 @@
-//! Export dei checkpoint come commit git.
+//! Export of checkpoints as git commits.
 
 use crate::{git_err, object_id, oid20, GitError};
 use gix::bstr::BString;
@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct ExportOptions {
-    /// Ramo da far avanzare. `None`: il ramo a cui punta HEAD.
+    /// Branch to advance. `None`: the branch HEAD points to.
     pub branch: Option<String>,
-    /// Dominio degli indirizzi email dei commit (`<autore>@<dominio>`).
+    /// Domain of the commits' email addresses (`<author>@<domain>`).
     pub email_domain: String,
-    /// Riscrive l'indice di git in base all'ultimo commit esportato, così
-    /// `git status` risulta pulito quando la cartella di lavoro coincide.
+    /// Rewrites the git index from the last exported commit, so that
+    /// `git status` comes out clean when the working directory matches.
     pub update_index: bool,
 }
 
@@ -32,18 +32,21 @@ pub struct Exported {
     pub commit: [u8; 20],
 }
 
-/// Esporta in `root/.git` i checkpoint non ancora esportati, in ordine.
-/// Se `root` non è un repository git lo inizializza.
+/// Exports to `root/.git` the checkpoints not yet exported, in order.
+/// If `root` is not a git repository, it initializes it.
 ///
-/// L'export è deterministico: autore, data (quella dell'ultima op del
-/// checkpoint) e messaggio dipendono solo dal checkpoint, quindi rifarlo dà
-/// gli stessi commit.
+/// The export is deterministic: author, date (that of the checkpoint's last
+/// op) and message depend only on the checkpoint, so redoing it gives the
+/// same commits.
 pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Vec<Exported>, GitError> {
     let checkpoints: Vec<Checkpoint> = store.checkpoints().cloned().collect();
     let first = checkpoints.iter().position(|c| c.git_commit.is_none());
     if let Some(first) = first {
         if let Some(c) = checkpoints[first..].iter().find(|c| c.git_commit.is_some()) {
-            return Err(GitError::Git(format!("{} è già esportato ma un checkpoint precedente no", c.id)));
+            return Err(GitError::Git(format!(
+                "{} is already exported but an earlier checkpoint is not",
+                c.id
+            )));
         }
     }
     let exported_before = &checkpoints[..first.unwrap_or(checkpoints.len())];
@@ -56,8 +59,8 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
         Err(_) if !root.join(".git").exists() => gix::init(root).map_err(git_err)?,
         Err(e) => return Err(git_err(e)),
     };
-    // Il reflog del ramo vuole un'identità: se git non ne ha una configurata
-    // (macchina nuova, CI) se ne usa una di ripiego invece di fallire.
+    // The branch's reflog wants an identity: if git has none configured
+    // (new machine, CI) a fallback one is used instead of failing.
     repo.committer_or_set_fallback("Kito", format!("kito@{}", opts.email_domain).as_str())
         .map_err(git_err)?;
     let branch = match &opts.branch {
@@ -73,13 +76,13 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
         None => None,
     };
 
-    // Da dove si riparte: l'ultimo checkpoint già esportato.
+    // Where to resume from: the last checkpoint already exported.
     let prev = exported_before.last();
     let prev_commit = prev.and_then(|p| p.git_commit.as_ref()).map(object_id);
     if let (Some(expected), Some(found)) = (prev_commit, tip) {
-        // Il ramo può essere rimasto indietro (export interrotto prima di
-        // spostare il riferimento): va bene se punta a un antenato del
-        // nostro ultimo commit, cioè se riallinearlo è un fast-forward.
+        // The branch may have been left behind (export interrupted before
+        // moving the reference): that is fine if it points to an ancestor of
+        // our last commit, i.e. if realigning it is a fast-forward.
         if !is_first_parent_ancestor(&repo, found, expected, exported_before.len() + 1)? {
             return Err(GitError::Diverged {
                 branch,
@@ -124,7 +127,7 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
                     let mut editor = repo.edit_tree(base_tree).map_err(git_err)?;
                     for path in &dirty {
                         let rela =
-                            path.to_str().ok_or_else(|| git_err(format!("percorso non UTF-8: {path:?}")))?;
+                            path.to_str().ok_or_else(|| git_err(format!("non-UTF-8 path: {path:?}")))?;
                         match tree.get(path) {
                             Some(entry) => {
                                 let content =
@@ -147,8 +150,8 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
 
                     let time = gix::date::Time { seconds: (op.at.wall_ms / 1000) as i64, offset: 0 };
                     let name = ck.created_by.name.clone();
-                    // L'email vera, se l'autore ne ha una: è ciò che GitHub usa per
-                    // attribuire il commit. Altrimenti un indirizzo segnaposto.
+                    // The real email, if the author has one: it is what GitHub uses to
+                    // attribute the commit. Otherwise a placeholder address.
                     let email = ck
                         .created_by
                         .email
@@ -166,9 +169,9 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
                     };
                     let commit_id = repo.write_object(&commit).map_err(git_err)?.detach();
 
-                    // Prima si registra nello store, poi (alla fine) si sposta il
-                    // ramo: se il processo muore in mezzo, il prossimo export
-                    // trova il ramo indietro e lo riallinea.
+                    // First it is recorded in the store, then (at the end) the
+                    // branch is moved: if the process dies in between, the next
+                    // export finds the branch behind and realigns it.
                     let mut updated = ck.clone();
                     updated.git_commit = Some(oid20(commit_id));
                     store.put_checkpoint(&updated)?;
@@ -192,7 +195,7 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
     if let Some(commit) = last_commit {
         if tip != Some(commit) {
             let message = format!(
-                "kito: export fino a {}",
+                "kito: export up to {}",
                 checkpoints.last().map(|c| c.id.to_string()).unwrap_or_default()
             );
             repo.reference(branch.as_str(), commit, PreviousValue::Any, message).map_err(git_err)?;
@@ -211,8 +214,8 @@ pub fn export(store: &mut Store, root: &Path, opts: &ExportOptions) -> Result<Ve
     Ok(done)
 }
 
-/// `true` se `ancestor` è `descendant` o si raggiunge da esso risalendo al
-/// più `max_steps` primi genitori.
+/// `true` if `ancestor` is `descendant` or can be reached from it by walking
+/// up at most `max_steps` first parents.
 fn is_first_parent_ancestor(
     repo: &gix::Repository,
     ancestor: gix::ObjectId,
@@ -243,7 +246,7 @@ fn commit_message(ck: &Checkpoint) -> BString {
     message.into()
 }
 
-/// Parte locale di un indirizzo email ricavata dal nome dell'autore.
+/// Local part of an email address derived from the author's name.
 fn email_local_part(name: &str) -> String {
     let cleaned: String = name
         .chars()

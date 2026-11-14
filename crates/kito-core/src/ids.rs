@@ -1,9 +1,9 @@
-//! Identificatori del modello dati.
+//! Identifiers of the data model.
 //!
-//! Tutto è indirizzato per contenuto ([`BlobId`], [`OpId`], [`IntentId`]),
-//! tranne gli ID dei simboli ([`SymbolId`]), assegnati alla nascita e mai più
-//! cambiati, e i contatori locali al repository ([`LaneId`], [`CheckpointId`],
-//! [`ConflictId`]).
+//! Everything is content-addressed ([`BlobId`], [`OpId`], [`IntentId`]),
+//! except symbol IDs ([`SymbolId`]), assigned at birth and never changed
+//! afterwards, and the repository-local counters ([`LaneId`],
+//! [`CheckpointId`], [`ConflictId`]).
 
 use crate::hash::{Hash, HashParseError};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdParseError {
-    #[error("identificatore non valido: {0:?}")]
+    #[error("invalid identifier: {0:?}")]
     Malformed(String),
     #[error(transparent)]
     Hash(#[from] HashParseError),
@@ -22,7 +22,7 @@ fn malformed(s: &str) -> IdParseError {
     IdParseError::Malformed(s.to_owned())
 }
 
-/// Identificatore di una lane. `LaneId::MAIN` è la linea principale.
+/// Identifier of a lane. `LaneId::MAIN` is the main lane.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LaneId(pub u64);
@@ -62,8 +62,8 @@ impl FromStr for LaneId {
     }
 }
 
-/// ID permanente di un simbolo. Non cambia con rename, move o modifiche.
-/// (lane che l'ha creato, contatore locale) → unico senza coordinamento.
+/// Permanent ID of a symbol. It does not change on rename, move or edits.
+/// (lane that created it, local counter) → unique without coordination.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SymbolId {
     origin: LaneId,
@@ -75,12 +75,12 @@ impl SymbolId {
         SymbolId { origin, seq }
     }
 
-    /// Lane che ha creato il simbolo.
+    /// Lane that created the symbol.
     pub const fn origin(self) -> LaneId {
         self.origin
     }
 
-    /// Contatore locale alla lane di origine.
+    /// Counter local to the origin lane.
     pub const fn seq(self) -> u64 {
         self.seq
     }
@@ -152,20 +152,20 @@ macro_rules! hash_id {
 }
 
 hash_id!(
-    /// Hash BLAKE3 del contenuto di un blob.
+    /// BLAKE3 hash of the content of a blob.
     BlobId
 );
 hash_id!(
-    /// Hash di (parents, kind, payload, author) di un'operazione.
+    /// Hash of (parents, kind, payload, author) of an operation.
     OpId
 );
 hash_id!(
-    /// Hash del contenuto di un [`crate::Intent`].
+    /// Hash of the content of an [`crate::Intent`].
     IntentId
 );
 
 impl BlobId {
-    /// ID del blob con questo contenuto.
+    /// ID of the blob with this content.
     pub fn of(data: &[u8]) -> Self {
         BlobId(Hash::of(data))
     }
@@ -201,12 +201,12 @@ macro_rules! counter_id {
 }
 
 counter_id!(
-    /// Numero progressivo di un checkpoint (`ckpt#119`).
+    /// Sequence number of a checkpoint (`ckpt#119`).
     CheckpointId,
     "ckpt"
 );
 counter_id!(
-    /// Numero progressivo di un conflitto (`conflict#7`).
+    /// Sequence number of a conflict (`conflict#7`).
     ConflictId,
     "conflict"
 );

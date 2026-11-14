@@ -1,8 +1,8 @@
-//! Stato di un albero di file: percorso → blob.
+//! State of a file tree: path → blob.
 //!
-//! Si ottiene riapplicando in ordine le operazioni di una lane. Dipende solo
-//! da ciò che le op dichiarano, mai da un parser: la stessa storia dà sempre
-//! lo stesso albero, anche con versioni future di Kito.
+//! It is obtained by replaying the operations of a lane in order. It depends
+//! only on what the ops declare, never on a parser: the same history always
+//! gives the same tree, even with future versions of Kito.
 
 use crate::ids::BlobId;
 use crate::model::{FileMode, OpKind};
@@ -19,15 +19,15 @@ pub struct TreeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TreeError {
-    #[error("{}: il file esiste già", .0.display())]
+    #[error("{}: the file already exists", .0.display())]
     Exists(PathBuf),
-    #[error("{}: il file non esiste", .0.display())]
+    #[error("{}: the file does not exist", .0.display())]
     Missing(PathBuf),
-    #[error("{}: contenuto {found} diverso da quello atteso dall'operazione ({expected})", path.display())]
+    #[error("{}: content {found} differs from the one the operation expects ({expected})", path.display())]
     Mismatch { path: PathBuf, expected: BlobId, found: BlobId },
 }
 
-/// Albero di file a un certo punto della storia.
+/// File tree at a given point in the history.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tree {
     files: BTreeMap<PathBuf, TreeEntry>,
@@ -54,24 +54,24 @@ impl Tree {
         self.files.contains_key(path)
     }
 
-    /// File in ordine di percorso.
+    /// Files in path order.
     pub fn iter(&self) -> impl Iterator<Item = (&Path, &TreeEntry)> {
         self.files.iter().map(|(p, e)| (p.as_path(), e))
     }
 
-    /// File contenuti nella cartella `dir` (a qualunque profondità).
+    /// Files contained in the directory `dir` (at any depth).
     pub fn under<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = (&'a Path, &'a TreeEntry)> {
-        // I percorsi sono ordinati per componenti: i discendenti di `dir`
-        // sono contigui e vengono subito dopo `dir`.
+        // Paths are ordered by components: the descendants of `dir` are
+        // contiguous and come right after `dir`.
         self.files
             .range::<Path, _>((std::ops::Bound::Excluded(dir), std::ops::Bound::Unbounded))
             .take_while(move |(p, _)| p.starts_with(dir))
             .map(|(p, e)| (p.as_path(), e))
     }
 
-    /// Applica un'operazione. Le op che non descrivono un effetto sui file
-    /// (quelle simboliche) lasciano l'albero invariato. Se l'operazione non
-    /// è applicabile a questo albero restituisce un errore e non cambia nulla.
+    /// Applies an operation. Ops that do not describe an effect on files
+    /// (the symbolic ones) leave the tree unchanged. If the operation cannot
+    /// be applied to this tree, it returns an error and changes nothing.
     pub fn apply(&mut self, kind: &OpKind) -> Result<(), TreeError> {
         match kind {
             OpKind::FileAdd { path, blob, mode } => {
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn regular_mode_is_not_encoded() {
-        // Aggiungere `mode` non ha cambiato la codifica dei FileAdd esistenti.
+        // Adding `mode` did not change the encoding of existing FileAdd ops.
         let v = serde_json::to_value(add("a", "1")).unwrap();
         assert!(v["FileAdd"].get("mode").is_none());
         let exec = OpKind::FileAdd { path: "a".into(), blob: blob("1"), mode: FileMode::Executable };

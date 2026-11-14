@@ -1,7 +1,7 @@
-//! Helper serde condivisi dal modello dati.
+//! Serde helpers shared by the data model.
 
-/// `Vec<u8>` come byte string nei formati binari; nei formati leggibili come
-/// stringa se è UTF-8 valido, altrimenti come sequenza di interi (senza perdita).
+/// `Vec<u8>` as a byte string in binary formats; in human-readable formats as
+/// a string if it is valid UTF-8, otherwise as a sequence of integers (lossless).
 pub(crate) mod bytes {
     use serde::{de, Deserializer, Serializer};
     use std::fmt;
@@ -24,7 +24,7 @@ pub(crate) mod bytes {
             type Value = Vec<u8>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("byte string, stringa o sequenza di byte")
+                f.write_str("a byte string, a string or a sequence of bytes")
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
                 Ok(v.to_vec())
@@ -52,8 +52,8 @@ pub(crate) mod bytes {
     }
 }
 
-/// `Option<[u8; 20]>` (object id di git): esadecimale nei formati leggibili,
-/// byte string in quelli binari.
+/// `Option<[u8; 20]>` (git object id): hexadecimal in human-readable formats,
+/// byte string in binary ones.
 pub(crate) mod opt_oid20 {
     use crate::hash::hex;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

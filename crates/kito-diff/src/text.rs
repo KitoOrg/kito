@@ -1,24 +1,24 @@
-//! Differ testuale: da due versioni di un file alla lista di [`TextEdit`].
+//! Text differ: from two versions of a file to the list of [`TextEdit`]s.
 
 use kito_core::TextEdit;
 use similar::{Algorithm, DiffTag};
 use std::time::{Duration, Instant};
 
-/// Oltre questo tempo il diff per righe si accontenta di un risultato non minimo.
+/// Past this time the line diff settles for a non-minimal result.
 const DEADLINE: Duration = Duration::from_millis(200);
-/// Byte iniziali in cui si cerca un NUL per riconoscere un file binario.
+/// Leading bytes searched for a NUL to recognize a binary file.
 const BINARY_PROBE: usize = 8000;
 
-/// `true` se il contenuto sembra binario (stessa euristica di git).
+/// `true` if the content looks binary (same heuristic as git).
 pub fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(BINARY_PROBE)].contains(&0)
 }
 
-/// Edit che trasformano `before` in `after`: `apply_edits(before, diff) == after`.
+/// Edits that turn `before` into `after`: `apply_edits(before, diff) == after`.
 ///
-/// Per il testo il diff è per righe (Myers): ogni blocco di righe cambiate
-/// diventa un edit. Per i file binari è un solo edit sulla parte che cambia,
-/// tolti il prefisso e il suffisso comuni.
+/// For text the diff is line-based (Myers): each block of changed lines
+/// becomes one edit. For binary files it is a single edit on the part that
+/// changes, with the common prefix and suffix removed.
 pub fn diff(before: &[u8], after: &[u8]) -> Vec<TextEdit> {
     if before == after {
         return Vec::new();
@@ -31,7 +31,7 @@ pub fn diff(before: &[u8], after: &[u8]) -> Vec<TextEdit> {
     let ops =
         similar::capture_diff_slices_deadline(Algorithm::Myers, &old, &new, Some(Instant::now() + DEADLINE));
 
-    // Offset in byte dell'inizio di ogni riga, più la fine.
+    // Byte offset of the start of each line, plus the end.
     let offsets = |ls: &[&[u8]]| -> Vec<u32> {
         let mut at = 0u32;
         let mut out = Vec::with_capacity(ls.len() + 1);
@@ -53,7 +53,7 @@ pub fn diff(before: &[u8], after: &[u8]) -> Vec<TextEdit> {
         let (start, end) = (old_at[o.start], old_at[o.end]);
         let text = &after[new_at[n.start] as usize..new_at[n.end] as usize];
         match edits.last_mut() {
-            // Blocchi adiacenti si fondono in un solo edit.
+            // Adjacent blocks are merged into a single edit.
             Some(last) if last.end == start => {
                 last.end = end;
                 last.text.extend_from_slice(text);
@@ -64,7 +64,7 @@ pub fn diff(before: &[u8], after: &[u8]) -> Vec<TextEdit> {
     edits
 }
 
-/// Un solo edit: la parte centrale che cambia, tolti prefisso e suffisso comuni.
+/// A single edit: the middle part that changes, with the common prefix and suffix removed.
 fn trim_diff(before: &[u8], after: &[u8]) -> TextEdit {
     let prefix = before.iter().zip(after).take_while(|(a, b)| a == b).count();
     let max_suffix = before.len().min(after.len()) - prefix;
@@ -73,19 +73,19 @@ fn trim_diff(before: &[u8], after: &[u8]) -> TextEdit {
     TextEdit::new(prefix as u32, (before.len() - suffix) as u32, &after[prefix..after.len() - suffix])
 }
 
-/// Righe con il terminatore incluso: concatenate ridanno il testo.
+/// Lines with the terminator included: concatenated, they give back the text.
 fn lines(data: &[u8]) -> Vec<&[u8]> {
     data.split_inclusive(|&b| b == b'\n').collect()
 }
 
-/// Statistiche di un diff, per l'output di `kito log`.
+/// Statistics of a diff, for the output of `kito log`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stat {
     pub lines_added: usize,
     pub lines_removed: usize,
 }
 
-/// Righe aggiunte e rimosse dagli edit, rispetto al testo di partenza.
+/// Lines added and removed by the edits, relative to the original text.
 pub fn stat(before: &[u8], edits: &[TextEdit]) -> Stat {
     let count = |text: &[u8]| lines(text).len();
     let mut s = Stat::default();
@@ -104,10 +104,10 @@ mod tests {
 
     #[test]
     fn line_changes_become_line_ranged_edits() {
-        let before = b"uno\ndue\ntre\nquattro\n";
-        let after = b"uno\nDUE\ntre\nquattro\ncinque\n";
+        let before = b"one\ntwo\nten\nhundred\n";
+        let after = b"one\nTWO\nten\nhundred\nthousand\n";
         let edits = diff(before, after);
-        assert_eq!(edits, vec![TextEdit::new(4, 8, "DUE\n"), TextEdit::new(20, 20, "cinque\n")]);
+        assert_eq!(edits, vec![TextEdit::new(4, 8, "TWO\n"), TextEdit::new(20, 20, "thousand\n")]);
         assert_eq!(apply_edits(before, &edits).unwrap(), after);
         assert_eq!(stat(before, &edits), Stat { lines_added: 2, lines_removed: 1 });
     }
@@ -145,7 +145,7 @@ mod tests {
             let (a, b) = (a.concat().into_bytes(), b.concat().into_bytes());
             let edits = diff(&a, &b);
             prop_assert_eq!(apply_edits(&a, &edits).unwrap(), b);
-            // Gli edit sono ordinati e non adiacenti (quelli adiacenti si fondono).
+            // The edits are sorted and non-adjacent (adjacent ones are merged).
             for pair in edits.windows(2) {
                 prop_assert!(pair[0].end < pair[1].start);
             }
@@ -161,13 +161,13 @@ mod tests {
 
         #[test]
         fn small_change_in_big_file_gives_small_edit(n in 50usize..400, at in any::<prop::sample::Index>()) {
-            let before: Vec<String> = (0..n).map(|i| format!("riga numero {i}\n")).collect();
+            let before: Vec<String> = (0..n).map(|i| format!("line number {i}\n")).collect();
             let mut after = before.clone();
             let i = at.index(n);
-            after[i] = "cambiata\n".to_string();
+            after[i] = "changed\n".to_string();
             let edits = diff(before.concat().as_bytes(), after.concat().as_bytes());
             prop_assert_eq!(edits.len(), 1);
-            prop_assert_eq!(&edits[0].text, b"cambiata\n");
+            prop_assert_eq!(&edits[0].text, b"changed\n");
         }
     }
 }

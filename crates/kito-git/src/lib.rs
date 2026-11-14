@@ -1,8 +1,8 @@
-//! `kito-git`: il ponte con git.
+//! `kito-git`: the bridge to git.
 //!
-//! * [`export`]: ogni checkpoint della linea principale diventa un commit
-//!   git, così GitHub e la CI funzionano senza modifiche. SHA-1 compare solo qui.
-//! * [`import`]: la storia di un repository git diventa op e checkpoint.
+//! * [`export`]: every checkpoint of the main lane becomes a git commit, so
+//!   GitHub and CI work without changes. SHA-1 appears only here.
+//! * [`import`]: the history of a git repository becomes ops and checkpoints.
 
 mod export;
 mod import;
@@ -24,28 +24,28 @@ pub enum GitError {
     Tree(#[from] TreeError),
     #[error(transparent)]
     Codec(#[from] CodecError),
-    #[error("{} non è un repository git", .0.display())]
+    #[error("{} is not a git repository", .0.display())]
     NotARepository(PathBuf),
     #[error(
-        "il ramo git {branch} è avanzato fuori da Kito (punta a {found}, atteso {expected}): \
-         i commit fatti direttamente in git vanno prima importati"
+        "the git branch {branch} has advanced outside Kito (it points to {found}, expected {expected}): \
+         commits made directly in git must be imported first"
     )]
     Diverged { branch: String, expected: String, found: String },
-    #[error("{0}: l'op {1} a cui punta non è sulla linea principale")]
+    #[error("{0}: the op {1} it points to is not on the main lane")]
     HeadNotOnMain(CheckpointId, OpId),
-    #[error("lo store contiene già una storia: l'import si fa solo in uno store vuoto")]
+    #[error("the store already has history: import only works on an empty store")]
     NotEmpty,
-    #[error("blob {0} assente dallo store")]
+    #[error("blob {0} is missing from the store")]
     MissingBlob(kito_core::BlobId),
 }
 
-/// Converte un qualsiasi errore di gix.
+/// Converts any gix error.
 pub(crate) fn git_err(e: impl std::fmt::Display) -> GitError {
     GitError::Git(e.to_string())
 }
 
-/// Nome ed email configurati in git (`user.name`, `user.email`): prima quelli
-/// del repository in `root`, se c'è, poi quelli globali dell'utente.
+/// Name and email configured in git (`user.name`, `user.email`): first those
+/// of the repository in `root`, if there is one, then the user's global ones.
 pub fn git_identity(root: &std::path::Path) -> Option<(String, Option<String>)> {
     let clean =
         |v: Option<gix::bstr::BString>| v.map(|s| s.to_string().trim().to_owned()).filter(|s| !s.is_empty());

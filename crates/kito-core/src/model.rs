@@ -1,5 +1,5 @@
-//! I sei concetti del modello dati: simbolo, operazione, riferimento, lane,
-//! conflitto e checkpoint.
+//! The six concepts of the data model: symbol, operation, reference, lane,
+//! conflict and checkpoint.
 
 use crate::codec::{self, CodecError};
 use crate::edit::TextEdit;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::path::PathBuf;
 
-/// Contesti BLAKE3 `derive_key` degli hash strutturati.
+/// BLAKE3 `derive_key` contexts of the structured hashes.
 const OP_CONTEXT: &str = "kito 2026 op id v1";
 const INTENT_CONTEXT: &str = "kito 2026 intent id v1";
 
@@ -46,19 +46,19 @@ pub enum SymbolKind {
     Block,
 }
 
-/// Impronta strutturale di un simbolo, per il matching tra versioni.
+/// Structural fingerprint of a symbol, for matching across versions.
 ///
-/// È uno sketch MinHash: due impronte della stessa lunghezza si confrontano
-/// posizione per posizione e la frazione di posizioni uguali stima la
-/// somiglianza di Jaccard tra le strutture. Uno sketch vuoto significa
-/// "sconosciuta" e non somiglia a niente.
+/// It is a MinHash sketch: two fingerprints of the same length are compared
+/// position by position, and the fraction of equal positions estimates the
+/// Jaccard similarity between the structures. An empty sketch means
+/// "unknown" and is similar to nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub sketch: Vec<u32>,
 }
 
 impl Fingerprint {
-    /// Somiglianza stimata, tra 0.0 e 1.0.
+    /// Estimated similarity, between 0.0 and 1.0.
     pub fn similarity(&self, other: &Fingerprint) -> f32 {
         if self.sketch.is_empty() || self.sketch.len() != other.sketch.len() {
             return 0.0;
@@ -74,15 +74,15 @@ pub struct Symbol {
     pub kind: SymbolKind,
     pub lang: Lang,
     pub name: String,
-    /// classe → metodo
+    /// class → method
     pub parent: Option<SymbolId>,
-    /// posizione attuale
+    /// current location
     pub file: PathBuf,
-    /// firma normalizzata
+    /// normalized signature
     pub signature: Hash,
-    /// corpo normalizzato (senza spazi e commenti)
+    /// normalized body (without whitespace and comments)
     pub body: Hash,
-    /// per il matching tra versioni
+    /// for matching across versions
     pub fingerprint: Fingerprint,
 }
 
@@ -92,12 +92,12 @@ pub enum AuthorKind {
     Human,
 }
 
-/// Chi ha prodotto un'operazione: un agente o un umano.
+/// Who produced an operation: an agent or a human.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Author {
     pub kind: AuthorKind,
     pub name: String,
-    /// Indirizzo email, usato per attribuire i commit esportati su git.
+    /// Email address, used to attribute the commits exported to git.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
 }
@@ -118,7 +118,7 @@ impl Author {
 }
 
 impl std::fmt::Display for Author {
-    /// `Nome <email>` se l'email è nota, altrimenti solo il nome.
+    /// `Name <email>` if the email is known, otherwise just the name.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.email {
             Some(email) => write!(f, "{} <{email}>", self.name),
@@ -127,7 +127,7 @@ impl std::fmt::Display for Author {
     }
 }
 
-/// Un punto in un file: riga (da 1) e intervallo di byte.
+/// A point in a file: line (1-based) and byte range.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Location {
     pub file: PathBuf,
@@ -136,13 +136,13 @@ pub struct Location {
     pub end: u32,
 }
 
-/// Tipo di un file nell'albero: quanto basta per esportarlo fedelmente in git.
+/// Type of a file in the tree: just enough to export it faithfully to git.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FileMode {
     #[default]
     Regular,
     Executable,
-    /// Il blob contiene il percorso di destinazione del link.
+    /// The blob contains the link's target path.
     Symlink,
 }
 
@@ -158,12 +158,12 @@ pub struct Op {
     /// DAG
     pub parents: SmallVec<[OpId; 2]>,
     pub lane: LaneId,
-    /// agente o umano
+    /// agent or human
     pub author: Author,
     /// hybrid logical clock
     pub at: Hlc,
     pub kind: OpKind,
-    /// il "perché"
+    /// the "why"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<IntentId>,
 }
@@ -198,7 +198,7 @@ pub enum OpKind {
         from: Location,
         to: Location,
     },
-    // Fallback: file non analizzabili e testo fuori dai simboli (import, commenti)
+    // Fallback: files that cannot be parsed and text outside symbols (imports, comments)
     TextEdit {
         file: PathBuf,
         before: BlobId,
@@ -208,7 +208,7 @@ pub enum OpKind {
     FileAdd {
         path: PathBuf,
         blob: BlobId,
-        /// Tipo di file. Assente nella codifica quando è un file normale.
+        /// File type. Absent from the encoding when it is a regular file.
         #[serde(default, skip_serializing_if = "FileMode::is_regular")]
         mode: FileMode,
     },
@@ -222,7 +222,7 @@ pub enum OpKind {
 }
 
 impl Op {
-    /// Costruisce un'operazione calcolandone l'ID.
+    /// Builds an operation, computing its ID.
     pub fn new(
         parents: impl IntoIterator<Item = OpId>,
         lane: LaneId,
@@ -236,17 +236,17 @@ impl Op {
         Ok(Op { id, parents, lane, author, at, kind, intent })
     }
 
-    /// Hash di (parents, kind, payload, author).
+    /// Hash of (parents, kind, payload, author).
     ///
-    /// `lane`, `at` e `intent` sono metadati e non entrano nell'ID: la stessa
-    /// modifica, dello stesso autore, sugli stessi genitori è la stessa
-    /// operazione ovunque e in qualunque momento venga registrata.
+    /// `lane`, `at` and `intent` are metadata and do not go into the ID: the
+    /// same change, by the same author, on the same parents is the same
+    /// operation wherever and whenever it is recorded.
     pub fn compute_id(parents: &[OpId], kind: &OpKind, author: &Author) -> Result<OpId, CodecError> {
         let bytes = codec::to_vec(&(parents, kind, author))?;
         Ok(OpId(Hash::derive(OP_CONTEXT, &bytes)))
     }
 
-    /// `true` se l'ID registrato corrisponde al contenuto.
+    /// `true` if the recorded ID matches the content.
     pub fn verify_id(&self) -> bool {
         matches!(Op::compute_id(&self.parents, &self.kind, &self.author), Ok(id) if id == self.id)
     }
@@ -257,7 +257,7 @@ impl Op {
 }
 
 impl OpKind {
-    /// Simbolo toccato dall'operazione, se è un'operazione simbolica.
+    /// Symbol touched by the operation, if it is a symbolic operation.
     pub fn symbol(&self) -> Option<SymbolId> {
         match self {
             OpKind::AddSymbol { sym, .. } => Some(sym.id),
@@ -273,8 +273,8 @@ impl OpKind {
         }
     }
 
-    /// Blob a cui l'operazione fa riferimento: devono esistere nello store
-    /// prima che l'operazione venga registrata.
+    /// Blobs the operation refers to: they must exist in the store before
+    /// the operation is recorded.
     pub fn blobs(&self) -> SmallVec<[BlobId; 2]> {
         match self {
             OpKind::AddSymbol { text, .. } => SmallVec::from_slice(&[*text]),
@@ -290,7 +290,7 @@ impl OpKind {
         }
     }
 
-    /// Percorsi dei file il cui stato nell'albero cambia per effetto dell'op.
+    /// Paths of the files whose state in the tree changes as an effect of the op.
     pub fn paths(&self) -> SmallVec<[&PathBuf; 2]> {
         match self {
             OpKind::FileAdd { path, .. } | OpKind::FileRemove { path } => SmallVec::from_slice(&[path]),
@@ -305,7 +305,7 @@ impl OpKind {
         }
     }
 
-    /// Nome della variante, per log e output.
+    /// Name of the variant, for logs and output.
     pub fn name(&self) -> &'static str {
         match self {
             OpKind::AddSymbol { .. } => "AddSymbol",
@@ -325,19 +325,19 @@ impl OpKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RefSource {
     TreeSitterHeuristic,
-    /// Nome del language server.
+    /// Name of the language server.
     Lsp(String),
     Scip,
 }
 
-/// Riferimento tra simboli (livello 2).
+/// Reference between symbols (level 2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reference {
-    /// chi usa
+    /// who uses
     pub from: SymbolId,
-    /// cosa è usato
+    /// what is used
     pub to: SymbolId,
-    /// dove, nel file di `from`
+    /// where, in the file of `from`
     pub site: Location,
     /// 0.0–1.0
     pub confidence: f32,
@@ -347,16 +347,16 @@ pub struct Reference {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
     pub id: IntentId,
-    /// "aggiungi cache sulle richieste utente"
+    /// "add a cache for user requests"
     pub summary: String,
-    /// es. "task #55"
+    /// e.g. "task #55"
     pub task: Option<String>,
-    /// prompt completo, opzionale
+    /// full prompt, optional
     pub prompt: Option<BlobId>,
 }
 
 impl Intent {
-    /// Costruisce un intent calcolandone l'ID dal contenuto.
+    /// Builds an intent, computing its ID from the content.
     pub fn new(
         summary: impl Into<String>,
         task: Option<String>,
@@ -367,7 +367,7 @@ impl Intent {
         Ok(Intent { id: IntentId(Hash::derive(INTENT_CONTEXT, &bytes)), summary, task, prompt })
     }
 
-    /// `true` se l'ID registrato corrisponde al contenuto.
+    /// `true` if the recorded ID matches the content.
     pub fn verify_id(&self) -> bool {
         matches!(Intent::new(self.summary.clone(), self.task.clone(), self.prompt), Ok(i) if i.id == self.id)
     }
@@ -404,7 +404,7 @@ pub enum ConflictKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conflict {
     pub id: ConflictId,
-    /// None = conflitto testuale su file
+    /// None = textual conflict on a file
     pub symbol: Option<SymbolId>,
     pub sides: Vec<OpId>,
     pub kind: ConflictKind,
@@ -412,7 +412,7 @@ pub struct Conflict {
     pub resolved_by: Option<OpId>,
 }
 
-/// Esito del verifier: comandi, esito, durata.
+/// Result of the verifier: commands, outcome, duration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
     pub commands: Vec<String>,
@@ -427,7 +427,7 @@ pub struct Checkpoint {
     pub label: String,
     pub created_by: Author,
     pub verification: Option<Verification>,
-    /// dopo l'export
+    /// after the export
     #[serde(with = "crate::serde_helpers::opt_oid20")]
     pub git_commit: Option<[u8; 20]>,
 }

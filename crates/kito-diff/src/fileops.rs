@@ -1,33 +1,33 @@
-//! Dalle differenze tra un albero e un nuovo stato dei file alle op `File*`
-//! e `TextEdit`.
+//! From the differences between a tree and a new state of the files to the
+//! `File*` and `TextEdit` ops.
 
 use crate::text;
 use kito_core::{BlobId, FileMode, OpKind, TextEdit, Tree};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Oltre questa dimensione complessiva il testo degli edit non viene scritto
-/// nell'op: resta ricavabile dai due blob.
+/// Above this total size the text of the edits is not written into the op:
+/// it can still be derived from the two blobs.
 pub const MAX_INLINE_EDIT_BYTES: usize = 32 << 10;
 
-/// Nuovo stato di un file.
+/// New state of a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub blob: BlobId,
     pub mode: FileMode,
 }
 
-/// Op che portano `tree` al nuovo stato descritto da `changes`
-/// (percorso → nuovo stato, `None` = il file non c'è più).
+/// Ops that bring `tree` to the new state described by `changes`
+/// (path → new state, `None` = the file is gone).
 ///
-/// `content` restituisce il contenuto di un blob (vecchio o nuovo): serve a
-/// calcolare gli edit. I percorsi il cui stato coincide già con l'albero non
-/// producono nulla. Le op sono in un ordine applicabile a `tree`: rename,
-/// rimozioni, aggiunte, modifiche.
+/// `content` returns the content of a blob (old or new): it is needed to
+/// compute the edits. Paths whose state already matches the tree produce
+/// nothing. The ops are in an order that can be applied to `tree`: renames,
+/// removals, additions, edits.
 ///
-/// Rename: un file sparito e uno comparso con lo stesso contenuto (non vuoto)
-/// e lo stesso tipo diventano un `FileRename`. Niente euristiche di
-/// somiglianza: zero falsi positivi.
+/// Rename: a file that disappeared and one that appeared with the same
+/// (non-empty) content and the same type become a `FileRename`. No similarity
+/// heuristics: zero false positives.
 pub fn ops_for_changes(
     tree: &Tree,
     changes: &BTreeMap<PathBuf, Option<Snapshot>>,
@@ -47,16 +47,16 @@ pub fn ops_for_changes(
             (None, Some(new)) => added.push((path, new)),
             (Some(old), Some(new)) if old == new => {}
             (Some(old), Some(new)) if old.mode == new.mode => edits.push((path, old.blob, new.blob)),
-            // Cambio di tipo (per esempio chmod +x): il modello non ha un'op
-            // dedicata, quindi è una rimozione seguita da un'aggiunta.
+            // Type change (for example chmod +x): the model has no dedicated
+            // op, so it is a removal followed by an addition.
             (Some(_), Some(new)) => retyped.push((path, new)),
         }
     }
 
     let mut ops = Vec::new();
 
-    // Rename esatti: si abbinano in ordine di percorso file spariti e comparsi
-    // con lo stesso contenuto.
+    // Exact renames: files that disappeared and files that appeared with the
+    // same content are paired in path order.
     let mut by_content: BTreeMap<(BlobId, FileMode), Vec<&PathBuf>> = BTreeMap::new();
     for (path, snap) in &removed {
         if snap.blob != empty {
@@ -99,8 +99,8 @@ pub fn ops_for_changes(
     ops
 }
 
-/// Edit da scrivere nell'op: quelli esatti se il file è testo e la modifica è
-/// piccola, altrimenti nessuno (la modifica resta descritta dai due blob).
+/// Edits to write into the op: the exact ones if the file is text and the
+/// change is small, otherwise none (the change stays described by the two blobs).
 pub fn inline_edits(before: &[u8], after: &[u8]) -> Vec<TextEdit> {
     if text::is_binary(before) || text::is_binary(after) {
         return Vec::new();
@@ -140,7 +140,7 @@ mod tests {
         let mut w = World { blobs: HashMap::new() };
         let mut tree = Tree::new();
         for (path, content) in
-            [("keep.txt", "k\n"), ("edit.txt", "a\nb\n"), ("old.txt", "contenuto\n"), ("gone.txt", "g\n")]
+            [("keep.txt", "k\n"), ("edit.txt", "a\nb\n"), ("old.txt", "content\n"), ("gone.txt", "g\n")]
         {
             let s = w.snap(content.as_bytes(), FileMode::Regular);
             tree.apply(&OpKind::FileAdd { path: path.into(), blob: s.blob, mode: s.mode }).unwrap();
@@ -149,7 +149,7 @@ mod tests {
         changes.insert("keep.txt".into(), Some(w.snap(b"k\n", FileMode::Regular)));
         changes.insert("edit.txt".into(), Some(w.snap(b"a\nB\n", FileMode::Regular)));
         changes.insert("old.txt".into(), None);
-        changes.insert("new.txt".into(), Some(w.snap(b"contenuto\n", FileMode::Regular)));
+        changes.insert("new.txt".into(), Some(w.snap(b"content\n", FileMode::Regular)));
         changes.insert("gone.txt".into(), None);
         changes.insert("added.txt".into(), Some(w.snap(b"x\n", FileMode::Regular)));
         changes.insert("never.txt".into(), None);
@@ -194,14 +194,14 @@ mod tests {
     }
 
     proptest! {
-        /// Applicare le op prodotte porta l'albero esattamente al nuovo stato.
+        /// Applying the ops produced brings the tree exactly to the new state.
         #[test]
         fn ops_bring_the_tree_to_the_new_state(
             initial in prop::collection::btree_map("[a-d]{1,2}", (0u8..6, any::<bool>()), 0..8),
             target in prop::collection::btree_map("[a-d]{1,2}", prop::option::of((0u8..6, any::<bool>())), 0..10),
         ) {
             let mut w = World { blobs: HashMap::new() };
-            let content = |n: u8| if n == 0 { Vec::new() } else { format!("contenuto {n}\nriga\n").into_bytes() };
+            let content = |n: u8| if n == 0 { Vec::new() } else { format!("content {n}\nline\n").into_bytes() };
             let mode = |x: bool| if x { FileMode::Executable } else { FileMode::Regular };
 
             let mut tree = Tree::new();
@@ -225,7 +225,7 @@ mod tests {
                     }
                 }
             }
-            // Stato atteso: l'albero iniziale con i cambi sovrascritti.
+            // Expected state: the initial tree with the changes written over it.
             let mut files: BTreeMap<PathBuf, Snapshot> =
                 expected.iter().map(|(p, e)| (p.to_owned(), Snapshot { blob: e.blob, mode: e.mode })).collect();
             for (p, s) in &changes {
@@ -237,7 +237,7 @@ mod tests {
             let got: BTreeMap<PathBuf, Snapshot> =
                 result.iter().map(|(p, e)| (p.to_owned(), Snapshot { blob: e.blob, mode: e.mode })).collect();
             prop_assert_eq!(got, files);
-            // Nessuna op inutile: ripetere il calcolo sul risultato non produce nulla.
+            // No useless ops: repeating the computation on the result produces nothing.
             prop_assert!(run(&result, &changes, &w).is_empty());
             expected = result;
             let _ = expected;

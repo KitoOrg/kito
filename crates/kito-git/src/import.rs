@@ -1,4 +1,4 @@
-//! Import della storia di un repository git.
+//! Import of the history of a git repository.
 
 use crate::{git_err, oid20, GitError};
 use gix::objs::tree::EntryKind;
@@ -8,26 +8,27 @@ use kito_store::Store;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Esito di un import.
+/// Outcome of an import.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Imported {
-    /// Commit letti (catena dei primi genitori di HEAD).
+    /// Commits read (first-parent chain of HEAD).
     pub commits: usize,
     pub ops: usize,
     pub checkpoints: usize,
-    /// Voci saltate (submodule, percorsi non UTF-8), una riga per voce.
+    /// Skipped entries (submodules, non-UTF-8 paths), one line per entry.
     pub skipped: Vec<String>,
 }
 
 type Entries = BTreeMap<Vec<u8>, (EntryKind, gix::ObjectId)>;
 type Changes = BTreeMap<PathBuf, Option<(gix::ObjectId, FileMode)>>;
 
-/// Importa nello store (che deve essere vuoto) la storia di `root/.git`.
+/// Imports the history of `root/.git` into the store (which must be empty).
 ///
-/// Si segue la catena dei primi genitori di HEAD: ogni commit diventa le op
-/// `File*`/`TextEdit` che portano dall'albero del genitore al suo, seguite da
-/// un checkpoint che ricorda il commit di origine (e che quindi non verrà
-/// riesportato). I rami fusi compaiono come effetto del commit di merge.
+/// The first-parent chain of HEAD is followed: each commit becomes the
+/// `File*`/`TextEdit` ops that lead from its parent's tree to its own,
+/// followed by a checkpoint that remembers the source commit (and that will
+/// therefore not be re-exported). Merged branches show up as the effect of
+/// the merge commit.
 pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Imported, GitError> {
     if store.op_count()? > 0 || store.checkpoints().next().is_some() {
         return Err(GitError::NotEmpty);
@@ -35,7 +36,7 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
     let repo = gix::open(root).map_err(|_| GitError::NotARepository(root.to_owned()))?;
     let mut report = Imported::default();
     let Ok(head) = repo.head_commit() else {
-        return Ok(report); // repository senza commit
+        return Ok(report); // repository with no commits
     };
 
     let mut chain = vec![head.id];
@@ -86,8 +87,8 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
         }
         report.commits += 1;
 
-        // Un checkpoint punta a un'op: i commit vuoti in testa alla storia
-        // (prima di qualunque file) non ne hanno una e non lasciano traccia.
+        // A checkpoint points to an op: empty commits at the start of the
+        // history (before any file) have none and leave no trace.
         if let Some(head) = head_op {
             let message = commit.message_raw_sloppy().to_string();
             let checkpoint = Checkpoint {
@@ -127,7 +128,7 @@ fn file_mode(kind: EntryKind) -> Option<FileMode> {
     }
 }
 
-/// Differenze tra due alberi git, scendendo solo nelle cartelle che cambiano.
+/// Differences between two git trees, descending only into the directories that change.
 fn diff_trees(
     repo: &gix::Repository,
     old: Option<gix::ObjectId>,
@@ -144,7 +145,7 @@ fn diff_trees(
             continue;
         }
         let Ok(name) = std::str::from_utf8(name) else {
-            skipped.push(format!("{prefix}{}: nome non UTF-8", String::from_utf8_lossy(name)));
+            skipped.push(format!("{prefix}{}: non-UTF-8 name", String::from_utf8_lossy(name)));
             continue;
         };
         let path = format!("{prefix}{name}");
