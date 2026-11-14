@@ -337,6 +337,29 @@ fn damage_to_confirmed_data_in_the_active_files_is_never_silently_dropped() {
 }
 
 #[test]
+fn a_damaged_base_is_reported_when_a_delta_is_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::init(tmp.path()).unwrap();
+    let lines: Vec<String> =
+        (0..600).map(|i| format!("line {i}: {:x}", (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))).collect();
+    let first = lines.join("\n").into_bytes();
+    let second = format!("{}\none more line", lines.join("\n")).into_bytes();
+    let base = store.put_blob(&first).unwrap();
+    let delta = store.put_blob_like(&second, &base).unwrap();
+    store.close().unwrap();
+    let pack = tmp.path().join("objects/00000000.pack");
+    let whole_then_delta = std::fs::metadata(&pack).unwrap().len() as usize;
+    assert!(whole_then_delta < first.len(), "the second version is stored as a delta");
+
+    // A byte of the first record goes wrong: neither blob can be trusted,
+    // and neither is returned.
+    flip_byte(&pack, 200);
+    let store = Store::open_with(tmp.path(), repair(StoreOptions::default())).unwrap();
+    assert!(matches!(store.get_blob(&base), Err(StoreError::Corrupt { .. }) | Ok(None)), "the base");
+    assert!(matches!(store.get_blob(&delta), Err(StoreError::Corrupt { .. }) | Ok(None)), "its delta");
+}
+
+#[test]
 fn missing_segments_are_detected() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().join("base");

@@ -438,7 +438,10 @@ impl Repo {
             for (range, name) in places {
                 text.splice(range, name.bytes());
             }
-            let blob: BlobId = self.store.put_blob(&text)?;
+            let blob: BlobId = match before[state].get(&file) {
+                Some(entry) => self.store.put_blob_like(&text, &entry.blob)?,
+                None => self.store.put_blob(&text)?,
+            };
             after[state].replace(&file, blob)?;
         }
         let [base, main, lane_tree] = after;

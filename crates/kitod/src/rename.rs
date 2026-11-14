@@ -243,7 +243,7 @@ impl Repo {
         let root = work.root.clone();
         let mut files = Vec::new();
         for (path, file_entry, text) in changed {
-            let blob = self.store.put_blob(&text)?;
+            let blob = self.store.put_blob_like(&text, &file_entry.blob)?;
             self.write_file_in(&root, &path, &TreeEntry { blob, mode: file_entry.mode })?;
             files.push(path);
         }

@@ -67,6 +67,91 @@ fn blobs_round_trip_deduplicate_and_compress() {
     assert_eq!(store.stats().unwrap().blobs, 4, "deduplicated after reopening too");
 }
 
+/// A source file of about `lines` lines that does not compress to nothing.
+fn source(lines: usize) -> Vec<String> {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut word = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        format!("{:x}", state % 0xffff_ffff)
+    };
+    (0..lines).map(|i| format!("    let {} = {}({}, {i}) + {};", word(), word(), word(), word())).collect()
+}
+
+#[test]
+fn a_new_version_of_a_blob_costs_what_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::init(tmp.path()).unwrap();
+    let pack = || std::fs::metadata(tmp.path().join("objects/00000000.pack")).unwrap().len();
+
+    // A file of some 60 kB, then sixty saves that change a line each.
+    let mut lines = source(1_200);
+    let first = lines.join("\n").into_bytes();
+    let mut ids = vec![store.put_blob(&first).unwrap()];
+    store.commit().unwrap();
+    let whole = pack();
+    assert!(whole > 15_000, "the file must not compress to nothing: {whole} bytes");
+
+    let mut versions = vec![first];
+    for save in 0..60 {
+        lines[(save * 37) % 1_200] = format!("    let changed = save({save});");
+        let content = lines.join("\n").into_bytes();
+        let id = store.put_blob_like(&content, ids.last().unwrap()).unwrap();
+        assert_eq!(id, BlobId::of(&content));
+        // Readable right away, before the commit.
+        assert_eq!(store.get_blob(&id).unwrap().as_deref(), Some(&content[..]));
+        ids.push(id);
+        versions.push(content);
+    }
+    store.commit().unwrap();
+    // Sixty versions stored whole would be sixty times the first. Chains
+    // are cut now and then (a version is stored whole again), so: a few.
+    let grown = pack() - whole;
+    assert!(grown < 4 * whole, "60 saves cost {grown} bytes, the file alone {whole}");
+    assert_eq!(store.put_blob_like(&versions[30], &ids[3]).unwrap(), ids[30], "same content, same ID");
+    assert_eq!(store.stats().unwrap().blobs, 61);
+
+    // What does not resemble its supposed base, or has none, is stored whole
+    // and reads the same.
+    let other = source(300).join("\n").into_bytes();
+    let unrelated = store.put_blob_like(&other, &ids[60]).unwrap();
+    let orphan = store.put_blob_like(b"no base at all", &BlobId::of(b"never stored")).unwrap();
+    let tiny = store.put_blob_like(b"tiny", &ids[60]).unwrap();
+    assert_eq!(store.get_blob(&unrelated).unwrap().as_deref(), Some(&other[..]));
+    assert_eq!(store.get_blob(&orphan).unwrap().as_deref(), Some(&b"no base at all"[..]));
+    assert_eq!(store.get_blob(&tiny).unwrap().as_deref(), Some(&b"tiny"[..]));
+    store.close().unwrap();
+
+    // After a reopen every version is what it was, in any order, and the
+    // whole store verifies.
+    let store = Store::open(tmp.path()).unwrap();
+    for at in [60, 0, 25, 59, 24, 1, 37] {
+        assert_eq!(store.get_blob(&ids[at]).unwrap().as_deref(), Some(&versions[at][..]), "version {at}");
+    }
+    for (id, content) in ids.iter().zip(&versions) {
+        assert_eq!(store.get_blob(id).unwrap().as_deref(), Some(&content[..]));
+    }
+    let report = store.verify().unwrap();
+    assert!(report.is_ok(), "{report:?}");
+    assert_eq!(report.blobs, 64);
+}
+
+#[test]
+fn a_store_from_before_deltas_is_opened_and_marked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::init(tmp.path()).unwrap();
+    let id = store.put_blob(b"written by an older version").unwrap();
+    store.close().unwrap();
+    std::fs::write(tmp.path().join("format"), "kito-store 1\n").unwrap();
+
+    let store = Store::open(tmp.path()).unwrap();
+    assert_eq!(store.get_blob(&id).unwrap().as_deref(), Some(&b"written by an older version"[..]));
+    drop(store);
+    // From now on it may hold what an older version cannot read.
+    assert_eq!(std::fs::read_to_string(tmp.path().join("format")).unwrap(), "kito-store 2\n");
+}
+
 #[test]
 fn ops_are_validated_before_being_logged() {
     let tmp = tempfile::tempdir().unwrap();

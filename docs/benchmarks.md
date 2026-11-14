@@ -245,3 +245,49 @@ With `typescript-language-server` on a project of 41 files, an explicit
 rename that updates 80 uses in 40 files takes 1,060 ms the first time (the
 server starts and loads the project) and 224–240 ms afterwards, 150 ms of
 which are the wait of D-063.
+
+## Phase 5 · from a save to its op
+
+```bash
+cargo run --release -p kitod --example latency -- --shape typical
+```
+
+| File | Before (after 50 ms of quiet) | After (at the closing of the file) |
+| --- | --- | --- |
+| 2,000 lines, 143 functions (58 kB), p50 / p95 | 66.6 / 72.3 ms | 15.9 / 21.2 ms |
+| 2,000 lines, 2,000 functions (172 kB), p50 / p95 | 84.7 / 103.5 ms | 35.3 / 53.2 ms |
+
+Nothing in the processing changed (p95 19.9 ms and 51.5 ms): what went away
+is the wait (D-067).
+
+## Phase 5 · what a save costs in the store
+
+```bash
+scripts/store-growth.sh
+```
+
+One line of a 69 kB source file (`crates/kitod/src/repo.rs`) changed and
+saved 200 times:
+
+| | Before | After |
+| --- | --- | --- |
+| Growth of the blobs per save | 20,279 bytes | 910 bytes |
+| The 200 saves | 4,055 kB | 182 kB |
+
+A new version of a file is stored as a delta from the one before (D-069).
+The latency of a save is the same with and without (p95 21.3 ms): the
+previous version is in memory when the next one arrives.
+
+## Phase 5 · integrations with their git commit
+
+| On 50,000 files, git export on | Before | After |
+| --- | --- | --- |
+| Integrating 100 ops | 125–145 ms | 93–110 ms |
+| Integrating 100 ops from a lane 550–650 files behind | 207–260 ms | 135–187 ms |
+
+git's index is rewritten after the lane has its answer, and the files of
+an integration are written by several threads (D-068). Step by step, for a
+lane that is behind: scanning the lane 55–70 ms, merge 10 ms, writing and
+recording the merged files 30 ms, the git commit 10 ms (37–44 ms with the
+index), bringing the lane's 600 files up to date 15–20 ms (45–48 ms one at
+a time).

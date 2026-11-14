@@ -7,7 +7,7 @@ use crate::index::{Index, IndexBatch, IndexedOp, Watermark};
 use crate::intents::IntentLog;
 use crate::keyed::KeyedLog;
 use crate::logfile::LogRecovery;
-use crate::objects::Packs;
+use crate::objects::{Packs, Stored};
 use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
 use kito_core::{
@@ -17,14 +17,17 @@ use kito_core::{
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Conventional name of the store directory inside a repository.
 pub const STORE_DIR: &str = ".kito";
 
 const FORMAT_FILE: &str = "format";
-const FORMAT: &str = "kito-store 1\n";
+const FORMAT: &str = "kito-store 2\n";
+/// The format before blobs could be stored as deltas: read as it is, and
+/// marked as the current one, since from now on it may hold them.
+const FORMAT_WITHOUT_DELTAS: &str = "kito-store 1\n";
 const LOCK_FILE: &str = "lock";
 const LOST_FOUND: &str = "lost+found";
 /// Records per transaction when the index is caught up or rebuilt.
@@ -168,6 +171,38 @@ struct Pending {
 /// Writes ([`Store::put_blob`], [`Store::append_op`]) are queued;
 /// [`Store::commit`] makes them durable. An op is *confirmed* once the
 /// `commit` that follows it has returned `Ok`.
+/// The contents of the blobs read or written last.
+#[derive(Default)]
+struct Recent {
+    blobs: std::collections::VecDeque<(BlobId, std::sync::Arc<[u8]>)>,
+    bytes: usize,
+}
+
+impl Recent {
+    const MAX_BLOBS: usize = 8;
+    const MAX_BYTES: usize = 8 << 20;
+    /// Larger contents are not kept.
+    const MAX_BLOB: usize = 2 << 20;
+
+    fn get(&self, id: &BlobId) -> Option<Vec<u8>> {
+        self.blobs.iter().find(|(known, _)| known == id).map(|(_, data)| data.to_vec())
+    }
+
+    fn put(&mut self, id: BlobId, data: &[u8]) {
+        if data.len() > Self::MAX_BLOB || self.blobs.iter().any(|(known, _)| *known == id) {
+            return;
+        }
+        self.bytes += data.len();
+        self.blobs.push_back((id, data.into()));
+        while self.blobs.len() > Self::MAX_BLOBS || self.bytes > Self::MAX_BYTES {
+            match self.blobs.pop_front() {
+                Some((_, gone)) => self.bytes -= gone.len(),
+                None => break,
+            }
+        }
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     opts: StoreOptions,
@@ -180,6 +215,9 @@ pub struct Store {
     conflicts: KeyedLog<ConflictId, Conflict>,
     index: Index,
     pending: Pending,
+    /// The blobs read or written last: a new version of a file is stored as
+    /// what it takes to get it from the one before, which is read for it.
+    recent: Mutex<Recent>,
     poisoned: bool,
     recovery: RecoveryReport,
     index_dirty: bool,
@@ -219,6 +257,10 @@ impl Store {
         opts.validate()?;
         match fs::read_to_string(dir.join(FORMAT_FILE)) {
             Ok(found) if found == FORMAT => {}
+            Ok(found) if found == FORMAT_WITHOUT_DELTAS => {
+                let format = dir.join(FORMAT_FILE);
+                atomic_write(&format, FORMAT.as_bytes()).at(&format)?;
+            }
             Ok(found) => return Err(StoreError::UnsupportedFormat(found.trim().to_owned())),
             Err(_) => return Err(StoreError::NotAStore(dir.to_owned())),
         }
@@ -311,6 +353,7 @@ impl Store {
             conflicts,
             index,
             pending: Pending::default(),
+            recent: Mutex::new(Recent::default()),
             poisoned: false,
             recovery: RecoveryReport {
                 oplog: oplog_recovery,
@@ -385,12 +428,62 @@ impl Store {
         Ok(self.blob_pos(id)?.is_some())
     }
 
+    /// Appends a blob that is a new version of `like` (a file saved again):
+    /// if `like` is in the store, the new content may be stored as what it
+    /// takes to get it from there, which for a small change to a large file
+    /// is a small part of it. Reading it gives the same bytes either way.
+    pub fn put_blob_like(&mut self, data: &[u8], like: &BlobId) -> Result<BlobId> {
+        self.check()?;
+        let id = BlobId::of(data);
+        if self.has_blob(&id)? {
+            return Ok(id);
+        }
+        let base = match self.blob_pos(like)? {
+            Some(pos) => Some((self.packs.depth(pos)?, self.read_at(pos, like)?)),
+            None => None,
+        };
+        let appended = match &base {
+            Some((depth, content)) => self.packs.append_like(&id, data, like, content, *depth),
+            None => self.packs.append(&id, data),
+        };
+        let pos = self.guard(appended)?;
+        self.pending.blobs.insert(id, pos);
+        self.pending.blob_list.push((id, pos));
+        self.recent.lock().unwrap_or_else(|e| e.into_inner()).put(id, data);
+        Ok(id)
+    }
+
     /// Content of a blob, verified against its hash.
     pub fn get_blob(&self, id: &BlobId) -> Result<Option<Vec<u8>>> {
         match self.blob_pos(id)? {
-            Some(pos) => self.packs.read(pos, id).map(Some),
+            Some(pos) => self.read_at(pos, id).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Reads the blob at `pos`: whole, or from the blob it is a delta of.
+    fn read_at(&self, pos: Pos, id: &BlobId) -> Result<Vec<u8>> {
+        if let Some(hit) = self.recent.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            return Ok(hit);
+        }
+        let data = match self.packs.read(pos, id)? {
+            Stored::Whole(data) => data,
+            Stored::Delta { base, body, raw_len } => {
+                let from = self.blob_pos(&base)?.ok_or_else(|| {
+                    StoreError::corrupt(
+                        Path::new("objects"),
+                        pos.to_u64(),
+                        format!("blob {id} is stored as a delta of {base}, which is not in the store"),
+                    )
+                })?;
+                // A chain is at most `MAX_DELTA_DEPTH` long.
+                let base_data = self.read_at(from, &base)?;
+                let data = self.packs.apply_delta(pos, id, &body, raw_len, &base_data)?;
+                self.recent.lock().unwrap_or_else(|e| e.into_inner()).put(*id, &data);
+                data
+            }
+        };
+        Ok(data)
     }
 
     // ------------------------------------------------------------------ op
@@ -784,7 +877,12 @@ impl Store {
         let mut problems = Vec::new();
 
         let mut blobs: HashSet<BlobId> = HashSet::new();
-        let scan = self.packs.scan_verified(self.packs.log().start(), |pos, id, _| {
+        let base = |id: &BlobId| {
+            self.get_blob(id)?.ok_or_else(|| {
+                StoreError::corrupt(Path::new("objects"), 0, format!("the base {id} of a delta is missing"))
+            })
+        };
+        let scan = self.packs.scan_verified(self.packs.log().start(), &base, |pos, id, _| {
             if blobs.insert(id) {
                 match self.blob_pos(&id) {
                     Ok(Some(found)) if found == pos => {}

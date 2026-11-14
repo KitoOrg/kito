@@ -609,3 +609,30 @@ repository; closing the repository, a checkpoint made by hand and
 the files of the last integration as modified; nothing in Kito reads the
 index. The files an integration writes, in the main directory and in the
 lane it brings up to date, are written by several threads.
+
+### D-069 · A file saved again is stored as what changed
+Every save put the whole file in the store, compressed: 20 kB for one line
+changed in a file of 69 kB. A blob can now be stored as a delta: its
+content compressed with another blob as dictionary, and the ID of that
+blob. The capture, an integration and the git import say which blob a new
+content is a version of (the file as the lane had it), and the store keeps
+the delta if it is smaller. The op log is not touched and nothing is
+rewritten: the log stays append-only, the IDs are those of the contents,
+and reading a blob gives the same bytes, verified against its hash, however
+it is stored. A chain of deltas is at most 24 long, then a version is
+stored whole again; the last blobs read or written are kept in memory, so
+that a save does not walk the chain. The plan asks for compaction between
+checkpoints against the growth of the store: this removes most of that
+growth as it happens, without a pass that rewrites history. The store's
+format is now `kito-store 2`: an older store is opened and marked, and an
+older Kito refuses a marked one rather than misread it.
+
+### D-070 · More language servers, and what they taught
+The provider was tried with the servers of eight languages (D-062 had two).
+Three things came out of it, all in the provider and none in the servers'
+favour or against: a server may refuse a request because what it knows
+changed while it was answering (rust-analyzer, while it loads), and must
+be asked again; a C or C++ server finds the uses in the files a compilation
+database names, so a project without one gets the uses of the open file
+only; and a server that does not say when it has loaded (pyright) is given
+the three seconds of D-063 on its first question.

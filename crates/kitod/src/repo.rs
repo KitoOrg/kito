@@ -966,7 +966,12 @@ impl Repo {
                     let blob = BlobId::of(&content);
                     let same = work.tree.get(&rel).is_some_and(|e| e.blob == blob && e.mode == mode);
                     if !same {
-                        self.store.put_blob(&content)?;
+                        // A file saved again is stored as what changed
+                        // since the version the lane had.
+                        match work.tree.get(&rel) {
+                            Some(before) => self.store.put_blob_like(&content, &before.blob)?,
+                            None => self.store.put_blob(&content)?,
+                        };
                         changes.insert(rel.clone(), Some(Snapshot { blob, mode }));
                     }
                     let fresh = meta

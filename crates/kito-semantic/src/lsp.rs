@@ -45,6 +45,10 @@ fn default_timeout() -> u64 {
     60
 }
 
+/// Error codes of the protocol that mean "ask again".
+const CONTENT_MODIFIED: i64 = -32801;
+const SERVER_CANCELLED: i64 = -32802;
+
 /// How the failure of a server whose program does not exist starts.
 const NOT_INSTALLED: &str = "its program is not installed";
 
@@ -597,9 +601,32 @@ impl Running {
             }
             if let Some(error) = message.get("error") {
                 let text = error["message"].as_str().unwrap_or("request refused").to_owned();
+                // What the server knows changed while it was answering, or it
+                // dropped the request for work of its own: asked again, it
+                // answers.
+                if matches!(error["code"].as_i64(), Some(CONTENT_MODIFIED | SERVER_CANCELLED)) {
+                    return Err(Error::Again(format!("{method}: {text}")));
+                }
                 return Err(self.fail(format!("{method}: {text}")));
             }
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    /// A request, made again for as long as the server says to and the time
+    /// allows.
+    fn request_until_answered(&mut self, method: &str, params: &Value, deadline: Instant) -> Result<Value> {
+        loop {
+            match self.request(method, params.clone(), deadline) {
+                Err(Error::Again(why)) => {
+                    if Instant::now() >= deadline {
+                        return Err(self.fail(why));
+                    }
+                    // Whatever it was doing, it is given the time to finish.
+                    self.settle(Duration::from_millis(50), deadline)?;
+                }
+                other => return other,
+            }
         }
     }
 
@@ -637,7 +664,7 @@ impl Running {
             if question.method == "textDocument/references" {
                 params["context"] = json!({ "includeDeclaration": false });
             }
-            match self.request(question.method, params, deadline) {
+            match self.request_until_answered(question.method, &params, deadline) {
                 Ok(result) => answers.push(self.places(&result)),
                 Err(e) => {
                     failure = Some(e);

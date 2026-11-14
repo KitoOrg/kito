@@ -63,7 +63,13 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
             let snapshot = match change {
                 Some((blob_id, mode)) => {
                     let blob = repo.find_blob(blob_id).map_err(git_err)?;
-                    Some(Snapshot { blob: store.put_blob(&blob.data)?, mode })
+                    // A file changed by a commit is stored as what changed
+                    // since the version before it.
+                    let stored = match tree.get(&path) {
+                        Some(before) => store.put_blob_like(&blob.data, &before.blob)?,
+                        None => store.put_blob(&blob.data)?,
+                    };
+                    Some(Snapshot { blob: stored, mode })
                 }
                 None => None,
             };

@@ -487,7 +487,10 @@ impl Repo {
         for (path, file) in &prepared.outcome.files {
             match file {
                 Some(file) => {
-                    let blob = self.store.put_blob(&file.content)?;
+                    let blob = match self.main.tree.get(path) {
+                        Some(before) => self.store.put_blob_like(&file.content, &before.blob)?,
+                        None => self.store.put_blob(&file.content)?,
+                    };
                     entries.insert(path.clone(), TreeEntry { blob, mode: file.mode });
                 }
                 None => {
@@ -581,7 +584,10 @@ impl Repo {
         for (path, file) in &prepared.outcome.files {
             match file {
                 Some(file) => {
-                    let blob = self.store.put_blob(&file.content)?;
+                    let blob = match self.main.tree.get(path) {
+                        Some(before) => self.store.put_blob_like(&file.content, &before.blob)?,
+                        None => self.store.put_blob(&file.content)?,
+                    };
                     written.push((path.clone(), TreeEntry { blob, mode: file.mode }));
                 }
                 None => remove_in(&root, path)?,

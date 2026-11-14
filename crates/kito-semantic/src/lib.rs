@@ -41,6 +41,10 @@ pub enum Error {
     Server { server: String, message: String },
     #[error("language server `{server}` did not answer in {seconds} s")]
     Timeout { server: String, seconds: u64 },
+    /// The server asked for the request to be made again. Never returned:
+    /// the provider makes it again.
+    #[error("{0}")]
+    Again(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
