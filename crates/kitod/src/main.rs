@@ -1,10 +1,10 @@
-//! `kitod`: daemon di un repository Kito.
+//! `kitod`: daemon of a Kito repository.
 //!
 //! ```text
-//! kitod --repo <cartella>
+//! kitod --repo <dir>
 //! ```
 //!
-//! Di norma non si lancia a mano: lo avvia la CLI quando serve.
+//! It is not normally launched by hand: the CLI starts it when needed.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,23 +20,23 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
-                println!("uso: kitod --repo <cartella>");
+                println!("usage: kitod --repo <dir>");
                 return ExitCode::SUCCESS;
             }
             other => {
-                eprintln!("kitod: argomento sconosciuto: {other}");
+                eprintln!("kitod: unknown argument: {other}");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(repo) = repo else {
-        eprintln!("uso: kitod --repo <cartella>");
+        eprintln!("usage: kitod --repo <dir>");
         return ExitCode::from(2);
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("kitod: avvio del runtime: {e}");
+            eprintln!("kitod: starting the runtime: {e}");
             return ExitCode::FAILURE;
         }
     };

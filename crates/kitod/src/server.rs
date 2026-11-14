@@ -1,4 +1,4 @@
-//! Il daemon: watcher con debounce, riconciliazione periodica, socket JSON-RPC.
+//! The daemon: watcher with debounce, periodic reconciliation, JSON-RPC socket.
 
 use crate::error::{Error, Result};
 use crate::repo::Repo;
@@ -14,25 +14,25 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Notify};
 
-/// Quante misure di latenza si tengono per i percentili.
+/// How many latency samples are kept for the percentiles.
 const SAMPLES: usize = 1024;
-/// Un gruppo di eventi non aspetta la quiete più di tante volte il debounce.
+/// A batch of events does not wait for quiet longer than this many times the debounce.
 const MAX_WAIT_FACTOR: u32 = 10;
-/// Quando gli eventi non sono affidabili si scansiona di continuo, ma
-/// spendendo in scansioni al più un ventesimo del tempo…
+/// When events are unreliable the daemon scans continuously, but spending
+/// at most a twentieth of its time on scans…
 const FAST_SCAN_FACTOR: u32 = 20;
-/// …e mai più di una volta al secondo.
+/// …and never more than once per second.
 const FAST_SCAN_MIN: Duration = Duration::from_secs(1);
-/// Una scansione che trova modifiche quando il watcher tace da così tanto
-/// ha trovato modifiche che il watcher non ha segnalato.
+/// A scan that finds changes when the watcher has been silent for this long
+/// has found changes the watcher did not report.
 const QUIET: Duration = Duration::from_secs(1);
 
-/// Contatori aggiornati dal callback del watcher.
+/// Counters updated by the watcher callback.
 #[derive(Default)]
 struct Signals {
-    /// Eventi ricevuti (esclusi quelli interni).
+    /// Events received (internal ones excluded).
     events: AtomicU64,
-    /// Millisecondi dall'avvio del daemon all'ultimo evento.
+    /// Milliseconds from the start of the daemon to the last event.
     last_event_ms: AtomicU64,
 }
 
@@ -58,19 +58,19 @@ fn percentile(samples: &VecDeque<f64>, p: f64) -> Option<f64> {
 struct Daemon {
     root: PathBuf,
     socket: PathBuf,
-    /// `None` dopo lo spegnimento.
+    /// `None` after shutdown.
     repo: Mutex<Option<Repo>>,
     stats: Mutex<WatchStats>,
     signals: Arc<Signals>,
-    /// `false` se il watcher è disattivato dalla configurazione.
+    /// `false` if the watcher is disabled by the configuration.
     watching: bool,
     filesystem: Option<String>,
-    /// Gli eventi non sono affidabili: scansione frequente.
+    /// Events are unreliable: frequent scanning.
     fast: AtomicBool,
     fast_changed: Notify,
-    /// Modifiche trovate dalla scansione e mai segnalate dal watcher.
+    /// Changes found by the scan and never reported by the watcher.
     missed: AtomicU64,
-    /// Durata dell'ultima scansione, in microsecondi.
+    /// Duration of the last scan, in microseconds.
     last_scan_us: AtomicU64,
     rescan_every: Duration,
     started: Instant,
@@ -83,7 +83,7 @@ impl Daemon {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
             Some(repo) => f(repo),
-            None => Err(Error::Other("il daemon si sta spegnendo".into())),
+            None => Err(Error::Other("the daemon is shutting down".into())),
         }
     }
 
@@ -115,7 +115,7 @@ impl Daemon {
         })
     }
 
-    /// Tempo trascorso dall'ultimo evento del watcher (`None`: mai arrivato uno).
+    /// Time elapsed since the last watcher event (`None`: none has ever arrived).
     fn since_last_event(&self) -> Option<Duration> {
         if self.signals.events.load(Ordering::Relaxed) == 0 {
             return None;
@@ -124,9 +124,9 @@ impl Daemon {
         Some(self.started.elapsed().saturating_sub(last))
     }
 
-    /// Scansione completa di riconciliazione. Se trova modifiche mentre il
-    /// watcher tace, vuol dire che qui gli eventi non arrivano tutti: da quel
-    /// momento il daemon scansiona spesso invece di fidarsi del watcher.
+    /// Full reconciliation scan. If it finds changes while the watcher is
+    /// silent, it means that not all events arrive here: from then on the
+    /// daemon scans often instead of trusting the watcher.
     fn reconcile(&self) -> Result<usize> {
         let quiet = self.since_last_event().is_none_or(|t| t >= QUIET);
         let start = Instant::now();
@@ -137,7 +137,7 @@ impl Daemon {
             self.missed.fetch_add(ops.len() as u64, Ordering::Relaxed);
             if !self.fast.swap(true, Ordering::Relaxed) {
                 eprintln!(
-                    "kitod: {} modifiche non segnalate dal watcher: da ora la cartella viene scansionata spesso",
+                    "kitod: changes missed by the watcher: {}; from now on the directory is scanned often",
                     ops.len()
                 );
                 self.fast_changed.notify_one();
@@ -146,7 +146,7 @@ impl Daemon {
         Ok(ops.len())
     }
 
-    /// Intervallo tra due scansioni periodiche.
+    /// Interval between two periodic scans.
     fn rescan_interval(&self) -> Duration {
         if !self.fast.load(Ordering::Relaxed) {
             return self.rescan_every;
@@ -155,7 +155,7 @@ impl Daemon {
         (last_scan * FAST_SCAN_FACTOR).max(FAST_SCAN_MIN).min(self.rescan_every)
     }
 
-    /// Esegue una richiesta. È codice bloccante: va chiamato fuori dal runtime.
+    /// Executes a request. It is blocking code: it must be called outside the runtime.
     fn handle(&self, request: &Request) -> Response {
         let id = request.id;
         let params = &request.params;
@@ -180,7 +180,7 @@ impl Daemon {
                     let label = params
                         .get("label")
                         .and_then(Value::as_str)
-                        .ok_or((rpc::INVALID_PARAMS, "manca il parametro `label`".to_owned()))?;
+                        .ok_or((rpc::INVALID_PARAMS, "missing parameter `label`".to_owned()))?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
                     to_json(serde_json::to_value(done))
                 }
@@ -194,7 +194,7 @@ impl Daemon {
                     let to = params
                         .get("to")
                         .and_then(Value::as_str)
-                        .ok_or((rpc::INVALID_PARAMS, "manca il parametro `to`".to_owned()))?;
+                        .ok_or((rpc::INVALID_PARAMS, "missing parameter `to`".to_owned()))?;
                     let paths: Vec<PathBuf> = params
                         .get("paths")
                         .and_then(Value::as_array)
@@ -213,7 +213,7 @@ impl Daemon {
                     self.shutdown.notify_one();
                     Ok(json!({}))
                 }
-                other => Err((rpc::METHOD_NOT_FOUND, format!("metodo sconosciuto: {other}"))),
+                other => Err((rpc::METHOD_NOT_FOUND, format!("unknown method: {other}"))),
             }
         })();
         match result {
@@ -240,8 +240,8 @@ impl Daemon {
     }
 }
 
-/// `true` per i percorsi che il daemon stesso scrive o che non sono mai
-/// tracciati: non vale la pena nemmeno svegliare la cattura.
+/// `true` for the paths that the daemon itself writes or that are never
+/// tracked: it is not even worth waking up the capture.
 fn is_internal(rel: &Path) -> bool {
     let mut parts = rel.components();
     match parts.next() {
@@ -256,8 +256,8 @@ enum WatchMsg {
     Rescan(String),
 }
 
-/// Raccoglie gli eventi del watcher e li passa alla cattura dopo un periodo
-/// di quiete (debounce).
+/// Collects the watcher events and hands them to the capture after a period
+/// of quiet (debounce).
 async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<WatchMsg>) {
     let max_wait = daemon.debounce * MAX_WAIT_FACTOR;
     while let Some(first) = events.recv().await {
@@ -298,25 +298,25 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
             stats.rescans += u64::from(needs_rescan);
         }
         if let Some(message) = &error {
-            eprintln!("kitod: cattura: {message}");
+            eprintln!("kitod: capture: {message}");
         }
-        // La latenza si misura solo sui gruppi che hanno prodotto op.
+        // Latency is measured only on the batches that produced ops.
         daemon.record(capture_start.elapsed(), captured.then(|| batch_start.elapsed()), error);
     }
 }
 
-/// Scansione periodica: recupera gli eventi che il watcher ha perso.
+/// Periodic scan: recovers the events the watcher missed.
 async fn rescan_loop(daemon: Arc<Daemon>) {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(daemon.rescan_interval()) => {}
-            // È appena scattata la scansione frequente: l'attesa si ricalcola.
+            // Frequent scanning has just kicked in: the wait is recomputed.
             _ = daemon.fast_changed.notified() => continue,
         }
         let worker = daemon.clone();
         match tokio::task::spawn_blocking(move || worker.reconcile()).await {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("kitod: scansione periodica: {e}"),
+            Ok(Err(e)) => eprintln!("kitod: periodic scan: {e}"),
             Err(_) => return,
         }
     }
@@ -337,7 +337,7 @@ async fn serve_connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     .await
                     .unwrap_or_else(|e| Response::err(id, rpc::INTERNAL_ERROR, e.to_string()))
             }
-            Err(e) => Response::err(0, rpc::PARSE_ERROR, format!("richiesta non valida: {e}")),
+            Err(e) => Response::err(0, rpc::PARSE_ERROR, format!("invalid request: {e}")),
         };
         let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
         bytes.push(b'\n');
@@ -347,10 +347,10 @@ async fn serve_connection(daemon: Arc<Daemon>, stream: UnixStream) {
     }
 }
 
-/// Esegue il daemon del repository in `root` fino allo spegnimento
-/// (richiesta `shutdown`, SIGTERM o Ctrl-C).
+/// Runs the daemon of the repository in `root` until shutdown (`shutdown`
+/// request, SIGTERM or Ctrl-C).
 pub async fn serve(root: &Path) -> Result<()> {
-    // Aprire lo store prende il lock esclusivo: un solo daemon per repository.
+    // Opening the store takes the exclusive lock: only one daemon per repository.
     let mut repo = Repo::open(root)?;
     let root = repo.root().to_owned();
     let debounce = Duration::from_millis(repo.config().capture.debounce_ms.max(1));
@@ -361,8 +361,8 @@ pub async fn serve(root: &Path) -> Result<()> {
     let unreliable = filesystem.as_deref().is_some_and(crate::fsinfo::events_are_unreliable);
     let started = Instant::now();
 
-    // Il watcher parte prima della scansione iniziale: così nessuna modifica
-    // può cadere nell'intervallo tra le due.
+    // The watcher starts before the initial scan: this way no change can
+    // fall into the gap between the two.
     let (tx, rx) = mpsc::unbounded_channel::<WatchMsg>();
     let signals = Arc::new(Signals::default());
     let watcher = if watching {
@@ -370,9 +370,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         let seen = signals.clone();
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let msg = match event {
-                Ok(event) if event.need_rescan() => {
-                    WatchMsg::Rescan("il watcher ha perso degli eventi".into())
-                }
+                Ok(event) if event.need_rescan() => WatchMsg::Rescan("the watcher missed some events".into()),
                 Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
                 Ok(event) => {
                     let paths: Vec<PathBuf> = event
@@ -389,14 +387,14 @@ pub async fn serve(root: &Path) -> Result<()> {
                     seen.events.fetch_add(1, Ordering::Relaxed);
                     WatchMsg::Paths(paths)
                 }
-                Err(e) => WatchMsg::Rescan(format!("errore del watcher: {e}")),
+                Err(e) => WatchMsg::Rescan(format!("watcher error: {e}")),
             };
             let _ = tx.send(msg);
         })
-        .map_err(|e| Error::Other(format!("avvio del watcher: {e}")))?;
+        .map_err(|e| Error::Other(format!("starting the watcher: {e}")))?;
         watcher
             .watch(&root, RecursiveMode::Recursive)
-            .map_err(|e| Error::Other(format!("watcher su {}: {e}", root.display())))?;
+            .map_err(|e| Error::Other(format!("watcher on {}: {e}", root.display())))?;
         Some(watcher)
     } else {
         drop(tx);
@@ -426,12 +424,12 @@ pub async fn serve(root: &Path) -> Result<()> {
         debounce,
         shutdown: Notify::new(),
     });
-    eprintln!("kitod: in ascolto su {} per {}", socket.display(), daemon.root.display());
+    eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());
     if !watching {
-        eprintln!("kitod: watcher disattivato dalla configurazione: la cartella viene scansionata spesso");
+        eprintln!("kitod: watcher disabled by the configuration: the directory is scanned often");
     } else if unreliable {
         eprintln!(
-            "kitod: file system {}: gli eventi non sono affidabili, la cartella viene scansionata spesso",
+            "kitod: file system {}: file events are unreliable, the directory is scanned often",
             daemon.filesystem.as_deref().unwrap_or("?")
         );
     }
@@ -439,7 +437,7 @@ pub async fn serve(root: &Path) -> Result<()> {
     let debouncer = tokio::spawn(debounce_loop(daemon.clone(), rx));
     let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| Error::Other(format!("gestione dei segnali: {e}")))?;
+        .map_err(|e| Error::Other(format!("signal handling: {e}")))?;
 
     loop {
         tokio::select! {
@@ -455,14 +453,14 @@ pub async fn serve(root: &Path) -> Result<()> {
         }
     }
 
-    // Da qui nessuna nuova connessione viene accettata. Il file del socket
-    // resta finché lo store non è chiuso: chi aspetta lo spegnimento
-    // (`kito daemon stop`) sa che quando sparisce il lock è libero.
+    // From here on no new connection is accepted. The socket file stays
+    // until the store is closed: whoever is waiting for the shutdown
+    // (`kito daemon stop`) knows that once it disappears the lock is free.
     drop(listener);
     drop(watcher);
     debouncer.abort();
     rescanner.abort();
-    // Ultima scansione e chiusura pulita: stato salvato, indici durevoli.
+    // Last scan and clean shutdown: state saved, indexes durable.
     let repo = daemon.repo.lock().unwrap_or_else(|e| e.into_inner()).take();
     let closed = match repo {
         Some(mut repo) => tokio::task::spawn_blocking(move || {
@@ -476,6 +474,6 @@ pub async fn serve(root: &Path) -> Result<()> {
     };
     let _ = std::fs::remove_file(&socket);
     closed?;
-    eprintln!("kitod: spento");
+    eprintln!("kitod: stopped");
     Ok(())
 }

@@ -1,9 +1,9 @@
-//! Quali percorsi non vengono catturati.
+//! Which paths are not captured.
 //!
-//! Stesse regole per la scansione e per gli eventi del watcher, altrimenti
-//! un file apparirebbe e sparirebbe a seconda di chi lo guarda. `.git` e
-//! `.kito` sono sempre ignorati; poi valgono `.gitignore` (anche annidati),
-//! `.git/info/exclude`, `.kitoignore` e i pattern della configurazione.
+//! The same rules hold for the scan and for the watcher events, otherwise a
+//! file would appear and disappear depending on who looks at it. `.git` and
+//! `.kito` are always ignored; then come `.gitignore` (nested ones too),
+//! `.git/info/exclude`, `.kitoignore` and the patterns of the configuration.
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::HashMap;
@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 pub struct IgnoreRules {
     root: PathBuf,
-    /// Pattern validi per tutto il repository (configurazione, `.kitoignore`,
+    /// Patterns valid for the whole repository (configuration, `.kitoignore`,
     /// `.git/info/exclude`).
     global: Gitignore,
-    /// `.gitignore` di ogni cartella, letti quando servono.
+    /// The `.gitignore` of each directory, read when needed.
     per_dir: Mutex<HashMap<PathBuf, Option<Arc<Gitignore>>>>,
 }
 
@@ -23,7 +23,7 @@ impl IgnoreRules {
     pub fn new(root: &Path, patterns: &[String]) -> IgnoreRules {
         let mut builder = GitignoreBuilder::new(root);
         for pattern in patterns {
-            // Un pattern malformato nella configurazione non deve fermare il daemon.
+            // A malformed pattern in the configuration must not stop the daemon.
             let _ = builder.add_line(None, pattern);
         }
         for file in [root.join(".kitoignore"), root.join(".git/info/exclude")] {
@@ -35,7 +35,7 @@ impl IgnoreRules {
         IgnoreRules { root: root.to_owned(), global, per_dir: Mutex::new(HashMap::new()) }
     }
 
-    /// Dimentica i `.gitignore` letti (uno di essi è cambiato).
+    /// Forgets the `.gitignore` files read so far (one of them has changed).
     pub fn invalidate(&self) {
         self.per_dir.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -56,9 +56,9 @@ impl IgnoreRules {
         loaded
     }
 
-    /// `true` se il percorso (relativo alla radice) è ignorato. Come in git,
-    /// se una cartella è ignorata lo è tutto ciò che contiene, e un
-    /// `.gitignore` più profondo prevale su uno più in alto.
+    /// `true` if the path (relative to the root) is ignored. As in git, if a
+    /// directory is ignored so is everything it contains, and a deeper
+    /// `.gitignore` takes precedence over one higher up.
     pub fn is_ignored(&self, rel: &Path, is_dir: bool) -> bool {
         let parts: Vec<&std::ffi::OsStr> = rel
             .components()
@@ -85,8 +85,8 @@ impl IgnoreRules {
         false
     }
 
-    /// Decide per un singolo prefisso, consultando i `.gitignore` dalla sua
-    /// cartella in su: la prima regola che parla vince.
+    /// Decides for a single prefix, consulting the `.gitignore` files from
+    /// its directory upwards: the first rule that speaks wins.
     fn prefix_ignored(&self, prefix: &Path, parent: &Path, is_dir: bool) -> bool {
         let abs = self.root.join(prefix);
         let mut dir = Some(parent);
@@ -115,28 +115,28 @@ mod tests {
         let root = tmp.path();
         fs::create_dir_all(root.join("src/gen")).unwrap();
         fs::create_dir_all(root.join(".git/info")).unwrap();
-        fs::write(root.join(".gitignore"), "target/\n*.log\n!importante.log\n/solo-radice.txt\n").unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n!important.log\n/root-only.txt\n").unwrap();
         fs::write(root.join("src/.gitignore"), "gen/\n!*.log\n").unwrap();
-        fs::write(root.join(".git/info/exclude"), "locale.txt\n").unwrap();
+        fs::write(root.join(".git/info/exclude"), "local.txt\n").unwrap();
         fs::write(root.join(".kitoignore"), "*.secret\n").unwrap();
-        let rules = IgnoreRules::new(root, &["node_modules/".to_owned(), "[malformato".to_owned()]);
+        let rules = IgnoreRules::new(root, &["node_modules/".to_owned(), "[malformed".to_owned()]);
 
         let ignored = |p: &str, dir: bool| rules.is_ignored(Path::new(p), dir);
-        // Sempre ignorati.
+        // Always ignored.
         assert!(ignored(".git", true) && ignored(".git/config", false) && ignored("sub/.git/HEAD", false));
         assert!(ignored(".kito/oplog/0.seg", false));
-        assert!(!ignored("src/.kito", false), ".kito conta solo alla radice");
-        // .gitignore alla radice.
+        assert!(!ignored("src/.kito", false), ".kito only counts at the root");
+        // .gitignore at the root.
         assert!(ignored("target", true) && ignored("target/debug/x", false));
-        assert!(!ignored("target", false), "`target/` vale solo per le cartelle");
+        assert!(!ignored("target", false), "`target/` only applies to directories");
         assert!(ignored("a.log", false) && ignored("deep/dir/b.log", false));
-        assert!(!ignored("importante.log", false));
-        assert!(ignored("solo-radice.txt", false) && !ignored("sub/solo-radice.txt", false));
-        // .gitignore annidato: prevale su quello più in alto.
+        assert!(!ignored("important.log", false));
+        assert!(ignored("root-only.txt", false) && !ignored("sub/root-only.txt", false));
+        // Nested .gitignore: it takes precedence over the one higher up.
         assert!(!ignored("src/x.log", false));
         assert!(ignored("src/gen", true) && ignored("src/gen/file.rs", false));
-        // Altre fonti.
-        assert!(ignored("locale.txt", false) && ignored("x/y.secret", false));
+        // Other sources.
+        assert!(ignored("local.txt", false) && ignored("x/y.secret", false));
         assert!(ignored("node_modules", true) && ignored("pkg/node_modules/a.js", false));
         assert!(!ignored("src/main.rs", false) && !ignored("", false));
     }
@@ -147,7 +147,7 @@ mod tests {
         let rules = IgnoreRules::new(tmp.path(), &[]);
         assert!(!rules.is_ignored(Path::new("a.tmp"), false));
         fs::write(tmp.path().join(".gitignore"), "*.tmp\n").unwrap();
-        assert!(!rules.is_ignored(Path::new("a.tmp"), false), "ancora in cache");
+        assert!(!rules.is_ignored(Path::new("a.tmp"), false), "still cached");
         rules.invalidate();
         assert!(rules.is_ignored(Path::new("a.tmp"), false));
     }

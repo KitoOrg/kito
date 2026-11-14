@@ -1,8 +1,8 @@
-//! `kito`: la riga di comando per gli umani.
+//! `kito`: the command line for humans.
 //!
-//! È un client sottile del daemon (`kitod`), che avvia da sé se non è già
-//! attivo. Solo `init` e `import` lavorano direttamente sullo store, perché
-//! servono prima che un daemon abbia senso.
+//! It is a thin client of the daemon (`kitod`), which it starts by itself if
+//! one is not already running. Only `init` and `import` work directly on the
+//! store, because they are needed before a daemon makes sense.
 
 use clap::{Parser, Subcommand};
 use kitod::client::{find_root, Client, ClientError};
@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "kito", version, about = "Version control semantico per sciami di agenti")]
+#[command(name = "kito", version, about = "Semantic version control for agent swarms")]
 struct Cli {
-    /// Radice del repository (default: si cerca `.kito/` dalla cartella corrente in su).
-    #[arg(long, global = true, value_name = "CARTELLA")]
+    /// Repository root (default: search for `.kito/` from the current directory upwards).
+    #[arg(long, global = true, value_name = "DIR")]
     repo: Option<PathBuf>,
-    /// Stampa lo stesso output strutturato del server MCP.
+    /// Print the same structured output as the MCP server.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -29,71 +29,71 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Crea `.kito/` in una cartella e comincia a registrare i salvataggi
+    /// Create `.kito/` in a directory and start recording saves
     Init {
-        /// Cartella da inizializzare (default: quella corrente)
+        /// Directory to initialize (default: the current one)
         path: Option<PathBuf>,
-        /// Parte da zero anche se la cartella è un repository git
+        /// Start from scratch even if the directory is a git repository
         #[arg(long)]
         fresh: bool,
     },
-    /// Importa lo stato attuale e la storia di un repo git
+    /// Import the current state and the history of a git repository
     Import {
-        /// Repository git da importare (default: la cartella corrente)
+        /// Git repository to import (default: the current directory)
         path: Option<PathBuf>,
     },
-    /// Mostra il log delle operazioni, dalla più recente
+    /// Show the operation log, most recent first
     Log {
-        /// Solo le operazioni che toccano questo file
+        /// Only operations that touch this file
         path: Option<PathBuf>,
-        /// Quante operazioni mostrare
+        /// How many operations to show
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: usize,
     },
-    /// Crea un checkpoint a mano
+    /// Create a checkpoint manually
     Checkpoint {
-        /// Etichetta del checkpoint
-        #[arg(short = 'm', long = "message", value_name = "ETICHETTA")]
+        /// Checkpoint label
+        #[arg(short = 'm', long = "message", value_name = "LABEL")]
         label: String,
     },
-    /// Esporta su git i checkpoint non ancora esportati
+    /// Export the checkpoints not yet exported to git
     ExportGit,
-    /// Riporta i file allo stato di un checkpoint o di un'operazione precedente
+    /// Restore files to the state of a checkpoint or of an earlier operation
     Rollback {
-        /// Punto a cui tornare: un checkpoint (ckpt#3) o le prime cifre
-        /// dell'ID di un'operazione, come li mostra `kito log`
+        /// Point to return to: a checkpoint (ckpt#3) or the first digits
+        /// of an operation ID, as shown by `kito log`
         to: Option<String>,
-        /// Solo questi file o cartelle (default: tutto)
+        /// Only these files or directories (default: everything)
         paths: Vec<PathBuf>,
-        /// Torna a prima delle ultime N operazioni
+        /// Go back to before the last N operations
         #[arg(long, value_name = "N", conflicts_with = "to")]
         ops: Option<u64>,
-        /// Mostra cosa cambierebbe, senza toccare nulla
+        /// Show what would change, without touching anything
         #[arg(long)]
         dry_run: bool,
     },
-    /// Mostra o imposta chi firma le modifiche (nome ed email)
+    /// Show or set who signs the changes (name and email)
     Identity {
         #[arg(long)]
         name: Option<String>,
-        /// Usata per attribuire i commit esportati su git
+        /// Used to attribute the commits exported to git
         #[arg(long)]
         email: Option<String>,
-        /// Le modifiche sono di un agente
+        /// The changes are made by an agent
         #[arg(long, conflicts_with = "human")]
         agent: bool,
-        /// Le modifiche sono di una persona
+        /// The changes are made by a person
         #[arg(long)]
         human: bool,
-        /// Vale per tutti i tuoi repository (configurazione personale)
+        /// Apply to all your repositories (personal configuration)
         #[arg(long)]
         global: bool,
     },
-    /// Attende che tutti i salvataggi siano registrati
+    /// Wait until every save has been recorded
     Sync,
-    /// Stato del repository
+    /// Repository status
     Status,
-    /// Gestione del daemon
+    /// Manage the daemon
     Daemon {
         #[command(subcommand)]
         command: DaemonCmd,
@@ -102,11 +102,11 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum DaemonCmd {
-    /// Stato del daemon e del watcher
+    /// Daemon and watcher status
     Status,
-    /// Avvia il daemon se non è attivo
+    /// Start the daemon if it is not running
     Start,
-    /// Ferma il daemon
+    /// Stop the daemon
     Stop,
 }
 
@@ -129,11 +129,15 @@ fn print_json(value: &impl serde::Serialize) {
     println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
 }
 
-/// Data e ora UTC da millisecondi Unix (`2026-11-14 12:31:07`).
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// UTC date and time from Unix milliseconds (`2026-11-14 12:31:07`).
 fn utc(ms: u64) -> String {
     let secs = ms / 1000;
     let (days, rem) = (secs / 86_400, secs % 86_400);
-    // Algoritmo di Howard Hinnant: giorni dall'epoca → data civile.
+    // Howard Hinnant's algorithm: days since the epoch → civil date.
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -146,13 +150,13 @@ fn utc(ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-/// Ferma il daemon se è attivo e attende che abbia chiuso lo store.
+/// Stops the daemon if it is running and waits until it has closed the store.
 fn stop_daemon(root: &Path) -> Result<bool, String> {
     let Ok(mut client) = Client::connect(root) else {
         return Ok(false);
     };
     let _: Value = client.call("shutdown", json!({})).map_err(fail)?;
-    // Il file del socket sparisce solo dopo la chiusura dello store.
+    // The socket file disappears only after the store has been closed.
     let socket = kitod::rpc::socket_path(root);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while socket.exists() && std::time::Instant::now() < deadline {
@@ -165,22 +169,20 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&root).map_err(fail)?;
     if root.join(".git").exists() && !fresh && !root.join(".kito").join("format").is_file() {
-        return Err(
-            "questa cartella è un repository git: usa `kito import` per portare con te la sua storia, \
-                    oppure `kito init --fresh` per partire da zero"
-                .to_owned(),
-        );
+        return Err("this directory is a git repository: use `kito import` to bring its history along, \
+                    or `kito init --fresh` to start from scratch"
+            .to_owned());
     }
     let repo = Repo::init(&root).map_err(fail)?;
     let root = repo.root().to_owned();
     repo.close().map_err(fail)?;
-    // La cattura è continua da subito: il daemon parte con il repository.
+    // Capture is continuous from the very start: the daemon starts with the repository.
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
     if cli.json {
         print_json(&json!({ "root": root }));
     } else {
-        println!("Repository Kito creato in {}", root.join(".kito").display());
-        println!("Il daemon è attivo: da ora ogni salvataggio viene registrato.");
+        println!("Kito repository created in {}", root.join(".kito").display());
+        println!("The daemon is running: every save is recorded from now on.");
         warn_if_events_unreliable(&mut client);
     }
     Ok(())
@@ -189,7 +191,7 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool) -> Outcome {
 fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
-    // L'import lavora direttamente sullo store: il daemon, se c'è, si fa da parte.
+    // The import works directly on the store: the daemon, if there is one, steps aside.
     stop_daemon(&root)?;
     let mut repo =
         if root.join(".kito").join("format").is_file() { Repo::open(&root) } else { Repo::init(&root) }
@@ -208,16 +210,18 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>) -> Outcome {
         }));
     } else {
         println!(
-            "Importati {} commit: {} operazioni, {} checkpoint.",
-            report.commits, report.ops, report.checkpoints
+            "Imported {}: {}, {}.",
+            count(report.commits as u64, "commit", "commits"),
+            count(report.ops as u64, "operation", "operations"),
+            count(report.checkpoints as u64, "checkpoint", "checkpoints")
         );
         for line in &report.skipped {
-            println!("  saltato {line}");
+            println!("  skipped {line}");
         }
         if !captured.is_empty() {
-            println!("Catturate {} modifiche non ancora presenti in git.", captured.len());
+            println!("Captured {} not yet in git.", count(captured.len() as u64, "change", "changes"));
         }
-        println!("Il daemon è attivo: da ora ogni salvataggio viene registrato.");
+        println!("The daemon is running: every save is recorded from now on.");
         warn_if_events_unreliable(&mut client);
     }
     Ok(())
@@ -227,8 +231,8 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     let root = root_of(cli)?;
     let rel = path.as_ref().map(|p| repo_relative(&root, p)).transpose()?;
     let mut client = daemon(cli)?;
-    // Prima di mostrare il log ci si assicura che contenga tutto ciò che è
-    // su disco, anche se il watcher avesse perso qualche evento.
+    // Before showing the log, make sure it contains everything that is on
+    // disk, even if the watcher has missed some events.
     client.call_value("sync", json!({})).map_err(fail)?;
     let items: Vec<LogItem> = client.call("log", json!({ "limit": limit, "path": rel })).map_err(fail)?;
     if cli.json {
@@ -236,7 +240,7 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
         return Ok(());
     }
     if items.is_empty() {
-        println!("Nessuna operazione registrata.");
+        println!("No operations recorded.");
     }
     for item in items {
         match item {
@@ -247,7 +251,7 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
             LogItem::Op {
                 id, at_ms, author, op, path, detail, lines_added, lines_removed, intent, ..
             } => {
-                // Le prime cifre dell'ID bastano per indicare l'op a `kito rollback`.
+                // The first digits of the ID are enough to point `kito rollback` at the op.
                 let short = &id[..id.len().min(8)];
                 let mut line =
                     format!("  {short}  {}  {author:<10} {op:<10} {}", utc(at_ms), path.unwrap_or_default());
@@ -267,11 +271,11 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     Ok(())
 }
 
-/// Un percorso indicato come lo si vede dalla cartella corrente, reso
-/// relativo alla radice del repository.
+/// A path given as seen from the current directory, made relative to the
+/// repository root.
 fn repo_relative(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let abs = std::env::current_dir().map_err(fail)?.join(path);
-    // Il file può non esistere più: si risolve la cartella che lo contiene.
+    // The file may no longer exist: resolve the directory that contains it.
     let abs = match abs.canonicalize() {
         Ok(resolved) => resolved,
         Err(_) => match (abs.parent().and_then(|p| p.canonicalize().ok()), abs.file_name()) {
@@ -294,8 +298,8 @@ fn cmd_rollback(
         (Some(to), _) => to.clone(),
         (None, Some(n)) => format!("~{n}"),
         (None, None) => {
-            return Err("indica a che punto tornare: un checkpoint (ckpt#3), le prime cifre dell'ID di \
-                        un'operazione (vedi `kito log`), oppure --ops N"
+            return Err("specify the point to return to: a checkpoint (ckpt#3), the first digits of an \
+                        operation ID (see `kito log`), or --ops N"
                 .to_owned())
         }
     };
@@ -308,35 +312,38 @@ fn cmd_rollback(
         return Ok(());
     }
     if done.changes.is_empty() {
-        println!("I file sono già nello stato di {}: niente da fare.", done.target);
+        println!("The files are already in the state of {}: nothing to do.", done.target);
         return Ok(());
     }
     let files = match done.changes.len() {
         1 => "1 file".to_owned(),
-        n => format!("{n} file"),
+        n => format!("{n} files"),
     };
     if done.applied {
-        println!("Rollback a {}: {files}", done.target);
+        println!("Rollback to {}: {files}", done.target);
     } else {
-        println!("Il rollback a {} cambierebbe {files} (prova a vuoto, nulla è stato toccato):", done.target);
+        println!("Rollback to {} would change {files} (dry run, nothing was touched):", done.target);
     }
     for change in &done.changes {
         println!("  {:<10} {}", change.action, change.path);
     }
     if let (true, Some(undo)) = (done.applied, &done.undo) {
-        println!("Registrato come {} operazioni: la storia precedente resta intatta.", done.ops);
-        println!("Per annullarlo: kito rollback {undo}");
+        println!(
+            "Recorded as {}: the earlier history is left intact.",
+            count(done.ops as u64, "operation", "operations")
+        );
+        println!("To undo it: kito rollback {undo}");
     }
     Ok(())
 }
 
 fn print_identity(identity: &Identity) {
-    let kind = if identity.kind == "agent" { "agente" } else { "persona" };
+    let kind = if identity.kind == "agent" { "agent" } else { "person" };
     println!("{} ({kind})", identity.author());
-    println!("Fonte: {}", identity.source.describe());
+    println!("Source: {}", identity.source.describe());
     if identity.email.is_none() {
-        println!("Nessuna email: i commit esportati su git useranno un indirizzo segnaposto.");
-        println!("Per impostarla: kito identity --email tu@esempio.it");
+        println!("No email: commits exported to git will use a placeholder address.");
+        println!("To set one: kito identity --email you@example.com");
     }
 }
 
@@ -351,18 +358,17 @@ fn cmd_identity(
     let changing = name.is_some() || email.is_some() || kind.is_some();
     if changing {
         let path = if global {
-            identity::personal_config_path()
-                .ok_or("impossibile trovare la cartella di configurazione personale")?
+            identity::personal_config_path().ok_or("cannot find the personal configuration directory")?
         } else {
             match &root {
                 Some(root) => root.join(".kito").join("config.toml"),
-                None => return Err(format!("{} (oppure usa --global)", ClientError::NoRepository)),
+                None => return Err(format!("{} (or use --global)", ClientError::NoRepository)),
             }
         };
         identity::write(&path, name.as_deref(), email.as_deref(), kind)?;
     }
     let identity: Identity = match &root {
-        // Il daemon rilegge la configurazione: l'identità vale dalla prossima op.
+        // The daemon rereads the configuration: the identity applies from the next op.
         Some(root) => {
             Client::connect_or_start(root).map_err(fail)?.call("reload", json!({})).map_err(fail)?
         }
@@ -386,9 +392,9 @@ fn cmd_checkpoint(cli: &Cli, label: &str) -> Outcome {
         return Ok(());
     }
     match (&done.git_commit, &done.git_error) {
-        (Some(commit), _) => println!("{} creato ed esportato come commit git {}", done.id, &commit[..10]),
-        (None, Some(error)) => println!("{} creato; export su git non riuscito: {error}", done.id),
-        (None, None) => println!("{} creato", done.id),
+        (Some(commit), _) => println!("{} created and exported as git commit {}", done.id, &commit[..10]),
+        (None, Some(error)) => println!("{} created; export to git failed: {error}", done.id),
+        (None, None) => println!("{} created", done.id),
     }
     Ok(())
 }
@@ -398,12 +404,12 @@ fn cmd_export(cli: &Cli) -> Outcome {
     if cli.json {
         print_json(&done);
     } else if done.is_empty() {
-        println!("Niente da esportare.");
+        println!("Nothing to export.");
     } else {
         for item in done {
             let commit = item["commit"].as_str().unwrap_or_default();
             println!(
-                "{} → commit git {}",
+                "{} → git commit {}",
                 item["checkpoint"].as_str().unwrap_or_default(),
                 &commit[..commit.len().min(10)]
             );
@@ -417,7 +423,10 @@ fn cmd_sync(cli: &Cli) -> Outcome {
     if cli.json {
         print_json(&done);
     } else {
-        println!("Tutto registrato ({} nuove operazioni).", done["ops"]);
+        println!(
+            "Everything is recorded ({}).",
+            count(done["ops"].as_u64().unwrap_or(0), "new operation", "new operations")
+        );
     }
     Ok(())
 }
@@ -425,15 +434,15 @@ fn cmd_sync(cli: &Cli) -> Outcome {
 fn print_status(status: &DaemonStatus, with_daemon: bool) {
     let repo = &status.repo;
     println!("Repository ........ {}", repo.root.display());
-    println!("Autore ............ {}", repo.author);
-    println!("File tracciati .... {}", repo.files);
-    println!("Operazioni ........ {} ({} dopo l'ultimo checkpoint)", repo.ops, repo.ops_since_checkpoint);
+    println!("Author ............ {}", repo.author);
+    println!("Tracked files ..... {}", repo.files);
+    println!("Operations ........ {} ({} since the last checkpoint)", repo.ops, repo.ops_since_checkpoint);
     println!(
-        "Checkpoint ........ {}{}",
+        "Checkpoints ....... {}{}",
         repo.checkpoints,
         match (repo.last_checkpoint.as_deref(), repo.unexported) {
-            (Some(last), 0) => format!(" (ultimo {last}, tutti esportati su git)"),
-            (Some(last), n) => format!(" (ultimo {last}, {n} da esportare su git)"),
+            (Some(last), 0) => format!(" (last {last}, all exported to git)"),
+            (Some(last), n) => format!(" (last {last}, {n} not yet exported to git)"),
             (None, _) => String::new(),
         }
     );
@@ -441,33 +450,35 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
         let w = &status.watcher;
         let ms = |v: Option<f64>| v.map_or("—".to_owned(), |v| format!("{v:.1} ms"));
         println!(
-            "Daemon ............ pid {}, attivo da {} s, versione {}",
+            "Daemon ............ pid {}, up for {} s, version {}",
             status.pid, status.uptime_secs, status.version
         );
         println!("Socket ............ {}", status.socket.display());
         println!(
-            "Watcher ........... {} eventi, {} gruppi, {} scansioni complete",
-            w.events, w.batches, w.rescans
+            "Watcher ........... {}, {}, {}",
+            count(w.events, "event", "events"),
+            count(w.batches, "batch", "batches"),
+            count(w.rescans, "full scan", "full scans")
         );
         println!(
-            "Cattura ........... p50 {}, p95 {} (dopo il debounce di {} ms)",
+            "Capture ........... p50 {}, p95 {} (after the {} ms debounce)",
             ms(w.capture_p50_ms),
             ms(w.capture_p95_ms),
             status.debounce_ms
         );
         println!(
-            "Salvataggio → op .. p50 {}, p95 {} (debounce compreso)",
+            "Save → op ......... p50 {}, p95 {} (debounce included)",
             ms(w.latency_p50_ms),
             ms(w.latency_p95_ms)
         );
         if let Some(error) = &w.last_error {
-            println!("Ultimo avviso ..... {error}");
+            println!("Last warning ...... {error}");
         }
-        println!("Riconciliazione ... scansione completa ogni {}", seconds(w.rescan_interval_ms));
+        println!("Reconciliation .... full scan every {}", seconds(w.rescan_interval_ms));
         if let Some(why) = unreliable_events(status) {
             println!("                    {why}");
         }
-        println!("Language server ... nessuno (arrivano con la fase 4)");
+        println!("Language servers .. none (coming in phase 4)");
     }
 }
 
@@ -479,36 +490,36 @@ fn seconds(ms: u64) -> String {
     }
 }
 
-/// Se in questo repository gli eventi dei file non bastano, spiega perché e
-/// cosa fa Kito al loro posto.
+/// If file events are not enough in this repository, explains why and what
+/// Kito does instead.
 fn unreliable_events(status: &DaemonStatus) -> Option<String> {
     let w = &status.watcher;
     if !w.events_unreliable {
         return None;
     }
     let cause = if !w.watching {
-        "il watcher è disattivato in .kito/config.toml".to_owned()
+        "the watcher is disabled in .kito/config.toml".to_owned()
     } else if w.missed_by_watcher > 0 {
-        format!("{} modifiche non sono state segnalate dal sistema operativo", w.missed_by_watcher)
+        format!("the operating system did not report {}", count(w.missed_by_watcher, "change", "changes"))
     } else {
         format!(
-            "sul file system {} gli eventi dei file non sono affidabili",
-            w.filesystem.as_deref().unwrap_or("di questa cartella")
+            "file events are unreliable on the {} file system",
+            w.filesystem.as_deref().unwrap_or("underlying")
         )
     };
     Some(format!(
-        "{cause}: le modifiche vengono trovate dalla scansione, entro {} circa",
+        "{cause}: changes are picked up by the scan, within about {}",
         seconds(w.rescan_interval_ms)
     ))
 }
 
-/// Dopo `init` e `import`: avvisa se qui la cattura non sarà immediata.
+/// After `init` and `import`: warns if capture will not be immediate here.
 fn warn_if_events_unreliable(client: &mut Client) {
     let Ok(status) = client.call::<DaemonStatus>("status", json!({})) else { return };
     if let Some(why) = unreliable_events(&status) {
-        println!("Nota: {why}.");
+        println!("Note: {why}.");
         if status.watcher.filesystem.as_deref() == Some("9p") {
-            println!("      Sotto WSL conviene tenere il progetto nel file system di Linux (per esempio in ~/progetti).");
+            println!("      Under WSL it is better to keep the project in the Linux file system (for example in ~/projects).");
         }
     }
 }
@@ -516,7 +527,7 @@ fn warn_if_events_unreliable(client: &mut Client) {
 fn cmd_status(cli: &Cli, with_daemon: bool) -> Outcome {
     let mut client = daemon(cli)?;
     if !with_daemon {
-        // Lo stato del repository deve riflettere ciò che è su disco adesso.
+        // The repository status must reflect what is on disk right now.
         client.call_value("sync", json!({})).map_err(fail)?;
     }
     let status: DaemonStatus = client.call("status", json!({})).map_err(fail)?;
@@ -533,9 +544,9 @@ fn cmd_daemon_stop(cli: &Cli) -> Outcome {
     if cli.json {
         print_json(&json!({ "stopped": stopped }));
     } else if stopped {
-        println!("Daemon fermato.");
+        println!("Daemon stopped.");
     } else {
-        println!("Il daemon non era attivo.");
+        println!("The daemon was not running.");
     }
     Ok(())
 }
@@ -564,7 +575,7 @@ fn main() -> ExitCode {
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),
         Cmd::Daemon { command: DaemonCmd::Start } => daemon(&cli).map(|_| {
             if !cli.json {
-                println!("Daemon attivo.");
+                println!("Daemon running.");
             }
         }),
         Cmd::Daemon { command: DaemonCmd::Stop } => cmd_daemon_stop(&cli),

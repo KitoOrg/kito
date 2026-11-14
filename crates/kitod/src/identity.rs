@@ -1,15 +1,15 @@
-//! Chi firma le modifiche: nome, email e tipo (umano o agente).
+//! Who signs the changes: name, email and kind (human or agent).
 //!
-//! L'identità si cerca, nell'ordine, in: configurazione del repository,
-//! variabili d'ambiente, configurazione personale, identità di git, utente
-//! del sistema. Nome ed email si risolvono ciascuno per conto suo, come in git.
+//! The identity is looked up, in order, in: the repository configuration,
+//! the environment variables, the personal configuration, the git identity,
+//! the system user. Name and email are each resolved on their own, as in git.
 
 use crate::config::{AuthorConfig, AuthorKindConfig, Config, CONFIG_FILE};
 use kito_core::{Author, AuthorKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Da dove viene il nome dell'identità in uso.
+/// Where the name of the identity in use comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -24,12 +24,12 @@ pub enum Source {
 impl Source {
     pub fn describe(self) -> &'static str {
         match self {
-            Source::Repository => "configurazione del repository (.kito/config.toml)",
-            Source::Environment => "variabili d'ambiente (KITO_AUTHOR, KITO_EMAIL)",
-            Source::Personal => "configurazione personale (~/.config/kito/config.toml)",
-            Source::Git => "identità di git (user.name, user.email)",
-            Source::SystemUser => "utente del sistema ($USER)",
-            Source::Unknown => "nessuna: non è stato possibile determinarla",
+            Source::Repository => "repository configuration (.kito/config.toml)",
+            Source::Environment => "environment variables (KITO_AUTHOR, KITO_EMAIL)",
+            Source::Personal => "personal configuration (~/.config/kito/config.toml)",
+            Source::Git => "git identity (user.name, user.email)",
+            Source::SystemUser => "system user ($USER)",
+            Source::Unknown => "none (it could not be determined)",
         }
     }
 }
@@ -38,7 +38,7 @@ impl Source {
 pub struct Identity {
     pub name: String,
     pub email: Option<String>,
-    /// `human` oppure `agent`.
+    /// `human` or `agent`.
     pub kind: String,
     pub source: Source,
 }
@@ -50,8 +50,8 @@ impl Identity {
     }
 }
 
-/// File della configurazione personale: `$KITO_CONFIG_DIR/config.toml`, poi
-/// `$XDG_CONFIG_HOME/kito/config.toml`, poi `~/.config/kito/config.toml`.
+/// Personal configuration file: `$KITO_CONFIG_DIR/config.toml`, then
+/// `$XDG_CONFIG_HOME/kito/config.toml`, then `~/.config/kito/config.toml`.
 pub fn personal_config_path() -> Option<PathBuf> {
     let non_empty = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     if let Some(dir) = non_empty("KITO_CONFIG_DIR") {
@@ -73,7 +73,7 @@ fn clean(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
-/// Identità con cui firmare le modifiche del repository in `root`.
+/// Identity used to sign the changes of the repository in `root`.
 pub fn resolve(repo: &Config, root: &Path) -> Identity {
     let env = |name: &str| clean(std::env::var(name).ok());
     let personal = personal_author();
@@ -88,7 +88,7 @@ pub fn resolve(repo: &Config, root: &Path) -> Identity {
     ]
     .into_iter()
     .find_map(|(name, source)| name.map(|n| (n, source)))
-    .unwrap_or_else(|| ("sconosciuto".to_owned(), Source::Unknown));
+    .unwrap_or_else(|| ("unknown".to_owned(), Source::Unknown));
 
     let email = clean(repo.author.email.clone())
         .or_else(|| env("KITO_EMAIL"))
@@ -102,9 +102,9 @@ pub fn resolve(repo: &Config, root: &Path) -> Identity {
     Identity { name, email, kind: kind.to_owned(), source }
 }
 
-/// Scrive l'identità nella tabella `[author]` di un file di configurazione,
-/// lasciando intatto tutto il resto (commenti compresi). I valori `None`
-/// non vengono toccati.
+/// Writes the identity into the `[author]` table of a configuration file,
+/// leaving everything else intact (comments included). `None` values are
+/// left untouched.
 pub fn write(path: &Path, name: Option<&str>, email: Option<&str>, kind: Option<&str>) -> Result<(), String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -115,9 +115,8 @@ pub fn write(path: &Path, name: Option<&str>, email: Option<&str>, kind: Option<
     if !doc.contains_key("author") {
         doc["author"] = toml_edit::table();
     }
-    let author = doc["author"]
-        .as_table_mut()
-        .ok_or_else(|| format!("{}: `author` non è una tabella", path.display()))?;
+    let author =
+        doc["author"].as_table_mut().ok_or_else(|| format!("{}: `author` is not a table", path.display()))?;
     for (key, value) in [("name", name), ("email", email), ("kind", kind)] {
         if let Some(value) = value {
             author[key] = toml_edit::value(value);
@@ -144,7 +143,7 @@ mod tests {
         write(&path, None, None, Some("agent")).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# Configurazione di Kito per questo repository."));
+        assert!(text.contains("# Kito configuration for this repository."));
         assert!(text.contains("debounce_ms = 50"));
         let config: Config = toml::from_str(&text).unwrap();
         assert_eq!(config.author.name.as_deref(), Some("Ada Lovelace"));
@@ -152,8 +151,8 @@ mod tests {
         assert_eq!(config.author.kind, Some(AuthorKindConfig::Agent));
         assert_eq!(config.capture, crate::config::CaptureConfig::default());
 
-        // Anche in un file che non esiste ancora.
-        let fresh = dir.path().join("nuova/cartella/config.toml");
+        // In a file that does not exist yet, too.
+        let fresh = dir.path().join("new/directory/config.toml");
         write(&fresh, Some("Bo"), None, None).unwrap();
         let config: Config = toml::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
         assert_eq!(config.author.name.as_deref(), Some("Bo"));
