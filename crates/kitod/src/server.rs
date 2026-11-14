@@ -1,11 +1,14 @@
 //! The daemon: watcher with debounce, periodic reconciliation, JSON-RPC socket.
 
 use crate::error::{Error, Result};
+use crate::integrate::{Decision, Preparation};
 use crate::repo::Repo;
 use crate::rpc::{self, DaemonStatus, Request, Response, WatcherStatus};
+use kito_core::{ConflictId, LaneId};
+use kito_integrate::{IntegrationResult, JobId, JobState, Queue};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -76,6 +79,8 @@ struct Daemon {
     started: Instant,
     debounce: Duration,
     shutdown: Notify,
+    /// The integrations asked for, served one at a time.
+    queue: Queue,
 }
 
 impl Daemon {
@@ -130,7 +135,7 @@ impl Daemon {
     fn reconcile(&self) -> Result<usize> {
         let quiet = self.since_last_event().is_none_or(|t| t >= QUIET);
         let start = Instant::now();
-        let ops = self.with_repo(|repo| repo.scan())?;
+        let ops = self.with_repo(|repo| repo.scan_all())?;
         self.last_scan_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         self.stats.lock().unwrap_or_else(|e| e.into_inner()).rescans += 1;
         if !ops.is_empty() && quiet && self.watching {
@@ -164,23 +169,50 @@ impl Daemon {
             let to_json = |v: std::result::Result<Value, serde_json::Error>| {
                 v.map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))
             };
+            let text = |key: &str| {
+                params
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
+            };
+            let optional = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+            // The lane a request is about: the main one unless it says otherwise.
+            let lane_or_main = || -> std::result::Result<LaneId, (i64, String)> {
+                match params.get("lane").and_then(Value::as_str) {
+                    Some(spec) => self.with_repo(|repo| repo.lane_of(spec)).map_err(internal),
+                    None => Ok(LaneId::MAIN),
+                }
+            };
+            let lane = || -> std::result::Result<LaneId, (i64, String)> {
+                let spec = text("lane")?;
+                self.with_repo(|repo| repo.lane_of(spec)).map_err(internal)
+            };
             match request.method.as_str() {
                 "status" => to_json(serde_json::to_value(self.status().map_err(internal)?)),
                 "sync" => {
-                    let ops = self.reconcile().map_err(internal)?;
+                    let ops = match params.get("lane").and_then(Value::as_str) {
+                        // The barrier for one lane: what its agent saved is in the log.
+                        Some(spec) => self
+                            .with_repo(|repo| {
+                                let lane = repo.lane_of(spec)?;
+                                Ok(repo.scan_lane(lane)?.len())
+                            })
+                            .map_err(internal)?,
+                        None => self.reconcile().map_err(internal)?,
+                    };
                     Ok(json!({ "ops": ops }))
                 }
                 "log" => {
                     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
                     let path = params.get("path").and_then(Value::as_str).map(PathBuf::from);
-                    let items = self.with_repo(|repo| repo.log(limit, path.as_deref())).map_err(internal)?;
+                    let lane = lane_or_main()?;
+                    let items = self
+                        .with_repo(|repo| repo.log_lane(lane, limit, path.as_deref()))
+                        .map_err(internal)?;
                     to_json(serde_json::to_value(items))
                 }
                 "checkpoint" => {
-                    let label = params
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .ok_or((rpc::INVALID_PARAMS, "missing parameter `label`".to_owned()))?;
+                    let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
                     to_json(serde_json::to_value(done))
                 }
@@ -191,10 +223,7 @@ impl Daemon {
                     Ok(Value::Array(list))
                 }
                 "rollback" => {
-                    let to = params
-                        .get("to")
-                        .and_then(Value::as_str)
-                        .ok_or((rpc::INVALID_PARAMS, "missing parameter `to`".to_owned()))?;
+                    let to = text("to")?;
                     let paths: Vec<PathBuf> = params
                         .get("paths")
                         .and_then(Value::as_array)
@@ -210,15 +239,128 @@ impl Daemon {
                     to_json(serde_json::to_value(identity))
                 }
                 "why" => {
-                    let text = |key: &str| {
-                        params
-                            .get(key)
-                            .and_then(Value::as_str)
-                            .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
-                    };
                     let (file, symbol) = (PathBuf::from(text("file")?), text("symbol")?);
-                    let found = self.with_repo(|repo| repo.why(&file, symbol)).map_err(internal)?;
+                    let lane = lane_or_main()?;
+                    let found =
+                        self.with_repo(|repo| repo.why_lane(lane, &file, symbol)).map_err(internal)?;
                     to_json(serde_json::to_value(found))
+                }
+                "lanes" => {
+                    let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| Ok(repo.lanes(all))).map_err(internal)?,
+                    ))
+                }
+                "open_lane" => {
+                    let agent = text("agent")?;
+                    let (task, base) = (optional("task"), optional("base"));
+                    let opened = self
+                        .with_repo(|repo| repo.open_lane(agent, task, base.as_deref()))
+                        .map_err(internal)?;
+                    to_json(serde_json::to_value(opened))
+                }
+                "close_lane" => {
+                    let lane = lane()?;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.close_lane(lane)).map_err(internal)?,
+                    ))
+                }
+                "lane_status" => {
+                    let lane = lane()?;
+                    let (info, conflicts) = self
+                        .with_repo(|repo| {
+                            let info = repo.lane_info(lane)?;
+                            let mine: Vec<_> =
+                                repo.conflicts(false).into_iter().filter(|c| c.lane == info.id).collect();
+                            Ok((info, mine))
+                        })
+                        .map_err(internal)?;
+                    let mut status =
+                        serde_json::to_value(info).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+                    status["conflicts"] = to_json(serde_json::to_value(conflicts))?;
+                    Ok(status)
+                }
+                "set_intent" => {
+                    let lane = lane_or_main()?;
+                    let summary = text("summary")?;
+                    let (task, prompt) = (optional("task"), optional("prompt"));
+                    let intent = self
+                        .with_repo(|repo| repo.set_intent(lane, summary, task, prompt.as_deref()))
+                        .map_err(internal)?;
+                    Ok(json!({ "intent": intent, "lane": lane.to_string() }))
+                }
+                "rename_symbol" => {
+                    let lane = lane_or_main()?;
+                    let (symbol, new_name) = (text("symbol")?, text("new_name")?);
+                    let done = self
+                        .with_repo(|repo| repo.rename_symbol(lane, symbol, new_name))
+                        .map_err(internal)?;
+                    to_json(serde_json::to_value(done))
+                }
+                "request_integration" => {
+                    let lane = lane()?;
+                    if lane.is_main() {
+                        return Err((
+                            rpc::INVALID_PARAMS,
+                            "the main lane is what lanes are integrated into".into(),
+                        ));
+                    }
+                    let job = self.queue.submit(lane);
+                    Ok(json!({ "job": job.to_string(), "lane": lane.to_string() }))
+                }
+                "integration_result" => {
+                    let job: JobId = text("job")?.parse().map_err(|e: String| (rpc::INVALID_PARAMS, e))?;
+                    // Optionally waits for the result, up to a limit.
+                    let wait =
+                        Duration::from_millis(params.get("wait_ms").and_then(Value::as_u64).unwrap_or(0));
+                    let asked = Instant::now();
+                    loop {
+                        let state = self
+                            .queue
+                            .state(job)
+                            .ok_or((rpc::INVALID_PARAMS, format!("{job}: no such integration request")))?;
+                        if matches!(state, JobState::Done { .. }) || asked.elapsed() >= wait {
+                            return to_json(serde_json::to_value(state));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                "conflicts" => {
+                    let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
+                    let list = self.with_repo(|repo| Ok(repo.conflicts(all))).map_err(internal)?;
+                    to_json(serde_json::to_value(list))
+                }
+                "resolve_conflict" => {
+                    let id: ConflictId = text("conflict")?.parse().map_err(|_| {
+                        (rpc::INVALID_PARAMS, "`conflict` must be like conflict#7".to_owned())
+                    })?;
+                    let decision = match (params.get("choice").and_then(Value::as_str), optional("text")) {
+                        (_, Some(text)) => Decision::Text(text),
+                        (Some("main"), None) => Decision::Main,
+                        (Some("lane"), None) => Decision::Lane,
+                        _ => {
+                            return Err((
+                                rpc::INVALID_PARAMS,
+                                "give `choice` (\"main\" or \"lane\") or the new `text`".to_owned(),
+                            ))
+                        }
+                    };
+                    let (conflict, remaining) = self
+                        .with_repo(|repo| {
+                            let conflict = repo.resolve_conflict(id, decision)?;
+                            let remaining = repo
+                                .conflicts(false)
+                                .iter()
+                                .filter(|c| c.lane == conflict.lane && c.resolution.is_none())
+                                .count();
+                            Ok((conflict, remaining))
+                        })
+                        .map_err(internal)?;
+                    Ok(json!({
+                        "conflict": to_json(serde_json::to_value(conflict))?,
+                        "remaining": remaining,
+                        "next": if remaining == 0 { "ask for the integration again: the decisions are applied by it" } else { "decide the remaining conflicts" },
+                    }))
                 }
                 "shutdown" => {
                     self.shutdown.notify_one();
@@ -263,8 +405,26 @@ fn is_internal(rel: &Path) -> bool {
 }
 
 enum WatchMsg {
-    Paths(Vec<PathBuf>),
+    /// Paths that changed, each relative to the working directory of its lane.
+    Paths(Vec<(LaneId, PathBuf)>),
     Rescan(String),
+}
+
+/// Which working directory a path of the repository belongs to: the main
+/// one, or a lane's (`.kito/lanes/<id>/work/…`). `None` for what is never
+/// captured.
+fn route(rel: &Path) -> Option<(LaneId, PathBuf)> {
+    if !is_internal(rel) {
+        return Some((LaneId::MAIN, rel.to_owned()));
+    }
+    let mut parts = rel.components();
+    let (kito, lanes, id, work) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if kito.as_os_str() != ".kito" || lanes.as_os_str() != "lanes" || work.as_os_str() != "work" {
+        return None;
+    }
+    let lane = LaneId(u64::from_str_radix(id.as_os_str().to_str()?, 16).ok()?);
+    let inside = parts.as_path();
+    (!inside.as_os_str().is_empty() && !is_internal(inside)).then(|| (lane, inside.to_owned()))
 }
 
 /// Collects the watcher events and hands them to the capture after a period
@@ -273,10 +433,14 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
     let max_wait = daemon.debounce * MAX_WAIT_FACTOR;
     while let Some(first) = events.recv().await {
         let batch_start = Instant::now();
-        let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut paths: BTreeMap<LaneId, BTreeSet<PathBuf>> = BTreeMap::new();
         let mut rescan: Option<String> = None;
         let mut absorb = |msg: WatchMsg| match msg {
-            WatchMsg::Paths(list) => paths.extend(list),
+            WatchMsg::Paths(list) => {
+                for (lane, path) in list {
+                    paths.entry(lane).or_default().insert(path);
+                }
+            }
             WatchMsg::Rescan(why) => rescan = Some(why),
         };
         absorb(first);
@@ -295,7 +459,21 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
         let capture_start = Instant::now();
         let needs_rescan = rescan.is_some();
         let outcome = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| if needs_rescan { repo.scan() } else { repo.capture(paths) })
+            worker.with_repo(|repo| {
+                if needs_rescan {
+                    return repo.scan_all();
+                }
+                let mut ops = Vec::new();
+                for (lane, paths) in paths {
+                    match repo.capture_lane(lane, paths) {
+                        Ok(captured) => ops.extend(captured),
+                        // Events of a lane that was closed in the meantime.
+                        Err(Error::NoSuchLane(_)) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(ops)
+            })
         })
         .await;
         let (captured, error) = match outcome {
@@ -330,6 +508,57 @@ async fn rescan_loop(daemon: Arc<Daemon>) {
             Ok(Err(e)) => eprintln!("kitod: periodic scan: {e}"),
             Err(_) => return,
         }
+    }
+}
+
+/// One integration, in its three steps. The repository is held only while
+/// merging and while recording: the verification runs with it free.
+async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
+    let failed = |message: String| IntegrationResult::failed(lane.to_string(), message);
+    for _ in 0..3 {
+        let worker = daemon.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            worker.with_repo(|repo| match repo.prepare_integration(lane)? {
+                Preparation::Done(result) => Ok(Err(result)),
+                Preparation::Ready(prepared) => {
+                    let copy = repo.verification_copy(&prepared)?;
+                    Ok(Ok((prepared, copy)))
+                }
+            })
+        })
+        .await;
+        let (prepared, copy) = match prepared {
+            Ok(Ok(Ok(ready))) => ready,
+            Ok(Ok(Err(result))) => return *result,
+            Ok(Err(e)) => return failed(e.to_string()),
+            Err(e) => return failed(e.to_string()),
+        };
+        let report = match copy {
+            Some((dir, commands, timeout)) => Some(kito_integrate::verify(&dir, &commands, timeout).await),
+            None => None,
+        };
+        let worker = daemon.clone();
+        let finished = tokio::task::spawn_blocking(move || {
+            worker.with_repo(|repo| repo.finish_integration(*prepared, report))
+        })
+        .await;
+        match finished {
+            Ok(Ok(Some(result))) => return result,
+            // A lane moved while the verification ran: merge again.
+            Ok(Ok(None)) => continue,
+            Ok(Err(e)) => return failed(e.to_string()),
+            Err(e) => return failed(e.to_string()),
+        }
+    }
+    failed("the lanes keep changing: ask again when they are quiet".to_owned())
+}
+
+/// Serves the integration requests, one at a time, in order.
+async fn integration_loop(daemon: Arc<Daemon>) {
+    loop {
+        let (job, lane) = daemon.queue.next().await;
+        let result = integrate(&daemon, lane).await;
+        daemon.queue.finish(job, result);
     }
 }
 
@@ -384,12 +613,12 @@ pub async fn serve(root: &Path) -> Result<()> {
                 Ok(event) if event.need_rescan() => WatchMsg::Rescan("the watcher missed some events".into()),
                 Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
                 Ok(event) => {
-                    let paths: Vec<PathBuf> = event
+                    let paths: Vec<(LaneId, PathBuf)> = event
                         .paths
                         .iter()
                         .filter_map(|p| p.strip_prefix(&watch_root).ok())
-                        .filter(|rel| !rel.as_os_str().is_empty() && !is_internal(rel))
-                        .map(Path::to_owned)
+                        .filter(|rel| !rel.as_os_str().is_empty())
+                        .filter_map(route)
                         .collect();
                     if paths.is_empty() {
                         return;
@@ -412,7 +641,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         None
     };
 
-    repo.scan()?;
+    repo.scan_all()?;
     // Files known only as text (imported, or captured by an older version) get their symbols now.
     repo.analyze()?;
 
@@ -436,6 +665,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         started,
         debounce,
         shutdown: Notify::new(),
+        queue: Queue::new(),
     });
     eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());
     if !watching {
@@ -449,6 +679,7 @@ pub async fn serve(root: &Path) -> Result<()> {
 
     let debouncer = tokio::spawn(debounce_loop(daemon.clone(), rx));
     let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
+    let integrator = tokio::spawn(integration_loop(daemon.clone()));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| Error::Other(format!("signal handling: {e}")))?;
 
@@ -473,11 +704,12 @@ pub async fn serve(root: &Path) -> Result<()> {
     drop(watcher);
     debouncer.abort();
     rescanner.abort();
+    integrator.abort();
     // Last scan and clean shutdown: state saved, indexes durable.
     let repo = daemon.repo.lock().unwrap_or_else(|e| e.into_inner()).take();
     let closed = match repo {
         Some(mut repo) => tokio::task::spawn_blocking(move || {
-            repo.scan()?;
+            repo.scan_all()?;
             repo.close()
         })
         .await

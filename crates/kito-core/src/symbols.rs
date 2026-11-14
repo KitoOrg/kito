@@ -59,6 +59,11 @@ impl SymbolTable {
         self.symbols.get(&id)
     }
 
+    /// Every symbol, in order of ID.
+    pub fn iter(&self) -> impl Iterator<Item = (SymbolId, &SymbolEntry)> {
+        self.symbols.iter().map(|(id, entry)| (*id, entry))
+    }
+
     /// The symbols of a file, in order of ID.
     pub fn in_file<'a>(&'a self, file: &Path) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry)> {
         self.by_file

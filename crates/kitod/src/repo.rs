@@ -246,9 +246,10 @@ fn file_changes(n: usize) -> String {
     }
 }
 
-/// The ops of the main lane, newest first, read a page at a time.
+/// The ops of a lane, newest first, read a page at a time.
 struct Backwards<'a> {
     store: &'a Store,
+    lane: LaneId,
     end: u64,
     page: Vec<Op>,
 }
@@ -257,7 +258,7 @@ impl Backwards<'_> {
     fn next(&mut self) -> Result<Option<Op>> {
         if self.page.is_empty() && self.end > 0 {
             let start = self.end.saturating_sub(500);
-            self.page = self.store.lane_ops(LaneId::MAIN, start, (self.end - start) as usize)?;
+            self.page = self.store.lane_ops(self.lane, start, (self.end - start) as usize)?;
             self.end = start;
         }
         Ok(self.page.pop())
@@ -717,7 +718,21 @@ impl Repo {
     /// The history of the symbol called `name` in `file`, across renames
     /// and moves.
     pub fn why(&self, file: &Path, name: &str) -> Result<Vec<Why>> {
-        semantic::why(&self.store, &self.main.symbols, LaneId::MAIN, file, name)
+        self.why_lane(LaneId::MAIN, file, name)
+    }
+
+    /// The same, as a lane knows the symbol.
+    pub fn why_lane(&self, lane: LaneId, file: &Path, name: &str) -> Result<Vec<Why>> {
+        semantic::why(&self.store, &self.work(lane)?.symbols, lane, file, name)
+    }
+
+    /// Scans the main working directory and every open lane's.
+    pub fn scan_all(&mut self) -> Result<Vec<Op>> {
+        let mut ops = self.scan()?;
+        for lane in self.lanes.keys().copied().collect::<Vec<_>>() {
+            ops.extend(self.scan_lane(lane)?);
+        }
+        Ok(ops)
     }
 
     /// Creates a checkpoint on the current state of the working directory
@@ -820,11 +835,25 @@ impl Repo {
     /// recorded with it (what the change meant) come right before it and do
     /// not count towards `limit`. With `path`, only what concerns that file.
     pub fn log(&self, limit: usize, path: Option<&Path>) -> Result<Vec<LogItem>> {
+        self.log_lane(LaneId::MAIN, limit, path)
+    }
+
+    /// The state of a lane: the main one, or an open one.
+    pub(crate) fn work(&self, lane: LaneId) -> Result<&Work> {
+        match lane.is_main() {
+            true => Ok(&self.main),
+            false => Ok(&self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?.work),
+        }
+    }
+
+    /// Like [`Repo::log`], for the ops a lane recorded itself.
+    pub fn log_lane(&self, lane: LaneId, limit: usize, path: Option<&Path>) -> Result<Vec<LogItem>> {
+        let work = self.work(lane)?;
         let mut by_head: HashMap<OpId, Vec<&Checkpoint>> = HashMap::new();
         for ck in self.store.checkpoints() {
             by_head.entry(ck.head).or_default().push(ck);
         }
-        let mut reader = Backwards { store: &self.store, end: self.main.ops, page: Vec::new() };
+        let mut reader = Backwards { store: &self.store, lane, end: work.ops, page: Vec::new() };
         let mut items = Vec::new();
         let mut shown = 0usize;
         // Symbolic ops waiting for the file change they belong to: in the
@@ -846,9 +875,9 @@ impl Repo {
                     std::mem::take(&mut pending).into_iter().partition(|s| s.intent == op.intent);
                 pending = mine;
                 for symbolic in alone {
-                    let file = self.file_then(&symbolic, None);
+                    let file = self.file_then(&work.symbols, &symbolic, None);
                     if self.concerns(&symbolic, file.as_deref(), path) {
-                        items.push(self.describe(&symbolic, file, None));
+                        items.push(self.describe(&work.symbols, &symbolic, file, None));
                     }
                 }
             }
@@ -879,23 +908,24 @@ impl Repo {
             let alone = run == 1 && next.as_ref().is_none_or(|older| older.kind.symbol().is_some());
             let carrier = op.kind.paths().last().map(|p| p.to_path_buf());
             for symbolic in std::mem::take(&mut pending) {
-                let file = self.file_then(&symbolic, if alone { carrier.as_deref() } else { None });
+                let file =
+                    self.file_then(&work.symbols, &symbolic, if alone { carrier.as_deref() } else { None });
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&symbolic, file, Some(op.id)));
+                    items.push(self.describe(&work.symbols, &symbolic, file, Some(op.id)));
                 } else {
                     pending.push(symbolic);
                 }
             }
-            items.push(self.describe(&op, None, None));
+            items.push(self.describe(&work.symbols, &op, None, None));
             shown += 1;
         }
         // Symbolic ops with no file change before them (the first analysis
         // of files that were already there).
         if shown < limit && run == 0 {
             for symbolic in pending {
-                let file = self.file_then(&symbolic, None);
+                let file = self.file_then(&work.symbols, &symbolic, None);
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&symbolic, file, None));
+                    items.push(self.describe(&work.symbols, &symbolic, file, None));
                 }
             }
         }
@@ -904,7 +934,7 @@ impl Repo {
 
     /// The file a symbol was in right after a symbolic op. `carrier`: the
     /// only file its batch changed, when there is only one.
-    fn file_then(&self, op: &Op, carrier: Option<&Path>) -> Option<PathBuf> {
+    fn file_then(&self, symbols: &SymbolTable, op: &Op, carrier: Option<&Path>) -> Option<PathBuf> {
         match &op.kind {
             OpKind::AddSymbol { sym, .. } => return Some(sym.file.clone()),
             OpKind::Move { to, .. } => return Some(to.file.clone()),
@@ -926,7 +956,7 @@ impl Repo {
                 _ => {}
             }
         }
-        file.or_else(|| self.main.symbols.get(id).map(|entry| entry.file.clone()))
+        file.or_else(|| symbols.get(id).map(|entry| entry.file.clone()))
     }
 
     /// `true` if a symbolic op belongs in the log of `path`.
@@ -937,7 +967,13 @@ impl Repo {
 
     /// One line of the log. For a symbolic op, `file_then` is the file the
     /// symbol was in at the time and `change` the file change it belongs to.
-    fn describe(&self, op: &Op, file_then: Option<PathBuf>, change: Option<OpId>) -> LogItem {
+    fn describe(
+        &self,
+        symbols: &SymbolTable,
+        op: &Op,
+        file_then: Option<PathBuf>,
+        change: Option<OpId>,
+    ) -> LogItem {
         let display = |p: &Path| p.to_string_lossy().into_owned();
         let (path, detail, stat) = match &op.kind {
             OpKind::FileAdd { path, mode, .. } => {
@@ -964,12 +1000,9 @@ impl Repo {
                 // Symbolic ops: the file the symbol was in, and what
                 // happened to it.
                 let id = other.symbol();
-                let file = file_then.or_else(|| self.file_then(op, None));
+                let file = file_then.or_else(|| self.file_then(symbols, op, None));
                 let name = id.and_then(|id| {
-                    self.main
-                        .symbols
-                        .qualified_name(id)
-                        .or_else(|| semantic::last_known_name(&self.store, id))
+                    symbols.qualified_name(id).or_else(|| semantic::last_known_name(&self.store, id))
                 });
                 let what = semantic::describe_symbol_op(&self.store, other);
                 let detail = match (name, what) {
