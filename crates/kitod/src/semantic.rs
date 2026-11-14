@@ -336,6 +336,39 @@ fn timeline(store: &Store, id: SymbolId, depth: usize) -> Result<Vec<(Op, Option
     Ok(events)
 }
 
+/// Which ops are part of the history of a lane: all of its own, and of
+/// every other lane those recorded before the point where the two last met.
+struct Reach {
+    lane: LaneId,
+    /// Per other lane: the time of the last of its ops this lane has.
+    until: HashMap<LaneId, Hlc>,
+}
+
+impl Reach {
+    fn of(store: &Store, lane: LaneId) -> Result<Reach> {
+        let at = |id: &kito_core::OpId| -> Result<Option<Hlc>> { Ok(store.get_op(id)?.map(|op| op.at)) };
+        let mut until = HashMap::new();
+        for record in store.lane_records() {
+            if record.id == lane {
+                // What the main lane had when this lane last started from it.
+                if let Some(time) = at(&record.base_head)? {
+                    until.insert(LaneId::MAIN, time);
+                }
+            } else if record.since > 0 {
+                // The ops of another lane that were integrated.
+                if let Some(last) = store.lane_ops(record.id, record.since - 1, 1)?.first() {
+                    until.insert(record.id, last.at);
+                }
+            }
+        }
+        Ok(Reach { lane, until })
+    }
+
+    fn includes(&self, op: &Op) -> bool {
+        op.lane == self.lane || self.until.get(&op.lane).is_some_and(|until| op.at <= *until)
+    }
+}
+
 /// The renames of files recorded in a lane, oldest first.
 fn file_renames(store: &Store, lane: LaneId) -> Result<Vec<Op>> {
     const PAGE: usize = 4096;
@@ -373,10 +406,14 @@ pub(crate) fn why(
             format!("{}: no symbol named `{name}`; the file contains: {}", file.display(), known.join(", "))
         }));
     }
+    let reach = Reach::of(store, lane)?;
     let mut histories = Vec::new();
     for id in ids {
         let Some(entry) = table.get(id) else { continue };
-        let events = timeline(store, id, 0)?;
+        // The story as this lane knows it: its own ops, and of the other
+        // lanes only what has reached it.
+        let events: Vec<(Op, Option<SymbolId>)> =
+            timeline(store, id, 0)?.into_iter().filter(|(op, _)| reach.includes(op)).collect();
 
         // Where the symbol's own ops leave it. If that is not where it is
         // now, its file was renamed along the way: the log of the lane says
@@ -397,6 +434,7 @@ pub(crate) fn why(
             intent: op.intent.and_then(|i| store.intent(&i)).map(|i| i.summary.clone()),
         };
         let mut steps = Vec::new();
+        let mut born = false;
         let mut at_file: Option<PathBuf> = None;
         let mut follow_renames = |before: Option<Hlc>,
                                   at_file: &mut Option<PathBuf>,
@@ -422,6 +460,18 @@ pub(crate) fn why(
                 let container =
                     table.qualified_name(*container).or_else(|| last_known_name(store, *container));
                 what = format!("{what}, along with `{}`", container.unwrap_or_default());
+            }
+            // A symbol born on another lane arrives here with a second
+            // `AddSymbol`: not a creation, an arrival.
+            let arrival = matches!(op.kind, OpKind::AddSymbol { .. }) && via.is_none() && born;
+            born |= matches!(op.kind, OpKind::AddSymbol { .. }) && via.is_none();
+            if arrival && op.lane == lane {
+                what = match lane.is_main() {
+                    true => "integrated into the main lane".to_owned(),
+                    false => format!("arrived on {lane}"),
+                };
+            } else if op.lane != lane {
+                what = format!("{what}, on {}", op.lane);
             }
             steps.push(step(op, what));
         }

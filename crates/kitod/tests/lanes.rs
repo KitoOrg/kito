@@ -90,7 +90,10 @@ fn a_lane_has_a_working_copy_of_its_own_and_is_captured_apart() {
     assert_eq!(fs::read_to_string(workdir.join("README.md")).unwrap(), "# Demo\n");
 
     let info = repo.lane_info(id).unwrap();
-    assert_eq!((info.ops, info.files.clone()), (4, vec!["src/auth.ts".to_owned(), "src/billing.ts".to_owned()]));
+    assert_eq!(
+        (info.ops, info.files.clone()),
+        (4, vec!["src/auth.ts".to_owned(), "src/billing.ts".to_owned()])
+    );
     assert_eq!(repo.lanes(false), [info]);
     assert_eq!(repo.lane_of("lane/1").unwrap(), id);
     assert_eq!(repo.lane_of("main").unwrap(), LaneId::MAIN);

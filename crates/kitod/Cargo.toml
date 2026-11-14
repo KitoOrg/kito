@@ -21,6 +21,7 @@ kito-store.workspace = true
 kito-diff.workspace = true
 kito-merge.workspace = true
 kito-lane.workspace = true
+kito-integrate.workspace = true
 kito-parse.workspace = true
 kito-git.workspace = true
 ignore.workspace = true

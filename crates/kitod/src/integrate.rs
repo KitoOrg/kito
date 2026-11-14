@@ -1,0 +1,585 @@
+//! Integration: a lane's work becomes part of the main lane.
+//!
+//! It happens in three steps, so that the verification (which can take
+//! minutes) never holds the repository:
+//!
+//! 1. [`Repo::prepare_integration`] merges what the lane did since its base
+//!    into the current state of the main lane. Conflicts stop it here.
+//! 2. The merged result is materialized in a directory of its own
+//!    ([`Repo::verification_copy`]) and the configured commands run on it.
+//! 3. [`Repo::finish_integration`] writes the result into the main working
+//!    directory, records it as ops of the main lane signed by the lane's
+//!    agent, creates a checkpoint, and brings the lane up to it.
+//!
+//! The ops recorded on the main lane are new ops: the first one has two
+//! parents, the head of the main lane and the head of the lane, and the
+//! symbols keep the IDs they had in the lane.
+
+use crate::error::{Error, Result};
+use crate::repo::Repo;
+use kito_core::{
+    BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId, Resolution,
+    SymbolId, SymbolTable, Tree, TreeEntry, Verification,
+};
+use kito_integrate::{AutoResolution, ConflictInfo, IntegrationResult, Outcome, VerificationReport};
+use kito_merge::{Choice, Found, Subject};
+use kito_store::STORE_DIR;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// A merge that composed, waiting to be verified and recorded.
+pub struct Prepared {
+    pub lane: LaneId,
+    /// What the merge was computed on: if either moved, it is computed again.
+    main_head: Option<OpId>,
+    lane_ops: u64,
+    outcome: kito_merge::Outcome,
+    /// Conflicts this merge settled with the decisions taken on them.
+    settled: Vec<ConflictId>,
+}
+
+/// What [`Repo::prepare_integration`] found.
+pub enum Preparation {
+    /// Nothing more to do: this is the result.
+    Done(Box<IntegrationResult>),
+    /// The merge composed: verify it, then finish.
+    Ready(Box<Prepared>),
+}
+
+/// A decision on a conflict, as a client gives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Main,
+    Lane,
+    Text(String),
+}
+
+fn kind_word(kind: ConflictKind) -> &'static str {
+    match kind {
+        ConflictKind::BodyBody => "body_body",
+        ConflictKind::RemoveModify => "remove_modify",
+        ConflictKind::RenameRename => "rename_rename",
+        ConflictKind::SemanticRef => "semantic_ref",
+        ConflictKind::Text => "text",
+    }
+}
+
+fn subject_of(conflict: &Conflict) -> Subject {
+    match (conflict.symbol, &conflict.file) {
+        (Some(id), _) => Subject::Symbol(id),
+        (None, Some(file)) => Subject::File(file.clone()),
+        (None, None) => Subject::File(PathBuf::new()),
+    }
+}
+
+/// Removes a file of a working directory, and the directories it leaves empty.
+fn remove_in(root: &Path, path: &Path) -> Result<()> {
+    let abs = root.join(path);
+    match fs::remove_file(&abs) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(&abs)(e)),
+    }
+    let mut dir = path.parent();
+    while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        if fs::remove_dir(root.join(d)).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+    Ok(())
+}
+
+impl Repo {
+    fn conflict_info(&self, conflict: &Conflict) -> ConflictInfo {
+        let text = |blob: &Option<BlobId>| {
+            blob.and_then(|id| self.store.get_blob(&id).ok().flatten())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        };
+        ConflictInfo {
+            id: conflict.id.to_string(),
+            kind: kind_word(conflict.kind).to_owned(),
+            lane: conflict.assigned_to.map(|lane| lane.to_string()).unwrap_or_default(),
+            file: conflict.file.as_ref().map(|f| f.display().to_string()),
+            symbol: conflict.name.clone(),
+            symbol_id: conflict.symbol.map(|id| id.to_string()),
+            base: text(&conflict.base_text),
+            main: text(&conflict.main_text),
+            lane_text: text(&conflict.lane_text),
+            resolution: conflict.resolution.map(|r| {
+                match r {
+                    Resolution::Main => "main",
+                    Resolution::Lane => "lane",
+                    Resolution::Text(_) => "text",
+                }
+                .to_owned()
+            }),
+            resolved: conflict.resolved_by.is_some(),
+        }
+    }
+
+    /// The conflicts waiting for a decision or for the integration that
+    /// applies it; with `all`, the settled ones too.
+    pub fn conflicts(&self, all: bool) -> Vec<ConflictInfo> {
+        self.store
+            .conflicts()
+            .filter(|c| all || c.resolved_by.is_none())
+            .map(|c| self.conflict_info(c))
+            .collect()
+    }
+
+    fn open_conflicts(&self, lane: LaneId) -> Vec<Conflict> {
+        self.store
+            .conflicts()
+            .filter(|c| c.assigned_to == Some(lane) && c.resolved_by.is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// Records the decision on a conflict. It is applied by the next
+    /// integration of the lane, if by then the two sides still are what the
+    /// decision was taken on.
+    pub fn resolve_conflict(&mut self, id: ConflictId, decision: Decision) -> Result<ConflictInfo> {
+        let mut conflict = self.store.conflict(id).cloned().ok_or_else(|| {
+            Error::Other(format!("{id}: this conflict does not exist (see `kito conflicts`)"))
+        })?;
+        if conflict.resolved_by.is_some() {
+            return Err(Error::Other(format!("{id} is already settled")));
+        }
+        let lane = conflict.assigned_to.filter(|lane| self.lanes.contains_key(lane));
+        let lane = lane.ok_or_else(|| Error::Other(format!("{id}: its lane is closed")))?;
+        conflict.resolution = Some(match decision {
+            Decision::Main => Resolution::Main,
+            Decision::Lane => Resolution::Lane,
+            Decision::Text(text) => {
+                if text.trim().is_empty() {
+                    return Err(Error::Other(
+                        "the new text is empty: to drop the lane's version choose `main`".into(),
+                    ));
+                }
+                Resolution::Text(self.store.put_blob(text.as_bytes())?)
+            }
+        });
+        self.store.put_conflict(&conflict)?;
+        // Every conflict of the lane has a decision: it can ask again.
+        if self.open_conflicts(lane).iter().all(|c| c.resolution.is_some()) {
+            self.put_lane_state(lane, LaneState::Ready)?;
+        }
+        Ok(self.conflict_info(&conflict))
+    }
+
+    fn merge_lane(&self, lane: LaneId, decisions: &HashMap<Subject, Choice>) -> Result<kito_merge::Outcome> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let store = &self.store;
+        Ok(kito_merge::merge(&kito_merge::Input {
+            base: kito_merge::Side { tree: &at.base_tree, symbols: &at.base_symbols },
+            main: kito_merge::Side { tree: &self.main.tree, symbols: &self.main.symbols },
+            lane: kito_merge::Side { tree: &at.work.tree, symbols: &at.work.symbols },
+            blob: &|id| store.get_blob(id).ok().flatten(),
+            resolutions: decisions,
+        }))
+    }
+
+    /// Step 1: captures what is still unsaved on both sides and merges the
+    /// lane into the main lane.
+    pub fn prepare_integration(&mut self, lane: LaneId) -> Result<Preparation> {
+        if lane.is_main() {
+            return Err(Error::Other("the main lane is what lanes are integrated into".into()));
+        }
+        self.scan_lane(lane)?;
+        self.scan()?;
+        let open = self.open_conflicts(lane);
+        let blob_of = |text: &Option<Vec<u8>>| text.as_ref().map(|t| BlobId::of(t));
+        let same_texts = |conflict: &Conflict, found: &Found| {
+            conflict.base_text == blob_of(&found.base)
+                && conflict.main_text == blob_of(&found.main)
+                && conflict.lane_text == blob_of(&found.lane)
+        };
+
+        // What conflicts as things are now, and which of those conflicts
+        // already have a decision taken on these very texts.
+        let found = self.merge_lane(lane, &HashMap::new())?;
+        let mut decisions: HashMap<Subject, Choice> = HashMap::new();
+        let mut settled = Vec::new();
+        for conflict in &found.conflicts {
+            let decided = open.iter().find(|c| {
+                subject_of(c) == conflict.subject && c.kind == conflict.kind && same_texts(c, conflict)
+            });
+            if let Some((known, resolution)) = decided.and_then(|c| c.resolution.map(|r| (c, r))) {
+                let choice = match resolution {
+                    Resolution::Main => Choice::Main,
+                    Resolution::Lane => Choice::Lane,
+                    Resolution::Text(blob) => Choice::Text(self.store.get_blob(&blob)?.unwrap_or_default()),
+                };
+                decisions.insert(conflict.subject.clone(), choice);
+                settled.push(known.id);
+            }
+        }
+        let all_decided = !found.conflicts.is_empty() && decisions.len() == found.conflicts.len();
+        let outcome = if all_decided { self.merge_lane(lane, &decisions)? } else { found };
+
+        if !outcome.conflicts.is_empty() {
+            let infos = self.record_conflicts(lane, &outcome.conflicts, &open, &same_texts)?;
+            let mut result = IntegrationResult::new(lane.to_string(), Outcome::Conflicts);
+            result.message = Some(format!(
+                "{} to decide with kito.resolve_conflict (or `kito resolve`), then ask again",
+                match infos.iter().filter(|c| c.resolution.is_none()).count() {
+                    1 => "1 conflict".to_owned(),
+                    n => format!("{n} conflicts"),
+                }
+            ));
+            result.conflicts = infos;
+            return Ok(Preparation::Done(Box::new(result)));
+        }
+        // Conflicts recorded before that the lane's later work made moot.
+        for conflict in open.iter().filter(|c| !settled.contains(&c.id)) {
+            let mut moot = conflict.clone();
+            moot.resolved_by = self.lanes[&lane].work.head;
+            self.store.put_conflict(&moot)?;
+        }
+        if outcome.files.is_empty() {
+            // Nothing the main lane does not have: the lane just catches up.
+            let base = self.lanes[&lane].record.base;
+            let base = self.latest_checkpoint_at_head().unwrap_or(base);
+            self.fast_forward(lane, base)?;
+            let mut result = IntegrationResult::new(lane.to_string(), Outcome::NothingToIntegrate);
+            result.your_next_base = Some(base.to_string());
+            result.message = Some("the main lane already has everything the lane has".to_owned());
+            return Ok(Preparation::Done(Box::new(result)));
+        }
+        let at = &self.lanes[&lane];
+        Ok(Preparation::Ready(Box::new(Prepared {
+            lane,
+            main_head: self.main.head,
+            lane_ops: at.work.ops,
+            outcome,
+            settled,
+        })))
+    }
+
+    fn latest_checkpoint_at_head(&self) -> Option<kito_core::CheckpointId> {
+        self.store.checkpoints().next_back().filter(|c| Some(c.head) == self.main.head).map(|c| c.id)
+    }
+
+    /// Brings the conflict records of a lane in line with what a merge
+    /// found: a conflict that is still there keeps its number (and its
+    /// decision, if the texts are the same), a new one gets a record, one
+    /// that is gone is closed.
+    fn record_conflicts(
+        &mut self,
+        lane: LaneId,
+        found: &[Found],
+        open: &[Conflict],
+        same_texts: &dyn Fn(&Conflict, &Found) -> bool,
+    ) -> Result<Vec<ConflictInfo>> {
+        let (main_head, lane_head) = (self.main.head, self.lanes[&lane].work.head);
+        let sides: Vec<OpId> = main_head.into_iter().chain(lane_head).collect();
+        let mut current = Vec::new();
+        for conflict in found {
+            let known = open.iter().find(|c| subject_of(c) == conflict.subject && c.kind == conflict.kind);
+            let mut put = |text: &Option<Vec<u8>>| -> Result<Option<BlobId>> {
+                match text {
+                    Some(text) => Ok(Some(self.store.put_blob(text)?)),
+                    None => Ok(None),
+                }
+            };
+            let texts = (put(&conflict.base)?, put(&conflict.main)?, put(&conflict.lane)?);
+            let record = Conflict {
+                id: known.map_or_else(|| self.store.next_conflict_id(), |c| c.id),
+                symbol: match &conflict.subject {
+                    Subject::Symbol(id) => Some(*id),
+                    Subject::File(_) => None,
+                },
+                sides: sides.clone(),
+                kind: conflict.kind,
+                assigned_to: Some(lane),
+                resolved_by: None,
+                file: Some(conflict.file.clone()),
+                name: conflict.name.clone(),
+                base_text: texts.0,
+                main_text: texts.1,
+                lane_text: texts.2,
+                // A decision holds for the texts it was taken on.
+                resolution: known.filter(|c| same_texts(c, conflict)).and_then(|c| c.resolution),
+            };
+            if known != Some(&record) {
+                self.store.put_conflict(&record)?;
+            }
+            current.push(record);
+        }
+        for gone in open.iter().filter(|c| !current.iter().any(|now| now.id == c.id)) {
+            let mut closed = gone.clone();
+            closed.resolved_by = lane_head;
+            self.store.put_conflict(&closed)?;
+        }
+        let state = match current.iter().find(|c| c.resolution.is_none()) {
+            Some(first) => LaneState::Blocked(first.id),
+            None => LaneState::Ready,
+        };
+        self.put_lane_state(lane, state)?;
+        Ok(current.iter().map(|c| self.conflict_info(c)).collect())
+    }
+
+    /// The tree a prepared merge leads to.
+    fn merged_tree(&mut self, prepared: &Prepared) -> Result<Tree> {
+        let mut entries: std::collections::BTreeMap<PathBuf, TreeEntry> =
+            self.main.tree.iter().map(|(path, entry)| (path.to_owned(), *entry)).collect();
+        for (path, file) in &prepared.outcome.files {
+            match file {
+                Some(file) => {
+                    let blob = self.store.put_blob(&file.content)?;
+                    entries.insert(path.clone(), TreeEntry { blob, mode: file.mode });
+                }
+                None => {
+                    entries.remove(path);
+                }
+            }
+        }
+        let mut tree = Tree::new();
+        for (path, entry) in entries {
+            tree.apply(&kito_core::OpKind::FileAdd { path, blob: entry.blob, mode: entry.mode })?;
+        }
+        Ok(tree)
+    }
+
+    /// Step 2: materializes the merged result where the verification
+    /// commands will run. `None` if no command is configured.
+    pub fn verification_copy(
+        &mut self,
+        prepared: &Prepared,
+    ) -> Result<Option<(PathBuf, Vec<String>, Duration)>> {
+        let commands = self.config.verify.commands.clone();
+        if commands.is_empty() {
+            return Ok(None);
+        }
+        let tree = self.merged_tree(prepared)?;
+        self.store.commit()?;
+        let dir = self.root.join(STORE_DIR).join("verify").join("work");
+        self.materialize_tree(&tree, &dir)?;
+        Ok(Some((dir, commands, Duration::from_secs(self.config.verify.timeout_secs.max(1)))))
+    }
+
+    /// Step 3: records the merged result on the main lane, under a new
+    /// checkpoint, and brings the lane up to it. `None`: one of the two
+    /// lanes moved since the merge was prepared, which must be done again.
+    pub fn finish_integration(
+        &mut self,
+        prepared: Prepared,
+        verification: Option<VerificationReport>,
+    ) -> Result<Option<IntegrationResult>> {
+        let lane = prepared.lane;
+        self.scan_lane(lane)?;
+        self.scan()?;
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        if self.main.head != prepared.main_head || at.work.ops != prepared.lane_ops {
+            return Ok(None);
+        }
+        let mut result = IntegrationResult::new(lane.to_string(), Outcome::Integrated);
+        if let Some(report) = &verification {
+            if !report.passed {
+                result.result = Outcome::VerificationFailed;
+                result.message = Some(format!(
+                    "`{}` failed on the merged result: nothing was integrated",
+                    report.failed_command.clone().unwrap_or_default()
+                ));
+                result.verification = verification;
+                return Ok(Some(result));
+            }
+        }
+        let (agent, lane_head) = (at.record.agent.clone(), at.work.head);
+        let what = at.record.task.clone().or_else(|| {
+            at.work.intent.and_then(|id| self.store.intent(&id)).map(|intent| intent.summary.clone())
+        });
+
+        // An untracked file where one must be written is not ours to overwrite.
+        for (path, file) in &prepared.outcome.files {
+            if file.is_some()
+                && !self.main.tree.contains(path)
+                && fs::symlink_metadata(self.root.join(path)).is_ok()
+            {
+                return Ok(Some(IntegrationResult::failed(
+                    lane.to_string(),
+                    format!(
+                        "{}: exists in the main directory but is not tracked; move it away",
+                        path.display()
+                    ),
+                )));
+            }
+        }
+        // The files, then the ops that record them: signed by the agent,
+        // the first one with the lane's head as second parent.
+        let root = self.root.clone();
+        for (path, file) in &prepared.outcome.files {
+            match file {
+                Some(file) => {
+                    let blob = self.store.put_blob(&file.content)?;
+                    self.write_file_in(&root, path, &TreeEntry { blob, mode: file.mode })?;
+                }
+                None => remove_in(&root, path)?,
+            }
+        }
+        let summary = match &what {
+            Some(what) => format!("integrate {lane}: {what}"),
+            None => format!("integrate {lane} ({})", agent.name),
+        };
+        let intent = Intent::new(summary, self.lanes[&lane].record.task.clone(), None)?;
+        self.store.put_intent(&intent)?;
+        let paths: Vec<PathBuf> = prepared.outcome.files.keys().cloned().collect();
+        let identities = prepared.outcome.identities.clone();
+        let signer = agent.clone();
+        let ops = self.with(LaneId::MAIN, |repo, work| {
+            let human = std::mem::replace(&mut work.author, signer);
+            work.merge_parent = lane_head;
+            let recorded = repo.capture_work(work, paths, Some(intent.id), &identities);
+            work.merge_parent = None;
+            work.author = human;
+            recorded
+        })?;
+        let head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
+
+        let label = what.unwrap_or_else(|| format!("{lane} ({})", agent.name));
+        let checkpoint = Checkpoint {
+            id: self.store.next_checkpoint_id(),
+            head,
+            label,
+            created_by: agent,
+            verification: verification.as_ref().map(|report| Verification {
+                commands: report.commands.clone(),
+                passed: report.passed,
+                duration_ms: report.duration_ms,
+            }),
+            git_commit: None,
+        };
+        self.store.put_checkpoint(&checkpoint)?;
+        for id in &prepared.settled {
+            if let Some(mut conflict) = self.store.conflict(*id).cloned() {
+                conflict.resolved_by = ops.first().map(|op| op.id).or(Some(head));
+                self.store.put_conflict(&conflict)?;
+            }
+        }
+        self.save_state()?;
+        if self.config.git.export_on_checkpoint {
+            match self.export_git() {
+                Ok(_) => {
+                    result.git_commit = self
+                        .store
+                        .checkpoint(checkpoint.id)
+                        .and_then(|c| c.git_commit.as_ref())
+                        .map(|oid| oid.iter().map(|b| format!("{b:02x}")).collect());
+                }
+                Err(e) => result.message = Some(format!("integrated, but the export to git failed: {e}")),
+            }
+        }
+        self.fast_forward(lane, checkpoint.id)?;
+
+        result.auto_resolutions = prepared
+            .outcome
+            .merged_symbols
+            .iter()
+            .map(|id| AutoResolution {
+                kind: "body_merge".to_owned(),
+                symbol: symbol_ref(&self.main.symbols, *id),
+                new_name: None,
+                locations: self
+                    .main
+                    .symbols
+                    .get(*id)
+                    .map(|entry| entry.file.display().to_string())
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        result.checkpoint = Some(checkpoint.id.to_string());
+        result.your_next_base = Some(checkpoint.id.to_string());
+        result.verification = verification;
+        Ok(Some(result))
+    }
+
+    /// Brings a lane to the current state of the main lane: its working
+    /// copy, its state and its base. Its ops so far are behind it.
+    fn fast_forward(&mut self, lane: LaneId, base: kito_core::CheckpointId) -> Result<()> {
+        let main_head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
+        let (tree, symbols) = (self.main.tree.clone(), self.main.symbols.clone());
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let workdir = at.work.root.clone();
+        let mut write: Vec<(PathBuf, TreeEntry)> = Vec::new();
+        let mut remove: Vec<PathBuf> = Vec::new();
+        for (path, entry) in tree.iter() {
+            if at.work.tree.get(path) != Some(entry) {
+                write.push((path.to_owned(), *entry));
+            }
+        }
+        for (path, _) in at.work.tree.iter() {
+            if !tree.contains(path) {
+                remove.push(path.to_owned());
+            }
+        }
+        for path in &remove {
+            remove_in(&workdir, path)?;
+        }
+        for (path, entry) in &write {
+            self.write_file_in(&workdir, path, entry)?;
+        }
+        let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
+        for path in remove.iter().chain(write.iter().map(|(path, _)| path)) {
+            at.work.stat.remove(path);
+        }
+        at.record.next_symbol = at.record.next_symbol.max(at.work.symbols.next_seq(lane));
+        at.work.tree = tree.clone();
+        at.work.symbols = symbols.clone();
+        at.work.symbols.reserve(lane, at.record.next_symbol);
+        at.work.last_clean.clear();
+        at.work.head = Some(main_head);
+        at.base_tree = tree;
+        at.base_symbols = symbols;
+        at.record.base = base;
+        at.record.base_head = main_head;
+        at.record.since = at.work.ops;
+        self.put_lane_state(lane, LaneState::Active)?;
+        self.save_lane(lane)
+    }
+
+    /// The three steps in a row, running the verification commands in
+    /// place. The daemon does the same without holding the repository
+    /// during the verification.
+    pub fn integrate(&mut self, lane: LaneId) -> Result<IntegrationResult> {
+        for _ in 0..3 {
+            let prepared = match self.prepare_integration(lane)? {
+                Preparation::Done(result) => return Ok(*result),
+                Preparation::Ready(prepared) => *prepared,
+            };
+            let verification = match self.verification_copy(&prepared)? {
+                Some((dir, commands, timeout)) => {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| Error::Other(format!("starting the verifier: {e}")))?;
+                    Some(runtime.block_on(kito_integrate::verify(&dir, &commands, timeout)))
+                }
+                None => None,
+            };
+            if let Some(result) = self.finish_integration(prepared, verification)? {
+                return Ok(result);
+            }
+        }
+        Ok(IntegrationResult::failed(
+            lane.to_string(),
+            "the lanes keep changing: try again when they are quiet",
+        ))
+    }
+}
+
+/// A symbol for people and logs: `ts/auth.getUser#42`.
+pub(crate) fn symbol_ref(table: &SymbolTable, id: SymbolId) -> String {
+    let Some(entry) = table.get(id) else { return id.to_string() };
+    let stem = entry.file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let extension = entry.file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = table.qualified_name(id).unwrap_or_else(|| entry.name.clone());
+    let number = match id.origin().is_main() {
+        true => id.seq().to_string(),
+        false => format!("{}@{}", id.seq(), id.origin()),
+    };
+    format!("{extension}/{stem}.{name}#{number}")
+}

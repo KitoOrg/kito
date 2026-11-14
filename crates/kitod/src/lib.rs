@@ -9,6 +9,7 @@ pub mod error;
 pub mod fsinfo;
 pub mod identity;
 pub mod ignore;
+pub mod integrate;
 pub mod lanes;
 pub mod repo;
 pub mod rpc;

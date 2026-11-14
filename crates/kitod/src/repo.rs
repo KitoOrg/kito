@@ -187,6 +187,9 @@ pub(crate) struct Work {
     pub(crate) stat: HashMap<PathBuf, FileStat>,
     /// The intent captured ops are recorded with, if one was declared.
     pub(crate) intent: Option<IntentId>,
+    /// A second parent for the next op recorded: the head of the lane whose
+    /// work that op brings in.
+    pub(crate) merge_parent: Option<OpId>,
 }
 
 impl Work {
@@ -203,6 +206,7 @@ impl Work {
             ops: 0,
             stat: HashMap::new(),
             intent: None,
+            merge_parent: None,
         }
     }
 
@@ -664,7 +668,8 @@ impl Repo {
     ) -> Result<Vec<Op>> {
         let mut ops = Vec::new();
         for kind in kinds {
-            let op = Op::new(work.head, work.lane, work.author.clone(), self.clock.now(), kind, intent)?;
+            let parents = work.head.into_iter().chain(work.merge_parent.take());
+            let op = Op::new(parents, work.lane, work.author.clone(), self.clock.now(), kind, intent)?;
             work.tree.apply(&op.kind)?;
             work.symbols.apply(&op.kind)?;
             self.store.append_op(&op)?;

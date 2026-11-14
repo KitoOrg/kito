@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-lane", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
+members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-lane", "crates/kito-integrate", "crates/kito-git", "crates/kitod", "crates/kito-cli"]
 
 [workspace.package]
 version = "0.2.0"
@@ -16,6 +16,7 @@ kito-parse = { path = "crates/kito-parse" }
 kito-diff = { path = "crates/kito-diff" }
 kito-merge = { path = "crates/kito-merge" }
 kito-lane = { path = "crates/kito-lane" }
+kito-integrate = { path = "crates/kito-integrate" }
 kito-git = { path = "crates/kito-git" }
 kitod = { path = "crates/kitod" }
 
@@ -34,7 +35,8 @@ similar = "3"
 serde_json = "1"
 smallvec = { version = "1", features = ["serde", "union"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "process"] }
+rustix = { version = "1", features = ["process"] }
 toml = "0.9"
 toml_edit = "0.23"
 tree-sitter = "0.27"

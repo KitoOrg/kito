@@ -136,7 +136,7 @@ impl Repo {
     /// Creates the working copy of a lane from a tree: files the main
     /// directory holds unchanged are cloned from there, the rest comes from
     /// the store. Returns what the file system says of the files created.
-    fn materialize(&self, tree: &Tree, workdir: &Path) -> Result<Vec<(PathBuf, FileStat)>> {
+    pub(crate) fn materialize_tree(&self, tree: &Tree, workdir: &Path) -> Result<Vec<(PathBuf, FileStat)>> {
         kito_lane::remove(workdir).map_err(Error::io(workdir))?;
         // The main directory vouches for the files that have not changed
         // since their last capture.
@@ -214,7 +214,7 @@ impl Repo {
 
         let id = self.store.next_lane_id();
         let workdir = self.lane_dir(id).join("work");
-        let stats = self.materialize(&base_tree, &workdir)?;
+        let stats = self.materialize_tree(&base_tree, &workdir)?;
         let author = kito_core::Author::agent(agent);
         let mut work = Work::new(id, workdir, author.clone(), &self.lane_ignore());
         work.tree = base_tree.clone();
@@ -452,7 +452,7 @@ impl Repo {
             // A working copy that is gone is made again, not taken for a
             // lane that removed every file.
             if !workdir.is_dir() {
-                work.stat = self.materialize(&work.tree, &workdir)?.into_iter().collect();
+                work.stat = self.materialize_tree(&work.tree, &workdir)?.into_iter().collect();
             }
             self.lanes.insert(lane, LaneAt { record, work, base_tree, base_symbols });
         }

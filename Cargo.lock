@@ -1497,6 +1497,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kito-integrate"
+version = "0.2.0"
+dependencies = [
+ "kito-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "kito-lane"
 version = "0.2.0"
 dependencies = [
@@ -1559,6 +1571,7 @@ dependencies = [
  "kito-core",
  "kito-diff",
  "kito-git",
+ "kito-integrate",
  "kito-lane",
  "kito-merge",
  "kito-parse",
