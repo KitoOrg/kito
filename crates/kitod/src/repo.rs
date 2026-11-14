@@ -119,6 +119,11 @@ pub enum LogItem {
         /// The "why" of the operation, if declared.
         #[serde(default)]
         intent: Option<String>,
+        /// For a symbolic op: the ID of the file change it was recorded
+        /// with. Absent when it had none (the first analysis of files that
+        /// were already there).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
     },
     Checkpoint {
         id: String,
@@ -712,6 +717,20 @@ impl Repo {
                 break;
             }
             next = reader.next()?;
+            let symbolic = op.kind.symbol().is_some();
+            if !symbolic && run == 0 {
+                // A batch is recorded with one intent: symbolic ops with
+                // another one are not about this change, nor about any other.
+                let (mine, alone): (Vec<Op>, Vec<Op>) =
+                    std::mem::take(&mut pending).into_iter().partition(|s| s.intent == op.intent);
+                pending = mine;
+                for symbolic in alone {
+                    let file = self.file_then(&symbolic, None);
+                    if self.concerns(&symbolic, file.as_deref(), path) {
+                        items.push(self.describe(&symbolic, file, None));
+                    }
+                }
+            }
             for ck in by_head.get(&op.id).into_iter().flatten().rev() {
                 items.push(LogItem::Checkpoint {
                     id: ck.id.to_string(),
@@ -721,7 +740,7 @@ impl Repo {
                     git_commit: ck.git_commit.as_ref().map(hex20),
                 });
             }
-            if op.kind.symbol().is_some() {
+            if symbolic {
                 if run > 0 {
                     // An older batch begins: what nobody took did not
                     // concern the file asked for.
@@ -741,12 +760,12 @@ impl Repo {
             for symbolic in std::mem::take(&mut pending) {
                 let file = self.file_then(&symbolic, if alone { carrier.as_deref() } else { None });
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&symbolic, file));
+                    items.push(self.describe(&symbolic, file, Some(op.id)));
                 } else {
                     pending.push(symbolic);
                 }
             }
-            items.push(self.describe(&op, None));
+            items.push(self.describe(&op, None, None));
             shown += 1;
         }
         // Symbolic ops with no file change before them (the first analysis
@@ -755,7 +774,7 @@ impl Repo {
             for symbolic in pending {
                 let file = self.file_then(&symbolic, None);
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&symbolic, file));
+                    items.push(self.describe(&symbolic, file, None));
                 }
             }
         }
@@ -795,9 +814,9 @@ impl Repo {
         file == Some(path) || matches!(&op.kind, OpKind::Move { from, .. } if from.file == path)
     }
 
-    /// One line of the log. `file_then`: for a symbolic op, the file the
-    /// symbol was in at the time.
-    fn describe(&self, op: &Op, file_then: Option<PathBuf>) -> LogItem {
+    /// One line of the log. For a symbolic op, `file_then` is the file the
+    /// symbol was in at the time and `change` the file change it belongs to.
+    fn describe(&self, op: &Op, file_then: Option<PathBuf>, change: Option<OpId>) -> LogItem {
         let display = |p: &Path| p.to_string_lossy().into_owned();
         let (path, detail, stat) = match &op.kind {
             OpKind::FileAdd { path, mode, .. } => {
@@ -851,6 +870,7 @@ impl Repo {
             lines_added: stat.map(|s| s.lines_added),
             lines_removed: stat.map(|s| s.lines_removed),
             intent: op.intent.and_then(|id| self.store.intent(&id)).map(|i| i.summary.clone()),
+            change: change.map(|id| id.to_string()),
         }
     }
 

@@ -293,7 +293,10 @@ function therefore never removes and re-creates the symbols below it.
 A repository imported from git, or captured before phase 2, has files with
 no symbols. They are analyzed once (at import, and at the first start of a
 daemon of this version) and get `AddSymbol` ops with no file-level op.
-Symbol IDs start there: the history before that point stays textual.
+Symbol IDs start there: the history before that point stays textual. In
+`kito log` those ops get a line of their own ("Symbols"), since they belong
+to no file change; in the JSON output a symbolic op names the change it was
+recorded with (`change`), and these have none.
 
 ### D-038 · Rollback and symbols
 A rollback is recorded like any other change: new file-level ops, and the

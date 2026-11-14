@@ -287,33 +287,63 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
     // Sub-lines waiting for the change they go under, each with the file
     // of its symbol: shown only when it is not the file of that change.
     let mut pending: Vec<(String, Option<String>)> = Vec::new();
-    let flush = |pending: &mut Vec<(String, Option<String>)>, under: Option<&str>| {
-        for (mut line, file) in pending.drain(..).rev() {
-            if let Some(file) = file.filter(|f| Some(f.as_str()) != under && !line.contains(f.as_str())) {
-                line.push_str(&format!("  ({file})"));
+    // Symbolic ops recorded with no file change (the first analysis of files
+    // that were already there) get a line of their own above them.
+    let mut alone: Option<String> = None;
+    let flush =
+        |pending: &mut Vec<(String, Option<String>)>, alone: &mut Option<String>, under: Option<&str>| {
+            if let Some(header) = alone.take() {
+                println!("{header}");
             }
-            println!("{line}");
-        }
-    };
+            for (mut line, file) in pending.drain(..).rev() {
+                if let Some(file) = file.filter(|f| Some(f.as_str()) != under && !line.contains(f.as_str())) {
+                    line.push_str(&format!("  ({file})"));
+                }
+                println!("{line}");
+            }
+        };
     for item in items {
         match item {
             LogItem::Checkpoint { id, label, git_commit, .. } => {
                 let git = git_commit.map(|c| format!("  (git {})", &c[..10])).unwrap_or_default();
-                flush(&mut pending, None);
+                flush(&mut pending, &mut alone, None);
                 println!("◆ {id}  {label}{git}");
             }
             LogItem::Op {
-                id, at_ms, author, op, path, detail, lines_added, lines_removed, intent, ..
+                id,
+                at_ms,
+                author,
+                op,
+                path,
+                detail,
+                lines_added,
+                lines_removed,
+                intent,
+                change,
+                ..
             } => {
+                // The first digits of the ID are enough to point `kito rollback` at the op.
+                let short = &id[..id.len().min(8)];
                 // What a change meant for the symbols is shown under the
                 // file change it belongs to, which (going back in time)
                 // comes next.
                 if is_symbolic(&op) {
+                    if change.is_none() {
+                        // Going back in time the oldest one comes last: the header is its.
+                        let mut header = format!("  {short}  {}  {author:<10} Symbols", utc(at_ms));
+                        if let Some(intent) = &intent {
+                            header.push_str(&format!("    [{intent}]"));
+                        }
+                        alone = Some(header);
+                    } else if alone.is_some() {
+                        flush(&mut pending, &mut alone, None);
+                    }
                     pending.push((format!("      ↳ {}", detail.unwrap_or(op)), path));
                     continue;
                 }
-                // The first digits of the ID are enough to point `kito rollback` at the op.
-                let short = &id[..id.len().min(8)];
+                if alone.is_some() {
+                    flush(&mut pending, &mut alone, None);
+                }
                 let path = path.unwrap_or_default();
                 let mut line = format!("  {short}  {}  {author:<10} {op:<10} {path}", utc(at_ms));
                 if let (Some(added), Some(removed)) = (lines_added, lines_removed) {
@@ -326,11 +356,11 @@ fn cmd_log(cli: &Cli, path: &Option<PathBuf>, limit: usize) -> Outcome {
                     line.push_str(&format!("  [{intent}]"));
                 }
                 println!("{line}");
-                flush(&mut pending, Some(&path));
+                flush(&mut pending, &mut alone, Some(&path));
             }
         }
     }
-    flush(&mut pending, None);
+    flush(&mut pending, &mut alone, None);
     Ok(())
 }
 

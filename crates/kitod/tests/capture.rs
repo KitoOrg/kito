@@ -848,4 +848,31 @@ fn an_imported_repository_gets_its_symbols_analyzed() {
     assert_eq!(story(&repo, "server.go", "Server.Start"), ["method `Server.Start` created in server.go"]);
     assert_eq!(repo.analyze().unwrap(), 0, "nothing left to analyze");
     assert!(repo.scan().unwrap().is_empty());
+
+    // In the log the analysis stands on its own: its symbolic ops came with
+    // no file change, and are not shown as part of the import's.
+    let items = repo.log(10, None).unwrap();
+    let described: Vec<(String, bool, bool)> = items
+        .iter()
+        .filter_map(|i| match i {
+            LogItem::Op { op, change, intent, .. } => Some((op.clone(), change.is_some(), intent.is_some())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        described[..2],
+        [("AddSymbol".to_owned(), false, true), ("AddSymbol".to_owned(), false, true)]
+    );
+    assert!(described[2..].iter().all(|(op, change, _)| op == "FileAdd" && !change), "{described:?}");
+    // They still belong in the log of their file.
+    let of_file = repo.log(10, Some(Path::new("server.go"))).unwrap();
+    assert_eq!(
+        of_file.iter().filter(|i| matches!(i, LogItem::Op { op, .. } if op == "AddSymbol")).count(),
+        2
+    );
+    assert!(repo
+        .log(10, Some(Path::new("notes.md")))
+        .unwrap()
+        .iter()
+        .all(|i| !matches!(i, LogItem::Op { op, .. } if op == "AddSymbol")));
 }
