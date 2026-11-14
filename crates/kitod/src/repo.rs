@@ -525,7 +525,7 @@ impl Repo {
         let store_dir = root.join(STORE_DIR);
         let store = Store::open(&store_dir)?;
         let config = Config::load(&store_dir).map_err(Error::Config)?;
-        let providers = config.semantic.providers(&root);
+        let providers = crate::refs::providers(&config, &root);
         let identity = identity::resolve(&config, &root);
         let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.capture.ignore);
         let mut repo = Repo {
@@ -580,7 +580,7 @@ impl Repo {
     /// away, without restarting the daemon.
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
-        self.semantic = std::sync::Arc::new(self.config.semantic.providers(&self.root));
+        self.reload_providers();
         self.main.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
         self.identity = identity::resolve(&self.config, &self.root);
         self.main.author = self.identity.author();
@@ -1149,6 +1149,12 @@ impl Repo {
     }
 
     /// Exports the checkpoints not yet exported to git.
+    /// Builds the providers of level 2 again: the configuration changed, or
+    /// an index was imported.
+    pub(crate) fn reload_providers(&mut self) {
+        self.semantic = std::sync::Arc::new(crate::refs::providers(&self.config, &self.root));
+    }
+
     /// The providers of level 2: what to ask who uses a symbol.
     pub fn semantic(&self) -> std::sync::Arc<kito_semantic::Semantic> {
         self.semantic.clone()

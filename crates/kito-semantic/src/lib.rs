@@ -11,17 +11,22 @@
 //!   finds the uses in the same file and through explicit imports, and is
 //!   never sure (confidence 0.5 to 0.8);
 //! - [`LspProvider`], which asks a language server, and is as sure as the
-//!   server is.
+//!   server is;
+//! - [`ScipImporter`], which reads an index made by an indexer over the
+//!   whole repository, and answers for the files that have not changed
+//!   since.
 //!
 //! Every answer carries its confidence and where it comes from: what to do
 //! with a doubtful one is decided by who asks.
 
 mod heuristic;
 mod lsp;
+mod scip;
 mod text;
 
 pub use heuristic::TreeSitterHeuristic;
 pub use lsp::{LspConfig, LspProvider};
+pub use scip::{ScipImporter, ScipIndex};
 pub use text::{offset_at, position_at};
 
 use kito_core::{Lang, Location, RefSource, Reference, SymbolId, SymbolTable, Tree};
@@ -41,6 +46,8 @@ pub enum Error {
     Server { server: String, message: String },
     #[error("language server `{server}` did not answer in {seconds} s")]
     Timeout { server: String, seconds: u64 },
+    #[error("SCIP index: {0}")]
+    Index(String),
     /// The server asked for the request to be made again. Never returned:
     /// the provider makes it again.
     #[error("{0}")]
@@ -170,18 +177,47 @@ pub fn reference(snap: &Snapshot<'_>, to: SymbolId, usage: &Usage) -> Option<Ref
     })
 }
 
+/// An index imported into a repository: the file it is in, and the content
+/// each file of the repository had when it was made.
+pub struct ScipSource {
+    pub index: PathBuf,
+    pub files: std::collections::HashMap<PathBuf, kito_core::BlobId>,
+}
+
 /// The providers of a repository, asked in order of how much they know: the
-/// language server of the symbol's language if there is one and it answers,
-/// the heuristic otherwise.
+/// language server of the symbol's language if there is one and it answers;
+/// an imported index for the files that have not changed since it was made;
+/// the heuristic for the rest.
 #[derive(Default)]
 pub struct Semantic {
     pub heuristic: TreeSitterHeuristic,
     pub servers: Vec<LspProvider>,
+    scip: Option<ScipSource>,
+    /// The index, read the first time it is needed.
+    index: std::sync::OnceLock<Option<ScipImporter>>,
 }
 
 impl Semantic {
     pub fn new(servers: Vec<LspProvider>) -> Semantic {
-        Semantic { heuristic: TreeSitterHeuristic, servers }
+        Semantic { servers, ..Semantic::default() }
+    }
+
+    /// The same providers, with an imported index.
+    pub fn with_scip(mut self, source: ScipSource) -> Semantic {
+        self.scip = Some(source);
+        self.index = Default::default();
+        self
+    }
+
+    /// The imported index, if there is one and it can be read.
+    pub fn index(&self) -> Option<&ScipImporter> {
+        self.index
+            .get_or_init(|| {
+                let source = self.scip.as_ref()?;
+                let index = ScipIndex::parse(&std::fs::read(&source.index).ok()?).ok()?;
+                Some(ScipImporter::new(index, source.files.clone()))
+            })
+            .as_ref()
     }
 
     fn server_for(&self, lang: Lang) -> Option<&LspProvider> {
@@ -195,7 +231,7 @@ impl Semantic {
     }
 
     /// Who uses `sym`. A language server that fails is not an error here:
-    /// the heuristic answers in its place, and `problems` says so.
+    /// the next provider answers in its place, and `problems` says so.
     pub async fn usages(
         &self,
         snap: &Snapshot<'_>,
@@ -209,7 +245,13 @@ impl Semantic {
                 Err(e) => problems.push(e.to_string()),
             }
         }
-        self.heuristic.usages(snap, sym).await
+        let read = self.heuristic.usages_of(snap, sym)?;
+        let Some(index) = self.index() else { return Ok(read) };
+        let Some(mut found) = index.usages_of(snap, sym)? else { return Ok(read) };
+        // What the index does not know as it is now is read from the syntax.
+        found.extend(read.into_iter().filter(|usage| !index.knows(snap, &usage.file)));
+        found.sort_by(|a, b| (&a.file, a.range.start).cmp(&(&b.file, b.range.start)));
+        Ok(found)
     }
 
     /// Stops the language servers.

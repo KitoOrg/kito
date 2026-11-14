@@ -451,3 +451,74 @@ impl Repo {
         Ok(out)
     }
 }
+
+/// What importing an index came to.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScipReport {
+    /// Files the index is about that the repository tracks.
+    pub files: usize,
+    /// Files of the index the repository does not have: left out.
+    pub unknown_files: usize,
+    /// Symbols the index knows a use of.
+    pub symbols: usize,
+}
+
+/// Where an imported index is kept: the index as it was given, and the
+/// content each of its files had at that moment.
+fn scip_paths(root: &Path) -> (PathBuf, PathBuf) {
+    let dir = root.join(kito_store::STORE_DIR).join("scip");
+    (dir.join("index.scip"), dir.join("files"))
+}
+
+/// The providers of level 2 of the repository at `root`: the language
+/// servers of the configuration and, if one was imported, an index.
+pub(crate) fn providers(config: &crate::config::Config, root: &Path) -> Semantic {
+    let semantic = config.semantic.providers(root);
+    let (index, files) = scip_paths(root);
+    let then = std::fs::read(&files)
+        .ok()
+        .and_then(|bytes| kito_core::codec::from_slice::<Vec<(PathBuf, BlobId)>>(&bytes).ok());
+    match then {
+        Some(files) if index.is_file() => {
+            semantic.with_scip(kito_semantic::ScipSource { index, files: files.into_iter().collect() })
+        }
+        _ => semantic,
+    }
+}
+
+impl Repo {
+    /// Imports a SCIP index: the references of the whole repository, as an
+    /// indexer found them in one go. The index must have been made on the
+    /// files of the main directory as they are now; from now on it answers
+    /// for each of them until that file changes.
+    pub fn import_scip(&mut self, file: &Path) -> Result<ScipReport> {
+        let bytes = std::fs::read(file).map_err(Error::io(file))?;
+        let index = kito_semantic::ScipIndex::parse(&bytes).map_err(|e| Error::Other(e.to_string()))?;
+        // What is on disk is what the indexer read.
+        self.scan()?;
+        let mut then: Vec<(PathBuf, BlobId)> = Vec::new();
+        let mut unknown_files = 0;
+        for path in index.files() {
+            match self.main.tree.get(path) {
+                Some(entry) => then.push((path.to_owned(), entry.blob)),
+                None => unknown_files += 1,
+            }
+        }
+        if then.is_empty() {
+            return Err(Error::Other(format!(
+                "{}: none of its {} files is in this repository (was it made from another directory?)",
+                file.display(),
+                unknown_files
+            )));
+        }
+        let (kept, files) = scip_paths(&self.root);
+        if let Some(dir) = kept.parent() {
+            std::fs::create_dir_all(dir).map_err(Error::io(dir))?;
+        }
+        kito_store::fs::atomic_write(&kept, &bytes).map_err(Error::io(&kept))?;
+        kito_store::fs::atomic_write(&files, &kito_core::codec::to_vec(&then)?).map_err(Error::io(&files))?;
+        let report = ScipReport { files: then.len(), unknown_files, symbols: index.symbols() };
+        self.reload_providers();
+        Ok(report)
+    }
+}

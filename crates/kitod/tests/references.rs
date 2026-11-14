@@ -263,3 +263,58 @@ fn a_merge_asks_for_the_references_it_was_not_given() {
     assert!(matches!(repo.prepare_integration(LaneId(1), None).unwrap(), Preparation::Ask(_)));
     assert!(repo.plan_references(LaneId(1)).unwrap().is_some());
 }
+
+/// The files `scip-typescript` indexed for the fixture of `kito-semantic`,
+/// and the index it made.
+fn indexed(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../kito-semantic/tests/fixtures/scip").join(name)
+}
+
+#[test]
+fn an_imported_index_carries_a_rename_without_a_language_server() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let mut repo = Repo::init(&root).unwrap();
+    write(&root, ".kito/config.toml", &format!("[git]\nexport_on_checkpoint = false\n{NO_SERVER}"));
+    repo.reload_config().unwrap();
+    for file in ["src/auth.ts", "src/web.ts", "src/other.ts"] {
+        write(&root, file, &fs::read_to_string(indexed(file)).unwrap());
+    }
+    repo.checkpoint("start").unwrap();
+
+    // An index that is not one, and one made somewhere else, are refused.
+    write(&root, "not-an-index", "\u{1}\u{2}\u{3}");
+    assert!(repo.import_scip(&root.join("not-an-index")).is_err());
+    let report = repo.import_scip(&indexed("index.scip")).unwrap();
+    assert_eq!((report.files, report.unknown_files), (3, 0));
+    assert!(report.symbols >= 2, "{report:?}");
+
+    // Alice renames the function where it is defined, and nowhere else.
+    repo.open_lane("alice", None, None).unwrap();
+    let alice = repo.lane_info(LaneId(1)).unwrap().workdir.unwrap();
+    write(&alice, "src/auth.ts", &read(&alice, "src/auth.ts").replace("getUser", "fetchUser"));
+    let result = repo.integrate(LaneId(1)).unwrap();
+    assert_eq!(result.result, Outcome::Integrated, "{result:?}");
+    // The index knows who used it: the rename is carried there, and the
+    // other function of the same name is left alone.
+    assert_eq!(followed(&result), ["ts/auth.getUser#0 -> fetchUser: src/web.ts:1, src/web.ts:4"]);
+    assert!(
+        read(&root, "src/web.ts").contains("import { fetchUser }")
+            && !read(&root, "src/web.ts").contains("getUser")
+    );
+    assert!(read(&root, "src/other.ts").contains("function getUser"));
+
+    // It survives a restart, and an explicit rename uses it too: for the
+    // files that are still as they were when it was made.
+    repo.close().unwrap();
+    let mut repo = Repo::open(&root).unwrap();
+    let done = repo.rename_symbol(LaneId::MAIN, "src/other.ts:getUser", "loadUser").unwrap();
+    assert_eq!(done.references_updated, ["src/other.ts:5"], "{done:?}");
+    assert!(done.possible_references.is_empty(), "{done:?}");
+    // The files alice changed are no longer the ones the index saw: there
+    // the syntax answers, and is not sure.
+    let done = repo.rename_symbol(LaneId::MAIN, "src/auth.ts:fetchUser", "findUser").unwrap();
+    assert!(done.references_updated.is_empty(), "{done:?}");
+    assert_eq!(done.possible_references, ["src/auth.ts:6", "src/web.ts:1", "src/web.ts:4"]);
+}

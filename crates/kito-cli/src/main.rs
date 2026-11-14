@@ -65,6 +65,11 @@ enum Cmd {
     },
     /// Export the checkpoints not yet exported to git
     ExportGit,
+    /// Import a SCIP index of the repository: who uses what, found by an indexer in one go
+    Scip {
+        /// The index (index.scip), made on the files as they are now
+        file: PathBuf,
+    },
     /// Restore files to the state of a checkpoint or of an earlier operation
     Rollback {
         /// Point to return to: a checkpoint (ckpt#3) or the first digits
@@ -610,6 +615,29 @@ fn cmd_checkpoint(cli: &Cli, label: &str) -> Outcome {
     Ok(())
 }
 
+fn cmd_scip(cli: &Cli, file: &Path) -> Outcome {
+    // The daemon reads the file: it needs the whole path.
+    let file = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let done: Value = daemon(cli)?.call("import_scip", json!({ "file": file })).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+        return Ok(());
+    }
+    println!(
+        "Index imported: {} and the uses of {}.",
+        count(done["files"].as_u64().unwrap_or(0), "file", "files"),
+        count(done["symbols"].as_u64().unwrap_or(0), "symbol", "symbols")
+    );
+    if let Some(unknown) = done["unknown_files"].as_u64().filter(|n| *n > 0) {
+        println!(
+            "{} of the index are not in the repository, and were left out.",
+            count(unknown, "file", "files")
+        );
+    }
+    println!("It answers for each file until that file changes: import a new one now and then.");
+    Ok(())
+}
+
 fn cmd_export(cli: &Cli) -> Outcome {
     let done: Vec<Value> = daemon(cli)?.call("export_git", json!({})).map_err(fail)?;
     if cli.json {
@@ -1090,6 +1118,7 @@ fn main() -> ExitCode {
         Cmd::Log { target, limit, lane } => cmd_log(&cli, target, *limit, lane),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
+        Cmd::Scip { file } => cmd_scip(&cli, file),
         Cmd::Rollback { to, paths, ops, dry_run } => cmd_rollback(&cli, to, paths, *ops, *dry_run),
         Cmd::Identity { name, email, agent, human, global } => {
             let kind = if *agent {

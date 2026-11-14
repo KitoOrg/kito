@@ -636,3 +636,20 @@ be asked again; a C or C++ server finds the uses in the files a compilation
 database names, so a project without one gets the uses of the open file
 only; and a server that does not say when it has loaded (pyright) is given
 the three seconds of D-063 on its first question.
+
+### D-071 · The SCIP index
+`kito scip <index.scip>` imports an index made by an indexer
+(`scip-typescript index`, `scip-java`, `rust-analyzer scip` and the like)
+over the files of the main directory as they are at that moment. It is kept
+as it was given, in `.kito/scip/`, with the content each of its files had
+then. It answers "who uses this symbol" for the files that are still as
+they were, as sure as a language server; for a file that changed since, and
+for a symbol whose defining file changed, the syntax answers instead. So an
+index never says anything false about the present, and goes stale one file
+at a time: importing a new one now and then brings it back. A language
+server, where one runs, is asked first. Of the format only documents,
+occurrences, ranges (in the three ways the format has had), symbols and the
+definition role are read; the messages are written by hand for `prost`, so
+that building Kito needs no protobuf compiler. This is the index D-059
+left for later, in the form the plan gives it: built in one go by a tool
+made for that, not maintained by the daemon in the background.

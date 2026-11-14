@@ -221,6 +221,11 @@ impl Daemon {
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
                     to_json(serde_json::to_value(done))
                 }
+                "import_scip" => {
+                    let file = PathBuf::from(text("file")?);
+                    let done = self.with_repo(|repo| repo.import_scip(&file)).map_err(internal)?;
+                    to_json(serde_json::to_value(done))
+                }
                 "export_git" => {
                     let done = self.with_repo(|repo| repo.export_git()).map_err(internal)?;
                     let list: Vec<Value> =

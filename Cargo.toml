@@ -29,6 +29,7 @@ gix = { version = "0.90", default-features = false, features = ["sha1", "index"]
 ignore = "0.4"
 memmap2 = "0.9"
 notify = "8"
+prost = "0.14"
 redb = "4"
 reflink-copy = "0.1"
 imbl = { version = "7", features = ["serde"] }
