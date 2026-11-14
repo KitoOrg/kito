@@ -737,8 +737,13 @@ the ordinary file. Level 2 is not on the path of a save.
 - The syntax follows imports in JavaScript, TypeScript, Python and Go, and
   only relative module paths and names imported one by one or through a
   namespace; in the other languages it sees the same file only.
-- A use its author forgot is reached where its line is still exactly as it
-  was; one on a line that was reformatted is left to the verifier.
+- Without a provider that is sure, the uses that were already there when a
+  symbol was renamed are neither rewritten nor asked about: `kito rename`
+  lists them, and they are the renamer's to fix. Only the uses another
+  side added meanwhile become a `semantic_ref` conflict.
+- With one, a use its author forgot is reached where its line is still
+  exactly as it was; one on a line that was reformatted is left to the
+  verifier.
 - Only renames travel. A symbol removed on one side and newly used on the
   other, or a signature changed while a call was added, are still for the
   verifier to catch.
