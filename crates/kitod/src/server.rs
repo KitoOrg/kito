@@ -30,6 +30,11 @@ const FAST_SCAN_MIN: Duration = Duration::from_secs(1);
 /// has found changes the watcher did not report.
 const QUIET: Duration = Duration::from_secs(1);
 
+/// `true` where the system reports when a program closes a file it was
+/// writing (inotify). Elsewhere a file that was written to is simply given
+/// a moment to settle.
+const CLOSE_IS_REPORTED: bool = cfg!(target_os = "linux");
+
 /// Counters updated by the watcher callback.
 #[derive(Default)]
 struct Signals {
@@ -465,7 +470,7 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
                 }
                 let mut ops = Vec::new();
                 for (lane, paths) in paths {
-                    match repo.capture_lane(lane, paths) {
+                    match repo.capture_events(lane, paths) {
                         Ok(captured) => ops.extend(captured),
                         // Events of a lane that was closed in the meantime.
                         Err(Error::NoSuchLane(_)) => {}
@@ -476,11 +481,26 @@ async fn debounce_loop(daemon: Arc<Daemon>, mut events: mpsc::UnboundedReceiver<
             })
         })
         .await;
-        let (captured, error) = match outcome {
+        let (mut captured, mut error) = match outcome {
             Ok(Ok(ops)) => (!ops.is_empty(), rescan),
             Ok(Err(e)) => (false, Some(e.to_string())),
             Err(e) => (false, Some(e.to_string())),
         };
+        // Files that were being written at that very moment: once they
+        // have settled they are looked at again.
+        for _ in 0..200 {
+            if !daemon.with_repo(|repo| Ok(repo.has_deferred())).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(crate::repo::SETTLE).await;
+            let worker = daemon.clone();
+            match tokio::task::spawn_blocking(move || worker.with_repo(|repo| repo.capture_deferred())).await
+            {
+                Ok(Ok(ops)) => captured |= !ops.is_empty(),
+                Ok(Err(e)) => error = Some(e.to_string()),
+                Err(e) => error = Some(e.to_string()),
+            }
+        }
         {
             let mut stats = daemon.stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.batches += 1;
@@ -608,10 +628,36 @@ pub async fn serve(root: &Path) -> Result<()> {
     let watcher = if watching {
         let watch_root = root.clone();
         let seen = signals.clone();
+        let writing = repo.writing();
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            // Which files are in the middle of a save: written to, and not
+            // closed yet (the events say when, where the system tells).
+            if let Ok(event) = &event {
+                use notify::event::{AccessKind, AccessMode, ModifyKind};
+                match event.kind {
+                    notify::EventKind::Modify(ModifyKind::Data(_)) if CLOSE_IS_REPORTED => {
+                        event.paths.iter().for_each(|path| writing.modified(path));
+                    }
+                    notify::EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
+                        event.paths.iter().for_each(|path| writing.closed(path));
+                    }
+                    _ => {}
+                }
+            }
+            let closed_after_writing = |kind: &notify::EventKind| {
+                use notify::event::{AccessKind, AccessMode};
+                matches!(kind, notify::EventKind::Access(AccessKind::Close(AccessMode::Write)))
+            };
             let msg = match event {
                 Ok(event) if event.need_rescan() => WatchMsg::Rescan("the watcher missed some events".into()),
-                Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
+                // Reads and opens say nothing; a file closed after being
+                // written is the moment its save is complete.
+                Ok(event)
+                    if matches!(event.kind, notify::EventKind::Access(_))
+                        && !closed_after_writing(&event.kind) =>
+                {
+                    return
+                }
                 Ok(event) => {
                     let paths: Vec<(LaneId, PathBuf)> = event
                         .paths

@@ -73,7 +73,14 @@ pub struct SymbolOps {
 pub struct Identities {
     by_start: HashMap<(PathBuf, usize), SymbolId>,
     first_new: u64,
+    /// Symbols that were removed and may come back: by where they were and
+    /// what they were called.
+    gone: HashMap<Place, VecDeque<SymbolId>>,
 }
+
+/// File, enclosing symbol, kind and name: what a symbol that comes back is
+/// recognized by.
+type Place = (PathBuf, Option<SymbolId>, kito_core::SymbolKind, String);
 
 impl Identities {
     pub fn new() -> Identities {
@@ -87,6 +94,23 @@ impl Identities {
 
     pub fn is_empty(&self) -> bool {
         self.by_start.is_empty()
+    }
+
+    /// A symbol with this ID was removed from `file`, where it had this
+    /// enclosing symbol, kind and name. If a new symbol shows up in the
+    /// same place with the same name, it is that symbol coming back, and
+    /// gets its ID again: what is removed by one save and restored by a
+    /// later one (a rollback, a cut and paste in two steps, a file caught
+    /// while it was being rewritten) keeps its history.
+    pub fn gone(
+        &mut self,
+        file: &Path,
+        parent: Option<SymbolId>,
+        kind: kito_core::SymbolKind,
+        name: &str,
+        id: SymbolId,
+    ) {
+        self.gone.entry((file.to_owned(), parent, kind, name.to_owned())).or_default().push_back(id);
     }
 
     /// The counter of the IDs given to new symbols starts at least here.
@@ -132,6 +156,9 @@ struct Differ<'a> {
     /// Old symbols some new symbol is known to be: no heuristic may give
     /// them to another one.
     claimed: HashSet<SymbolId>,
+    /// Removed symbols that may come back, and the IDs already given out.
+    gone: HashMap<Place, VecDeque<SymbolId>>,
+    given: HashSet<SymbolId>,
     /// Per old symbol: a new symbol was recognized as the same one.
     matched: Vec<bool>,
     /// ID given to each new symbol: the matched old one, or a fresh one.
@@ -169,6 +196,8 @@ pub fn diff_symbols_with(
         old_at: HashMap::new(),
         known: Vec::new(),
         claimed: HashSet::new(),
+        gone: identities.gone.clone(),
+        given: HashSet::new(),
         matched: Vec::new(),
         assigned: Vec::new(),
         leftover_old: Vec::new(),
@@ -665,17 +694,37 @@ impl<'a> Differ<'a> {
     fn add(&mut self, new: usize, lane: LaneId, next: &mut u64, ops: &mut Vec<OpKind>) {
         // A symbol known in advance keeps the ID it was born with (in
         // another lane); any other gets the next one of this lane.
-        let id = match self.known[new].filter(|id| self.table.get(*id).is_none()) {
-            Some(id) => id,
-            None => {
-                *next += 1;
-                SymbolId::new(lane, *next - 1)
-            }
-        };
-        self.assigned[new] = Some(id);
         let (file, sym, content, lang) =
             (self.news[new].file, self.news[new].sym, self.news[new].content, self.news[new].parsed.lang);
         let parent = self.news[new].parent.and_then(|p| self.assigned[p]);
+        let free =
+            |id: &SymbolId, given: &HashSet<SymbolId>| self.table.get(*id).is_none() && !given.contains(id);
+        let id = match self.known[new].filter(|id| free(id, &self.given)) {
+            Some(id) => id,
+            // A symbol that was here under this name and went away: it is back.
+            None => {
+                let back = self
+                    .gone
+                    .get_mut(&(file.to_owned(), parent, sym.kind, sym.name.clone()))
+                    .and_then(|ids| {
+                        while let Some(id) = ids.pop_front() {
+                            if self.table.get(id).is_none() && !self.given.contains(&id) {
+                                return Some(id);
+                            }
+                        }
+                        None
+                    });
+                match back {
+                    Some(id) => id,
+                    None => {
+                        *next += 1;
+                        SymbolId::new(lane, *next - 1)
+                    }
+                }
+            }
+        };
+        self.given.insert(id);
+        self.assigned[new] = Some(id);
         let text = self.blob(text(content, &sym.range));
         ops.push(OpKind::AddSymbol {
             sym: Symbol {

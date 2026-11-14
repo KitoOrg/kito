@@ -16,7 +16,7 @@
 //! symbols keep the IDs they had in the lane.
 
 use crate::error::{Error, Result};
-use crate::repo::Repo;
+use crate::repo::{Repo, Unsettled};
 use kito_core::{
     BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId, Resolution,
     SymbolId, SymbolTable, Tree, TreeEntry, Verification,
@@ -240,6 +240,14 @@ impl Repo {
             self.store.put_conflict(&moot)?;
         }
         if outcome.files.is_empty() {
+            // The decisions taken left the main lane as it is: they are
+            // applied by doing nothing.
+            for id in &settled {
+                if let Some(mut conflict) = self.store.conflict(*id).cloned() {
+                    conflict.resolved_by = self.main.head;
+                    self.store.put_conflict(&conflict)?;
+                }
+            }
             // Nothing the main lane does not have: the lane just catches up.
             let base = self.lanes[&lane].record.base;
             let base = self.latest_checkpoint_at_head().unwrap_or(base);
@@ -432,7 +440,7 @@ impl Repo {
         let ops = self.with(LaneId::MAIN, |repo, work| {
             let human = std::mem::replace(&mut work.author, signer);
             work.merge_parent = lane_head;
-            let recorded = repo.capture_work(work, paths, Some(intent.id), &identities);
+            let recorded = repo.capture_work(work, paths, Some(intent.id), &identities, Unsettled::Trust);
             work.merge_parent = None;
             work.author = human;
             recorded
@@ -531,6 +539,7 @@ impl Repo {
         at.work.symbols = symbols.clone();
         at.work.symbols.reserve(lane, at.record.next_symbol);
         at.work.last_clean.clear();
+        at.work.gone.clear();
         at.work.head = Some(main_head);
         at.base_tree = tree;
         at.base_symbols = symbols;

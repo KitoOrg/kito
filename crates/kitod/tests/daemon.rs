@@ -268,3 +268,48 @@ fn without_a_watcher_the_daemon_polls() {
     );
     stop(root, &mut client);
 }
+
+#[test]
+fn a_save_that_takes_its_time_is_captured_once_it_is_complete() {
+    use std::io::Write;
+    let tmp = new_repo();
+    let root = tmp.path();
+    let mut client = start(root);
+    let functions = |n: usize, last: &str| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "export function f{i}(): string {{\n  return \"{}\";\n}}\n",
+                    if i + 1 == n { last } else { "same" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/m.ts"), functions(5, "before")).unwrap();
+    let _: Value = client.call("sync", json!({})).unwrap();
+    let before = ops(&mut client).len();
+
+    // A program saves the file the usual way, emptying it first, and is
+    // held up for a good while before it writes; then it writes in two
+    // steps. Far longer than the debounce: the daemon looks at the file in
+    // the meantime, and must not take what it sees for the save.
+    let mut file = fs::File::create(root.join("src/m.ts")).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let text = functions(5, "after");
+    let (first, second) = text.split_at(text.find("export function f2").unwrap());
+    file.write_all(first.as_bytes()).unwrap();
+    file.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    file.write_all(second.as_bytes()).unwrap();
+    drop(file);
+    let _: Value = client.call("sync", json!({})).unwrap();
+
+    // One change of the file, one function whose body changed: no symbol
+    // was ever taken for removed.
+    let all = ops(&mut client);
+    let new: Vec<&str> = all[..all.len() - before].iter().map(|(op, _)| op.as_str()).collect();
+    assert_eq!(new, ["ModifyBody", "TextEdit"], "{all:?}");
+    stop(root, &mut client);
+}

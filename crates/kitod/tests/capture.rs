@@ -876,3 +876,97 @@ fn an_imported_repository_gets_its_symbols_analyzed() {
         .iter()
         .all(|i| !matches!(i, LogItem::Op { op, .. } if op == "AddSymbol")));
 }
+
+#[test]
+fn a_file_caught_in_the_middle_of_a_save_is_not_captured_cut_short() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    let functions = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("export function f{i}(): number {{\n  return {i};\n}}\n"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    write(root, "src/m.ts", &functions(4));
+    repo.scan().unwrap();
+    let ids: Vec<SymbolId> =
+        (0..4).map(|i| repo.symbols().find(Path::new("src/m.ts"), &format!("f{i}"))[0]).collect();
+    std::thread::sleep(kitod::repo::SETTLE * 2);
+
+    // A program is saving the file: it has emptied it and written the first
+    // half, which happens to be valid code. A capture that follows the file
+    // events arrives right now: it leaves the file alone.
+    write(root, "src/m.ts", &functions(2));
+    assert!(repo.capture_events(LaneId::MAIN, [PathBuf::from("src/m.ts")]).unwrap().is_empty());
+    assert!(repo.has_deferred());
+    assert_eq!(repo.symbols().len(), 4, "nothing was removed");
+    // The save completes (with an edit to the last function).
+    write(root, "src/m.ts", &functions(4).replace("return 3;", "return 33;"));
+    assert!(repo.capture_deferred().unwrap().is_empty(), "still too fresh");
+    std::thread::sleep(kitod::repo::SETTLE * 2);
+    let ops = repo.capture_deferred().unwrap();
+    assert_eq!(kinds(&ops), ["TextEdit", "ModifyBody"]);
+    assert!(!repo.has_deferred());
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            repo.symbols().find(Path::new("src/m.ts"), &format!("f{i}")),
+            [*id],
+            "f{i} is the same symbol"
+        );
+    }
+
+    // A barrier (`kito sync`, an integration) waits for the file to settle
+    // instead: when it returns, what is on disk is in the log.
+    write(root, "src/m.ts", &functions(5));
+    let started = std::time::Instant::now();
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit", "AddSymbol", "ModifyBody"]);
+    assert!(started.elapsed() >= kitod::repo::SETTLE / 2, "{:?}", started.elapsed());
+    assert!(repo.scan().unwrap().is_empty());
+}
+
+#[test]
+fn what_is_removed_and_then_restored_is_the_same_symbol() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut repo = Repo::init(root).unwrap();
+    write(root, "src/auth.ts", AUTH_TS);
+    repo.scan().unwrap();
+    repo.checkpoint("with the function").unwrap();
+    let function = repo.symbols().find(Path::new("src/auth.ts"), "getUser")[0];
+    let method = repo.symbols().find(Path::new("src/auth.ts"), "Session.isValid")[0];
+
+    // The function is cut out in one save and pasted back in a later one.
+    let start = AUTH_TS.find("export function getUser").unwrap();
+    let end = AUTH_TS.find("export class Session").unwrap();
+    write(root, "src/auth.ts", &format!("{}{}", &AUTH_TS[..start], &AUTH_TS[end..]));
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit", "RemoveSymbol"]);
+    assert!(repo.symbols().get(function).is_none());
+    write(root, "src/auth.ts", AUTH_TS);
+    assert_eq!(kinds(&repo.scan().unwrap()), ["TextEdit", "AddSymbol"]);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "getUser"), [function]);
+    assert_eq!(
+        story(&repo, "src/auth.ts", "getUser"),
+        ["function `getUser` created in src/auth.ts", "removed", "restored in src/auth.ts"]
+    );
+
+    // A whole file emptied and written again: the class and its methods too.
+    write(root, "src/auth.ts", "");
+    repo.scan().unwrap();
+    assert_eq!(repo.symbols().len(), 0);
+    write(root, "src/auth.ts", AUTH_TS);
+    repo.scan().unwrap();
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "getUser"), [function]);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "Session.isValid"), [method]);
+
+    // A rollback that brings back what a later save removed.
+    fs::remove_file(root.join("src/auth.ts")).unwrap();
+    repo.scan().unwrap();
+    assert_eq!(repo.symbols().len(), 0);
+    repo.rollback("ckpt#1", &[], false).unwrap();
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "getUser"), [function]);
+    assert_eq!(repo.symbols().find(Path::new("src/auth.ts"), "Session.isValid"), [method]);
+    assert!(repo.store().verify().unwrap().is_ok());
+}

@@ -188,7 +188,7 @@ impl Repo {
         let file = entry.file.clone();
         let ops = self.with(lane, |repo, work| {
             let intent = work.intent;
-            repo.capture_work(work, [file], intent, &identities)
+            repo.capture_work(work, [file], intent, &identities, crate::repo::Unsettled::Trust)
         })?;
         Ok(RenameResult {
             symbol: id.to_string(),

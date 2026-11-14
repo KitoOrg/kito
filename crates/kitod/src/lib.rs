@@ -16,6 +16,7 @@ pub mod repo;
 pub mod rpc;
 pub mod semantic;
 pub mod server;
+pub mod simulate;
 
 pub use error::{Error, Result};
 pub use repo::Repo;

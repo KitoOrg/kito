@@ -567,6 +567,42 @@ fn identities_known_in_advance_overrule_the_heuristics() {
 }
 
 #[test]
+fn a_removed_symbol_that_comes_back_gets_its_id_again() {
+    let class = "export class Session {\n  isValid(now: number): boolean {\n    return this.expires > now;\n  }\n\n  refresh(now: number): void {\n    this.expires = now + 60;\n  }\n}\n";
+    let mut w = World::default();
+    w.step(&[("s.ts", Some(class))]);
+    let (session, refresh) = (w.id("s.ts", "Session"), w.id("s.ts", "Session.refresh"));
+
+    // The file is emptied (a save caught half-way, a rollback, a cut).
+    assert_eq!(
+        w.step(&[("s.ts", Some(""))]),
+        ["Remove Session.isValid", "Remove Session.refresh", "Remove Session"]
+    );
+    // What went away, as whoever recorded the removals remembers it.
+    let mut identities = Identities::new();
+    identities.gone(Path::new("s.ts"), None, SymbolKind::Class, "Session", session);
+    identities.gone(Path::new("s.ts"), Some(session), SymbolKind::Method, "refresh", refresh);
+
+    // It comes back, with one method changed and one that was never told
+    // about: the class and the remembered method are the ones they were.
+    let back = class.replace("now + 60", "now + 120");
+    let ops = w.step_knowing(&[("s.ts", Some(&back))], true, &identities);
+    assert_eq!(ops, ["Add Class Session", "Add Method Session.isValid", "Add Method Session.refresh"]);
+    assert_eq!((w.id("s.ts", "Session"), w.id("s.ts", "Session.refresh")), (session, refresh));
+    assert_ne!(w.id("s.ts", "Session.isValid").seq(), 1, "a new symbol, with a new ID");
+
+    // Somewhere else, or under another name, it is not the same symbol; and
+    // an ID that is in use is not given twice.
+    let mut identities = Identities::new();
+    identities.gone(Path::new("s.ts"), None, SymbolKind::Class, "Session", session);
+    identities.gone(Path::new("other.ts"), None, SymbolKind::Class, "Session", SymbolId::new(LaneId(9), 9));
+    let ops = w.step_knowing(&[("t.ts", Some(class))], true, &identities);
+    assert_eq!(ops.len(), 3);
+    assert_ne!(w.id("t.ts", "Session"), session);
+    assert_eq!(w.id("t.ts", "Session").origin(), LaneId::MAIN);
+}
+
+#[test]
 fn additions_removals_and_overloads() {
     let mut w = World::default();
     let v1 = "function f(a: string): void;\nfunction f(a: number): void;\nfunction f(a: any) { console.log(a); }\n";

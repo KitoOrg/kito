@@ -434,7 +434,7 @@ pub(crate) fn why(
             intent: op.intent.and_then(|i| store.intent(&i)).map(|i| i.summary.clone()),
         };
         let mut steps = Vec::new();
-        let mut born = false;
+        let (mut born, mut gone) = (false, false);
         let mut at_file: Option<PathBuf> = None;
         let mut follow_renames = |before: Option<Hlc>,
                                   at_file: &mut Option<PathBuf>,
@@ -461,16 +461,24 @@ pub(crate) fn why(
                     table.qualified_name(*container).or_else(|| last_known_name(store, *container));
                 what = format!("{what}, along with `{}`", container.unwrap_or_default());
             }
-            // A symbol born on another lane arrives here with a second
-            // `AddSymbol`: not a creation, an arrival.
-            let arrival = matches!(op.kind, OpKind::AddSymbol { .. }) && via.is_none() && born;
-            born |= matches!(op.kind, OpKind::AddSymbol { .. }) && via.is_none();
-            if arrival && op.lane == lane {
+            // An `AddSymbol` for a symbol that already has a story is not a
+            // creation: the symbol is back after a removal, or it arrives
+            // here from the lane it was born on.
+            let added = matches!(op.kind, OpKind::AddSymbol { .. }) && via.is_none();
+            let removed = matches!(op.kind, OpKind::RemoveSymbol { .. }) && via.is_none();
+            if added && born && gone {
+                if let OpKind::AddSymbol { sym, .. } = &op.kind {
+                    what = format!("restored in {}", sym.file.display());
+                }
+            } else if added && born && op.lane == lane {
                 what = match lane.is_main() {
                     true => "integrated into the main lane".to_owned(),
                     false => format!("arrived on {lane}"),
                 };
-            } else if op.lane != lane {
+            }
+            born |= added;
+            gone = (gone || removed) && !added;
+            if op.lane != lane {
                 what = format!("{what}, on {}", op.lane);
             }
             steps.push(step(op, what));

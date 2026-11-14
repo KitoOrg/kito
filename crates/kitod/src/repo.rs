@@ -10,7 +10,7 @@ use crate::ignore::IgnoreRules;
 use crate::semantic::{self, Why};
 use kito_core::{
     codec, Author, BlobId, Checkpoint, CheckpointId, FileMode, Hlc, HlcClock, Intent, IntentId, LaneId, Op,
-    OpId, OpKind, SymbolTable, Tree, TreeEntry,
+    OpId, OpKind, SymbolId, SymbolTable, Tree, TreeEntry,
 };
 use kito_diff::ast::Identities;
 use kito_diff::fileops::{ops_for_changes, Snapshot};
@@ -18,7 +18,7 @@ use kito_diff::text;
 use kito_store::fs::atomic_write;
 use kito_store::{Store, STORE_DIR};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,179 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// second write in the same instant might not change its size and
 /// modification time, and would escape the scan.
 const RACY_WINDOW: Duration = Duration::from_millis(100);
+
+/// A file modified less than this long ago may be in the middle of being
+/// written: most programs save by emptying the file and then writing it,
+/// and a capture that falls in between would record a file cut short (and,
+/// if what is there happens to parse, the removal of every symbol after
+/// the cut).
+pub const SETTLE: Duration = Duration::from_millis(25);
+
+/// Files that programs have written to and not yet closed, as the file
+/// events tell (where the system reports when a file is closed: Linux).
+///
+/// A program that saves by emptying a file and then writing it can be
+/// stopped in between for any length of time; no waiting is long enough to
+/// be sure. Until the file is closed, it is not captured.
+#[derive(Default)]
+pub struct Writing {
+    open: std::sync::Mutex<HashMap<PathBuf, Instant>>,
+}
+
+impl Writing {
+    /// A program that keeps a file open and writes to it now and then (a
+    /// log) is not waited for longer than this after its last write.
+    const PATIENCE: Duration = Duration::from_secs(2);
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Instant>> {
+        self.open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The file at this absolute path was written to.
+    pub fn modified(&self, path: &Path) {
+        let mut open = self.lock();
+        if open.len() > 4096 {
+            open.retain(|_, at| at.elapsed() < Self::PATIENCE);
+        }
+        open.insert(path.to_owned(), Instant::now());
+    }
+
+    /// A program that had the file open for writing closed it.
+    pub fn closed(&self, path: &Path) {
+        self.lock().remove(path);
+    }
+
+    /// `true` if the file was written to and has not been closed since.
+    pub fn is_open(&self, path: &Path) -> bool {
+        let mut open = self.lock();
+        match open.get(path).map(|at| at.elapsed() < Self::PATIENCE) {
+            Some(true) => true,
+            Some(false) => {
+                open.remove(path);
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+/// What a capture finds at a path.
+enum OnDisk {
+    File(Vec<u8>, FileMode, Box<fs::Metadata>),
+    /// Nothing that belongs in the tree: no file, or a directory, a socket.
+    Missing,
+    TooLarge,
+    /// A file that is being written: to be looked at again.
+    Later,
+}
+
+/// Time left before something modified at the time `meta` says has settled.
+fn settle_left(meta: &fs::Metadata) -> Option<Duration> {
+    // A date in the future says nothing: the file is taken as it is.
+    let age = meta.modified().ok()?.elapsed().ok()?;
+    SETTLE.checked_sub(age).filter(|left| !left.is_zero())
+}
+
+/// Reads a file for a capture, making sure it is not caught in the middle
+/// of a save. The check is made on the very metadata the read starts from,
+/// and again after the read: a file emptied an instant ago, or changed
+/// while it was being read, is not what its author means to save.
+/// `tracked`: the tree has a file at this path.
+fn read_settled(
+    abs: &Path,
+    tracked: bool,
+    max_bytes: u64,
+    unsettled: Unsettled,
+    writing: &Writing,
+) -> OnDisk {
+    // Bounded: a file that never stops changing is, in the end, read as it is.
+    const ATTEMPTS: usize = 1200;
+    for attempt in 1..=ATTEMPTS {
+        // What to do about something unsettled: `true` to look again.
+        let retry = |left: Duration| match unsettled {
+            Unsettled::Wait if attempt < ATTEMPTS => {
+                std::thread::sleep(left);
+                Some(true)
+            }
+            Unsettled::Defer => Some(false),
+            _ => None,
+        };
+        // Being written right now, by the events' account.
+        if writing.is_open(abs) {
+            match retry(Duration::from_millis(2)) {
+                Some(true) => continue,
+                Some(false) => return OnDisk::Later,
+                None => {}
+            }
+        }
+        match fs::symlink_metadata(abs) {
+            Ok(meta) if meta.is_file() => {
+                if meta.len() > max_bytes {
+                    return OnDisk::TooLarge;
+                }
+                if let Some(again) = settle_left(&meta).and_then(retry) {
+                    match again {
+                        true => continue,
+                        false => return OnDisk::Later,
+                    }
+                }
+                let mode = match meta.permissions().mode() & 0o111 {
+                    0 => FileMode::Regular,
+                    _ => FileMode::Executable,
+                };
+                // If the file disappears between the stat and the read, it is a removal.
+                let Ok(content) = fs::read(abs) else { return OnDisk::Missing };
+                let unchanged =
+                    fs::symlink_metadata(abs).is_ok_and(|after| FileStat::of(&after) == FileStat::of(&meta));
+                if !unchanged && unsettled != Unsettled::Trust {
+                    match retry(Duration::from_millis(1)) {
+                        Some(true) => continue,
+                        Some(false) => return OnDisk::Later,
+                        None => {}
+                    }
+                }
+                return OnDisk::File(content, mode, Box::new(meta));
+            }
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return match fs::read_link(abs) {
+                    Ok(target) => {
+                        let target = target.to_string_lossy().into_owned().into_bytes();
+                        OnDisk::File(target, FileMode::Symlink, Box::new(meta))
+                    }
+                    Err(_) => OnDisk::Missing,
+                };
+            }
+            // Directories, sockets, fifos: they are not files of the tree.
+            Ok(_) => return OnDisk::Missing,
+            Err(_) => {
+                // A tracked file that is not there, in a directory that
+                // changed an instant ago: it may be between the removal and
+                // the creation of a save that replaces it.
+                let directory = abs.parent().and_then(|dir| fs::symlink_metadata(dir).ok());
+                let unsettled_dir = directory.as_ref().and_then(settle_left).filter(|_| tracked);
+                match unsettled_dir.and_then(retry) {
+                    Some(true) => continue,
+                    Some(false) => return OnDisk::Later,
+                    None => return OnDisk::Missing,
+                }
+            }
+        }
+    }
+    OnDisk::Missing
+}
+
+/// What a capture does with a file that has not settled yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unsettled {
+    /// Waits for it: the capture is a barrier, what is on disk when it
+    /// returns is in the log.
+    Wait,
+    /// Leaves it for the next capture: file events are being followed, and
+    /// more will come.
+    Defer,
+    /// Reads it as it is: the daemon itself has just written it.
+    Trust,
+}
 
 /// Layout version of the saved state of the main lane.
 const STATE_VERSION: u32 = 2;
@@ -190,6 +363,46 @@ pub(crate) struct Work {
     /// A second parent for the next op recorded: the head of the lane whose
     /// work that op brings in.
     pub(crate) merge_parent: Option<OpId>,
+    /// Files a capture found still being written: the next one looks again.
+    pub(crate) deferred: BTreeSet<PathBuf>,
+    /// Symbols removed lately: if one comes back, it gets its ID again.
+    pub(crate) gone: Gone,
+}
+
+/// The symbols a lane removed lately, with where they were.
+#[derive(Default)]
+pub(crate) struct Gone {
+    symbols: VecDeque<(SymbolId, kito_core::SymbolEntry)>,
+}
+
+impl Gone {
+    /// How many removed symbols are remembered.
+    const KEPT: usize = 20_000;
+
+    fn note(&mut self, id: SymbolId, entry: kito_core::SymbolEntry) {
+        if self.symbols.len() == Self::KEPT {
+            self.symbols.pop_front();
+        }
+        self.symbols.push_back((id, entry));
+    }
+
+    fn forget(&mut self, id: SymbolId) {
+        self.symbols.retain(|(gone, _)| *gone != id);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.symbols.clear();
+    }
+
+    /// Tells the differ, for the files a capture touches.
+    fn tell(&self, identities: &mut Identities, files: &BTreeSet<&Path>) {
+        // The most recent removal of a name is the first to come back.
+        for (id, entry) in self.symbols.iter().rev() {
+            if files.contains(entry.file.as_path()) {
+                identities.gone(&entry.file, entry.parent, entry.kind, &entry.name, *id);
+            }
+        }
+    }
 }
 
 impl Work {
@@ -207,6 +420,8 @@ impl Work {
             stat: HashMap::new(),
             intent: None,
             merge_parent: None,
+            deferred: BTreeSet::new(),
+            gone: Gone::default(),
         }
     }
 
@@ -229,6 +444,9 @@ pub struct Repo {
     pub(crate) parse_cache: semantic::ParseCache,
     pub(crate) clock: HlcClock,
     pub(crate) counters: Counters,
+    /// Files being written right now, kept up to date by whoever follows
+    /// the file events.
+    pub(crate) writing: std::sync::Arc<Writing>,
 }
 
 fn hex20(oid: &[u8; 20]) -> String {
@@ -296,6 +514,7 @@ impl Repo {
             parse_cache: semantic::ParseCache::default(),
             clock: HlcClock::new(),
             counters: Counters::default(),
+            writing: std::sync::Arc::default(),
         };
         repo.load_state()?;
         repo.load_lanes()?;
@@ -313,6 +532,12 @@ impl Repo {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where whoever follows the file events notes which files are being
+    /// written: captures leave those alone until they are closed.
+    pub fn writing(&self) -> std::sync::Arc<Writing> {
+        self.writing.clone()
     }
 
     pub fn config(&self) -> &Config {
@@ -482,7 +707,7 @@ impl Repo {
             }
         }
         let intent = work.intent;
-        self.capture_work(work, candidates, intent, &Identities::new())
+        self.capture_work(work, candidates, intent, &Identities::new(), Unsettled::Wait)
     }
 
     /// Non-ignored files and links under `dir`, without following links.
@@ -519,8 +744,40 @@ impl Repo {
     ) -> Result<Vec<Op>> {
         self.with(lane, |repo, work| {
             let intent = work.intent;
-            repo.capture_work(work, paths, intent, &Identities::new())
+            repo.capture_work(work, paths, intent, &Identities::new(), Unsettled::Wait)
         })
+    }
+
+    /// Captures paths reported by file events. A file that is still being
+    /// written is left for later: see [`Repo::has_deferred`].
+    pub fn capture_events(
+        &mut self,
+        lane: LaneId,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Vec<Op>> {
+        self.with(lane, |repo, work| {
+            let intent = work.intent;
+            repo.capture_work(work, paths, intent, &Identities::new(), Unsettled::Defer)
+        })
+    }
+
+    /// `true` if a capture left files for later because they were still
+    /// being written.
+    pub fn has_deferred(&self) -> bool {
+        !self.main.deferred.is_empty() || self.lanes.values().any(|at| !at.work.deferred.is_empty())
+    }
+
+    /// Looks again at the files left for later.
+    pub fn capture_deferred(&mut self) -> Result<Vec<Op>> {
+        let waiting: Vec<LaneId> = std::iter::once(LaneId::MAIN)
+            .filter(|_| !self.main.deferred.is_empty())
+            .chain(self.lanes.iter().filter(|(_, at)| !at.work.deferred.is_empty()).map(|(lane, _)| *lane))
+            .collect();
+        let mut ops = Vec::new();
+        for lane in waiting {
+            ops.extend(self.capture_events(lane, [])?);
+        }
+        Ok(ops)
     }
 
     /// Like [`Repo::capture`], declaring the "why" of the recorded ops.
@@ -529,7 +786,10 @@ impl Repo {
         paths: impl IntoIterator<Item = PathBuf>,
         intent: Option<IntentId>,
     ) -> Result<Vec<Op>> {
-        self.with(LaneId::MAIN, |repo, work| repo.capture_work(work, paths, intent, &Identities::new()))
+        // The files were written by the rollback itself.
+        self.with(LaneId::MAIN, |repo, work| {
+            repo.capture_work(work, paths, intent, &Identities::new(), Unsettled::Trust)
+        })
     }
 
     /// Captures paths of a lane's working directory. `identities`: symbols
@@ -540,6 +800,7 @@ impl Repo {
         paths: impl IntoIterator<Item = PathBuf>,
         intent: Option<IntentId>,
         identities: &Identities,
+        unsettled: Unsettled,
     ) -> Result<Vec<Op>> {
         // 1. From the reported paths to the individual files to look at.
         let mut files: BTreeSet<PathBuf> = BTreeSet::new();
@@ -570,6 +831,9 @@ impl Repo {
             }
         }
 
+        // Files an earlier capture found still being written.
+        files.extend(std::mem::take(&mut work.deferred));
+
         // 2. On-disk state of each file.
         let mut changes: BTreeMap<PathBuf, Option<Snapshot>> = BTreeMap::new();
         let mut stats: Vec<(PathBuf, Option<FileStat>)> = Vec::new();
@@ -582,25 +846,19 @@ impl Repo {
                 continue;
             }
             let abs = work.root.join(&rel);
-            let on_disk = match fs::symlink_metadata(&abs) {
-                Ok(meta) if meta.is_file() => {
-                    if meta.len() > self.config.capture.max_file_bytes {
-                        self.counters.skipped_too_large += 1;
-                        continue;
-                    }
-                    let mode = if meta.permissions().mode() & 0o111 != 0 {
-                        FileMode::Executable
-                    } else {
-                        FileMode::Regular
-                    };
-                    // If the file disappears between the stat and the read, it is a removal.
-                    fs::read(&abs).ok().map(|content| (content, mode, meta))
+            let limit = self.config.capture.max_file_bytes;
+            let on_disk = match read_settled(&abs, work.tree.contains(&rel), limit, unsettled, &self.writing)
+            {
+                OnDisk::File(content, mode, meta) => Some((content, mode, *meta)),
+                OnDisk::Missing => None,
+                OnDisk::TooLarge => {
+                    self.counters.skipped_too_large += 1;
+                    continue;
                 }
-                Ok(meta) if meta.file_type().is_symlink() => fs::read_link(&abs).ok().map(|target| {
-                    (target.to_string_lossy().into_owned().into_bytes(), FileMode::Symlink, meta)
-                }),
-                // Directories, sockets, fifos: they are not files of the tree.
-                _ => None,
+                OnDisk::Later => {
+                    work.deferred.insert(rel);
+                    continue;
+                }
             };
             match on_disk {
                 Some((content, mode, meta)) => {
@@ -631,6 +889,12 @@ impl Repo {
         let file_ops = ops_for_changes(&work.tree, &changes, &mut |blob| store.get_blob(blob).ok().flatten());
         // The file-level ops carry the new contents; what the change means
         // for the symbols follows.
+        // Symbols that went away from these files and may be coming back.
+        let mut identities = identities.clone();
+        let touched: BTreeSet<&Path> =
+            file_ops.iter().flat_map(|op| op.paths()).map(|p| p.as_path()).collect();
+        work.gone.tell(&mut identities, &touched);
+        let identities = &identities;
         let symbolic = semantic::symbol_ops(
             &self.store,
             &work.tree,
@@ -671,6 +935,15 @@ impl Repo {
         for kind in kinds {
             let parents = work.head.into_iter().chain(work.merge_parent.take());
             let op = Op::new(parents, work.lane, work.author.clone(), self.clock.now(), kind, intent)?;
+            match &op.kind {
+                OpKind::RemoveSymbol { id } => {
+                    if let Some(entry) = work.symbols.get(*id) {
+                        work.gone.note(*id, entry.clone());
+                    }
+                }
+                OpKind::AddSymbol { sym, .. } => work.gone.forget(sym.id),
+                _ => {}
+            }
             work.tree.apply(&op.kind)?;
             work.symbols.apply(&op.kind)?;
             self.store.append_op(&op)?;
