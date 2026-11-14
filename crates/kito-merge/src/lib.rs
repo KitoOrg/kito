@@ -25,11 +25,11 @@
 //! The crate does no I/O: it is given the three states and a way to read a
 //! blob, and returns the files that change and the conflicts found.
 
-use kito_core::{BlobId, ConflictKind, FileMode, SymbolId, SymbolKind, SymbolTable, Tree};
+use kito_core::{BlobId, ConflictKind, FileMode, SymbolId, SymbolTable, Tree};
 use kito_diff::ast::Identities;
 use kito_diff::text::{is_binary, merge3};
 use kito_parse::{dialect_for_path, parse, ParsedFile};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -267,24 +267,9 @@ impl View {
         let Some(parsed) = parsed else { return view };
 
         // The symbols the history knows in this file, recognized as the
-        // differ does: by parent, kind and name, namesakes in order.
-        let mut known: HashMap<(Option<SymbolId>, SymbolKind, &str), VecDeque<SymbolId>> = HashMap::new();
-        let mut expected = 0;
-        for (id, entry) in table.in_file(path) {
-            known.entry((entry.parent, entry.kind, entry.name.as_str())).or_default().push_back(id);
-            expected += 1;
-        }
-        let mut ids: Vec<Option<SymbolId>> = Vec::with_capacity(parsed.symbols.len());
-        for sym in &parsed.symbols {
-            let parent = match sym.parent {
-                None => Some(None),
-                Some(p) => ids[p].map(Some),
-            };
-            let id = parent
-                .and_then(|parent| known.get_mut(&(parent, sym.kind, sym.name.as_str())))
-                .and_then(VecDeque::pop_front);
-            ids.push(id);
-        }
+        // differ does.
+        let ids = kito_diff::ast::identify(table, path, &parsed);
+        let expected = table.in_file(path).count();
         let mut structural = !parsed.has_errors && ids.iter().all(Option::is_some) && ids.len() == expected;
 
         // Scopes: the file, and every symbol that contains others.

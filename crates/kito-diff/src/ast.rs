@@ -179,6 +179,29 @@ struct Differ<'a> {
     stored: HashSet<BlobId>,
 }
 
+/// Which symbol of the history each symbol of a parsed file is: recognized
+/// as the differ does, by enclosing symbol, kind and name, namesakes in
+/// order. `None` for the ones the history does not know.
+pub fn identify(table: &SymbolTable, path: &Path, parsed: &ParsedFile) -> Vec<Option<SymbolId>> {
+    let mut known: HashMap<(Option<SymbolId>, kito_core::SymbolKind, &str), VecDeque<SymbolId>> =
+        HashMap::new();
+    for (id, entry) in table.in_file(path) {
+        known.entry((entry.parent, entry.kind, entry.name.as_str())).or_default().push_back(id);
+    }
+    let mut ids: Vec<Option<SymbolId>> = Vec::with_capacity(parsed.symbols.len());
+    for sym in &parsed.symbols {
+        let parent = match sym.parent {
+            None => Some(None),
+            Some(p) => ids[p].map(Some),
+        };
+        let id = parent
+            .and_then(|parent| known.get_mut(&(parent, sym.kind, sym.name.as_str())))
+            .and_then(VecDeque::pop_front);
+        ids.push(id);
+    }
+    ids
+}
+
 /// Compares the old and the new version of the changed files and returns
 /// the symbolic ops that lead from one to the other. New symbols get IDs
 /// from `lane`'s counter.

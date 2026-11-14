@@ -37,6 +37,8 @@ pub struct ParsedSymbol {
     pub parent: Option<usize>,
     /// Bytes of the whole definition.
     pub range: Range<usize>,
+    /// Bytes of the name, where the definition gives it.
+    pub name_range: Range<usize>,
     /// Bytes of the definition up to its body: the part that declares it.
     pub header: Range<usize>,
     /// Line of the definition, from 1.
@@ -184,6 +186,14 @@ impl Parsed {
     pub fn source(&self) -> &[u8] {
         &self.source
     }
+
+    pub(crate) fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    pub(crate) fn root(&self) -> Node<'_> {
+        self.tree.root_node()
+    }
 }
 
 /// Parses `source` and extracts its symbols. `None` only if the parser gives
@@ -302,6 +312,7 @@ pub fn parse_reusing(dialect: Dialect, source: &[u8], previous: Option<&Parsed>)
                     name,
                     parent: parents[i],
                     range: f.def.clone(),
+                    name_range: f.name.clone(),
                     header: f.def.start..f.body.as_ref().map_or(f.def.end, |b| b.start.max(f.def.start)),
                     line: f.line,
                     signature: hash_tokens(source, own_name, &signature),

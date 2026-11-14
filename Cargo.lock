@@ -1803,6 +1803,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kito-semantic"
+version = "0.3.1"
+dependencies = [
+ "kito-core",
+ "kito-diff",
+ "kito-parse",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "kito-store"
 version = "0.3.1"
 dependencies = [
