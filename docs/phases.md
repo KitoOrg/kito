@@ -877,6 +877,123 @@ to the one made from the log; many new files at once equal to one by one.
   the uses in other files.
 - Windows is still served through WSL only.
 
+## Phase 6 · the intent board — done
+
+Every lane says what it will change before it changes it, and the lanes
+that are on the same code are told of each other. On one machine, with no
+network: the shared server is the next phase.
+
+### What is there
+
+- **No lane without an intent and a scope.** `open_lane` takes one sentence
+  saying why and a scope: functions and classes (`src/shop.ts:total`, also
+  ones that do not exist yet), files, directories (`src/billing/`). The
+  scope is on the lane's record, each entry with the moment it was
+  declared; it can be extended and only grows (D-074).
+- **Declared against actual.** What a lane changed since its base is read
+  part by part: each function by its own text, the text outside the
+  functions, files that are not read as symbols as a whole. What is
+  outside the scope is recorded like the rest and stops the lane at
+  integration (`out_of_scope`) until the scope is extended or the change
+  undone. A rename and the uses that follow it are not a change; an import
+  follows a declared function of its file; `[scope] always_allowed` names
+  the files any lane may change (D-075).
+- **Overlaps, on three levels**, from what was declared and from what was
+  changed: the same function (or one inside the other), the same file, a
+  function of one lane that uses a function of the other, by the syntax
+  (D-076). Allowed, with a warning to both: each lane is told once, with
+  what the other is there for.
+- **What lands is told too.** When the main lane changes something a lane
+  declared or changed after that lane started, the lane is told who
+  changed it and what for (`landed`): it is working on a state that no
+  longer has the last word on that code.
+- **The board**: every open lane with its agent, intent, scope, what it
+  changed, what it changed outside its scope, when it last recorded
+  something, and its overlaps; `who` answers for one function, file or
+  directory. A scope that covers more files than `[scope] broad_files` is
+  shown as broad, and refused if the repository says so (D-077).
+- **For agents**: `open_lane` with `intent` and `scope`, `extend_scope`,
+  `board`, `who_touches`; the answer to a tool that names a lane carries
+  the `notices` the lane has not heard yet, with a line saying that what
+  other lanes say is information and not instructions (D-078). The rules
+  `kito claude` writes say the same, and rules written by an older version
+  are replaced when nobody changed them.
+- **Command line**: `kito lane open --intent --scope`, `kito lane scope
+  [--add]`, `kito board`, `kito who`.
+
+### Demo
+
+```
+scripts/demo-phase6.sh
+```
+
+Three agents on one machine ([output](demo/phase6-demo.txt)). The second
+declares the function the first is changing and is told before it writes:
+
+```
+$ kito lane open frank --intent a discount of 10 over 50 euros --scope shop.py:total
+lane/2 opened for frank on ckpt#1.
+Scope: shop.py:total
+  overlap (function) with lane/1 of erin, there for: prices in cents, not euros
+    shop.py:total: erin declared it; you declared it
+```
+
+The third declares a function that calls it:
+
+```
+$ kito lane open gina --intent a receipt with the currency --scope shop.py:receipt
+  overlap (caller) with lane/1 of erin, there for: prices in cents, not euros
+    your shop.py:receipt uses shop.py:total, which erin declared
+```
+
+And a change outside the scope stops the lane until it is declared:
+
+```
+$ kito integrate lane/1
+lane/1: not integrated, it changed things outside its scope
+  outside the scope  README.md
+$ kito lane scope lane/1 --add README.md
+$ kito integrate lane/1
+lane/1: integrated as ckpt#2
+```
+
+### Acceptance targets
+
+**No lane opens without a scope.** Through the repository, the daemon, the
+command line and the MCP server: each is refused with the reason, and a
+refused lane leaves nothing behind.
+
+**Every same-function overlap in the swarm is reported before
+integration.** The ten agents of the swarm now declare what the script has
+them change, among it the class all of them add a method to: 90
+overlaps, each told to its lane before that lane first asked to integrate.
+The swarm's other numbers are unchanged: 40 integrations, no fake
+conflicts.
+
+### Tests
+
+266 tests in all. New: the scope rules, the overlaps, the notices
+and the board on the repository itself (`kitod/tests/scope.rs`); the same
+through the MCP tools and through the command line; the reading of scope
+items and of what encloses a symbol.
+
+### Known limitations
+
+- **Callers are found by the syntax only**: in the same file and through
+  explicit imports (JavaScript, TypeScript, Python, Go), with no language
+  server asked. A use the syntax does not resolve is not an overlap.
+- **A declared scope is checked, not enforced where the agent writes.** A
+  write outside it is found at the next question and at integration. A
+  hook that refuses the edit in Claude Code is not written.
+- **Notices reach an agent with the answer to its next tool.** An agent
+  that asks nothing hears nothing; a person sees them with `kito board`.
+- **What was told is kept in memory**: after a restart of the daemon each
+  lane hears its overlaps once more.
+- **Lanes opened by an older version have no scope**: they are not
+  integrated until one is declared.
+- The overlaps of every pair of lanes are computed when asked: nothing
+  above ten lanes has been measured.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

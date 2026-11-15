@@ -402,12 +402,29 @@ fn lanes_integration_and_conflicts_from_the_command_line() {
     assert!(ok(root, &["lanes"]).contains("No open lanes"));
 
     // Two lanes, each with a working copy of its own.
-    let opened = ok(root, &["lane", "open", "alice", "--task", "floor the discount"]);
+    // No lane without saying why and what.
+    let refused = kito(root, &["lane", "open", "alice"]);
+    assert!(!refused.status.success());
+    let opened = ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "alice",
+            "--task",
+            "floor the discount",
+            "--intent",
+            "floor the discount",
+            "--scope",
+            "src/shop.ts",
+        ],
+    );
     assert!(
         opened.contains("lane/1 opened for alice on ckpt#1") && opened.contains("Working copy:"),
         "{opened}"
     );
-    let bob = json(root, &["lane", "open", "bob", "--json"]);
+    let bob =
+        json(root, &["lane", "open", "bob", "--intent", "the total", "--scope", "src/shop.ts", "--json"]);
     assert_eq!(bob["id"], "lane/2");
     let (alice_dir, bob_dir) =
         (root.join(".kito/lanes/1/work"), PathBuf::from(bob["workdir"].as_str().unwrap()));
@@ -623,5 +640,80 @@ fn the_log_is_short_however_often_a_file_is_saved() {
     assert!(newest.trim_start().starts_with(id), "{newest}");
     assert_eq!(ok(root, &["log", "-v", "-n", "1000"]).lines().count(), 71);
     assert_eq!(json(root, &["log", "--json", "-n", "5"]).as_array().unwrap().len(), 5);
+    ok(root, &["daemon", "stop"]);
+}
+
+const SHOP_PY: &str = "def total(price, quantity):\n    subtotal = price * quantity\n    tax = subtotal * 0.22\n    return subtotal + tax\n\n\ndef receipt(price, quantity):\n    return \"to pay: \" + str(total(price, quantity))\n";
+
+#[test]
+fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.py"), SHOP_PY).unwrap();
+    fs::write(root.join("README.md"), "# Shop\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+
+    let erin =
+        ok(root, &["lane", "open", "erin", "--intent", "prices in cents", "--scope", "src/shop.py:total"]);
+    assert!(erin.contains("Scope: src/shop.py:total") && !erin.contains("overlap"), "{erin}");
+    // The second is told before it writes a line, with what the first is there for.
+    let frank = ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "frank",
+            "--intent",
+            "a discount over 50",
+            "--scope",
+            "src/shop.py:total",
+            "README.md",
+        ],
+    );
+    assert!(frank.contains("overlap (function) with lane/1 of erin, there for: prices in cents"), "{frank}");
+    assert!(frank.contains("src/shop.py:total: erin declared it; you declared it"), "{frank}");
+    // A function that uses hers is an overlap too.
+    let gina =
+        ok(root, &["lane", "open", "gina", "--intent", "a nicer receipt", "--scope", "src/shop.py:receipt"]);
+    assert!(gina.contains("overlap (caller) with lane/1 of erin"), "{gina}");
+    assert!(gina.contains("your src/shop.py:receipt uses src/shop.py:total, which erin declared"), "{gina}");
+
+    let board = ok(root, &["board"]);
+    for needle in [
+        "lane/1  erin  active  prices in cents",
+        "  scope    src/shop.py:total",
+        "lane/2  frank  active  a discount over 50",
+        "  scope    src/shop.py:total, README.md",
+        "overlap (function) with lane/2 of frank, there for: a discount over 50",
+    ] {
+        assert!(board.contains(needle), "missing {needle:?} in:\n{board}");
+    }
+    let who = ok(root, &["who", "src/shop.py:total"]);
+    assert!(who.contains("lane/1 of erin (function)") && who.contains("lane/2 of frank (function)"), "{who}");
+    assert!(ok(root, &["who", "README.md"]).contains("lane/2 of frank (file)"));
+    assert!(ok(root, &["who", "src/other.py"]).contains("No open lane declared or changed src/other.py"));
+    assert_eq!(json(root, &["board", "--json"]).as_array().unwrap().len(), 3);
+
+    // A change outside the scope is recorded, shown, and stops the lane.
+    fs::write(root.join(".kito/lanes/1/work/README.md"), "# Shop, in cents\n").unwrap();
+    let refused = kito(root, &["integrate", "lane/1"]);
+    assert!(!refused.status.success());
+    let refused = String::from_utf8_lossy(&refused.stdout).into_owned();
+    assert!(refused.contains("lane/1: not integrated, it changed things outside its scope"), "{refused}");
+    assert!(refused.contains("  outside the scope  README.md"), "{refused}");
+    assert!(ok(root, &["lane", "status", "lane/1"]).contains("  outside the scope  README.md"));
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop\n");
+
+    // Declared, it goes in; the scope only grows.
+    let grown = ok(root, &["lane", "scope", "lane/1", "--add", "README.md"]);
+    assert!(grown.contains("Scope ............. src/shop.py:total, README.md"), "{grown}");
+    assert!(grown.contains("overlap (file) with lane/2 of frank"), "{grown}");
+    assert!(ok(root, &["integrate", "lane/1"]).contains("lane/1: integrated as ckpt#2"));
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop, in cents\n");
+    let scope = json(root, &["lane", "scope", "lane/2", "--json"]);
+    assert_eq!(scope["scope"], serde_json::json!(["src/shop.py:total", "README.md"]));
     ok(root, &["daemon", "stop"]);
 }

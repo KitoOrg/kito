@@ -417,6 +417,37 @@ pub struct Lane {
     /// this: IDs are not reused, even those of symbols that no longer exist.
     #[serde(default)]
     pub next_symbol: u64,
+    /// What the lane said it would change, in the order it said so. A scope
+    /// only grows: what was declared stays declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<ScopeEntry>,
+}
+
+/// Something a lane declares it will change, before it changes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScopeItem {
+    /// A function, class or type: the file it is in and its name, qualified
+    /// if needed (`Session.refresh`). `id` is the symbol it was when it was
+    /// declared; `None` for one that did not exist yet.
+    Symbol {
+        file: PathBuf,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<SymbolId>,
+    },
+    /// One file, which may not exist yet.
+    File(PathBuf),
+    /// Everything under a directory, the files that do not exist yet
+    /// included. The empty path is the whole repository.
+    Dir(PathBuf),
+}
+
+/// One entry of a lane's scope, with the moment it was declared.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeEntry {
+    pub item: ScopeItem,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

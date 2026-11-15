@@ -175,6 +175,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 task: None,
                 intent: None,
                 next_symbol: 0,
+                scope: Vec::new(),
             })
             .unwrap();
         store

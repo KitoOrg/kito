@@ -105,8 +105,8 @@ kito_part() {
   fi
   kito daemon stop > /dev/null
   run kito checkpoint -m "start"
-  run kito lane open alice --task "rename getUser to fetchUser"
-  run kito lane open bob --task "billing"
+  run kito lane open alice --intent "rename getUser to fetchUser" --scope src/auth.ts:getUser
+  run kito lane open bob --intent "billing" --scope src/billing.ts
 }
 
 if command -v typescript-language-server > /dev/null; then

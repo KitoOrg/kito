@@ -479,6 +479,10 @@ pub struct Repo {
     /// Files being written right now, kept up to date by whoever follows
     /// the file events.
     pub(crate) writing: std::sync::Arc<Writing>,
+    /// What each lane declared and changed, as last computed.
+    pub(crate) claims_cache: crate::scope::ClaimsCache,
+    /// What each lane was already told about the other lanes.
+    pub(crate) told: BTreeMap<LaneId, std::collections::BTreeSet<String>>,
 }
 
 fn hex20(oid: &[u8; 20]) -> String {
@@ -551,6 +555,8 @@ impl Repo {
             clock: HlcClock::new(),
             counters: Counters::default(),
             writing: std::sync::Arc::default(),
+            claims_cache: Default::default(),
+            told: BTreeMap::new(),
         };
         repo.load_state()?;
         repo.load_lanes()?;

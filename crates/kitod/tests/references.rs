@@ -67,8 +67,8 @@ fn project(semantic: &str) -> (tempfile::TempDir, PathBuf, Repo, PathBuf, PathBu
     write(&root, "src/auth.ts", AUTH);
     write(&root, "src/web.ts", WEB);
     repo.checkpoint("start").unwrap();
-    repo.open_lane("alice", None, None).unwrap();
-    repo.open_lane("bob", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
+    repo.open_lane("bob", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = repo.lane_info(LaneId(1)).unwrap().workdir.unwrap();
     let bob = repo.lane_info(LaneId(2)).unwrap().workdir.unwrap();
     (tmp, root, repo, alice, bob)
@@ -291,7 +291,7 @@ fn an_imported_index_carries_a_rename_without_a_language_server() {
     assert!(report.symbols >= 2, "{report:?}");
 
     // Alice renames the function where it is defined, and nowhere else.
-    repo.open_lane("alice", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = repo.lane_info(LaneId(1)).unwrap().workdir.unwrap();
     write(&alice, "src/auth.ts", &read(&alice, "src/auth.ts").replace("getUser", "fetchUser"));
     let result = repo.integrate(LaneId(1)).unwrap();

@@ -80,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut times = Vec::new();
     for round in 1..=5 {
         let started = Instant::now();
-        let lane = repo.open_lane(&format!("agent-{round}"), None, None)?;
+        let lane =
+            repo.open_lane(&format!("agent-{round}"), None, None, "work", &kitod::scope::everything())?;
         let took = started.elapsed().as_secs_f64() * 1000.0;
         times.push(took);
         println!("| lane {round} ({}) | {took:.0} ms |", lane.id);
@@ -122,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[git]\nexport_on_checkpoint = false\n[semantic]\nservers = {}\n",
         )?;
         repo.reload_config()?;
-        let lane = repo.open_lane("renamer", None, None)?.id;
+        let lane = repo.open_lane("renamer", None, None, "work", &kitod::scope::everything())?.id;
         let lane: LaneId = lane.parse().map_err(|_| "lane id")?;
         let started = Instant::now();
         let done = repo.rename_symbol(lane, &format!("{}:compute7_2", path(7)), "renamed7_2")?;

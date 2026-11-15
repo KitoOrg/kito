@@ -136,6 +136,14 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Every open lane: whose it is, what for, what it declared and
+    /// changed, and which lanes are on the same code
+    Board,
+    /// The lanes that declared or changed a function, a file or a directory
+    Who {
+        /// src/auth.ts:getUser, src/auth.ts or src/billing/
+        target: String,
+    },
     /// Open, close or inspect a lane
     Lane {
         #[command(subcommand)]
@@ -208,7 +216,15 @@ enum LaneCmd {
     Open {
         /// Name of the agent that will work in it
         agent: String,
-        /// What the lane is for
+        /// Why the lane is opened, in one sentence
+        #[arg(long)]
+        intent: String,
+        /// What the lane will change: functions (src/auth.ts:getUser),
+        /// files, directories (src/billing/). Once per item, or several
+        /// after one --scope
+        #[arg(long, required = true, num_args = 1.., value_name = "ITEM")]
+        scope: Vec<String>,
+        /// The task the lane belongs to (task #55)
         #[arg(long)]
         task: Option<String>,
         /// Checkpoint to start from (default: the main lane as it is now)
@@ -219,6 +235,13 @@ enum LaneCmd {
     Close { lane: String },
     /// Ops since the base, files touched, open conflicts
     Status { lane: String },
+    /// Show what a lane declared it would change, or add to it
+    Scope {
+        lane: String,
+        /// Functions, files or directories to add to the scope
+        #[arg(long, num_args = 1.., value_name = "ITEM")]
+        add: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -752,9 +775,115 @@ fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
     if cli.json {
         print_json(&lanes);
     } else if lanes.is_empty() {
-        println!("No open lanes. Open one with `kito lane open <agent>`.");
+        println!("No open lanes. Open one with `kito lane open <agent> --intent <why> --scope <what>`.");
     } else {
         lanes.iter().for_each(|lane| println!("{}", lane_line(lane)));
+    }
+    Ok(())
+}
+
+/// The strings of a JSON list.
+fn strings(value: &Value) -> Vec<&str> {
+    value.as_array().into_iter().flatten().filter_map(Value::as_str).collect()
+}
+
+/// The other lanes on the same code, as the daemon told them.
+fn print_overlaps(overlaps: &Value) {
+    for overlap in overlaps.as_array().into_iter().flatten() {
+        let text = |key: &str| overlap[key].as_str().unwrap_or_default();
+        match text("kind") {
+            "out_of_scope" => println!("  outside the scope: {}", text("what")),
+            "landed" => {
+                let why = overlap["intent"].as_str().map(|why| format!(" ({why})")).unwrap_or_default();
+                println!("  landed on main: {}{why}", text("detail"));
+            }
+            kind => {
+                let why = match overlap["intent"].as_str() {
+                    Some(intent) => format!(", there for: {intent}"),
+                    None => String::new(),
+                };
+                println!("  overlap ({kind}) with {} of {}{why}", text("lane"), text("agent"));
+                // What a caller overlap is on is already a sentence.
+                match kind {
+                    "caller" => println!("    {}", text("detail")),
+                    _ => println!("    {}: {}", text("what"), text("detail")),
+                }
+            }
+        }
+    }
+}
+
+/// What a lane declared, and what it changed outside of it.
+fn print_scope(status: &Value) {
+    match strings(&status["scope"]).as_slice() {
+        [] => println!("Scope ............. none declared: `kito lane scope <lane> --add <item>`"),
+        scope => println!("Scope ............. {}", scope.join(", ")),
+    }
+    let outside = strings(&status["out_of_scope"]);
+    for item in &outside {
+        println!("  outside the scope  {item}");
+    }
+    if !outside.is_empty() {
+        println!("  The lane is not integrated until the scope is extended to them, or they are undone.");
+    }
+}
+
+fn cmd_board(cli: &Cli) -> Outcome {
+    let board: Value = daemon(cli)?.call("board", json!({})).map_err(fail)?;
+    if cli.json {
+        print_json(&board);
+        return Ok(());
+    }
+    let lanes = board.as_array().cloned().unwrap_or_default();
+    if lanes.is_empty() {
+        println!("No open lanes.");
+    }
+    for lane in &lanes {
+        let text = |key: &str| lane[key].as_str().unwrap_or_default();
+        println!("{}  {}  {}  {}", text("id"), text("agent"), text("state"), text("intent"));
+        let scope: Vec<&str> =
+            lane["scope"].as_array().into_iter().flatten().filter_map(|item| item["item"].as_str()).collect();
+        let broad = match lane["broad"].as_bool() {
+            Some(true) => format!("  (broad: {} files)", lane["scope_files"].as_u64().unwrap_or(0)),
+            _ => String::new(),
+        };
+        println!(
+            "  scope    {}{broad}",
+            if scope.is_empty() { "none declared".to_owned() } else { scope.join(", ") }
+        );
+        let changed = strings(&lane["changed"]);
+        if !changed.is_empty() {
+            println!("  changed  {}", changed.join(", "));
+        }
+        for item in strings(&lane["out_of_scope"]) {
+            println!("  outside the scope: {item}");
+        }
+        print_overlaps(&lane["overlaps"]);
+    }
+    Ok(())
+}
+
+fn cmd_who(cli: &Cli, target: &str) -> Outcome {
+    let found: Value = daemon(cli)?.call("who_touches", json!({ "target": target })).map_err(fail)?;
+    if cli.json {
+        print_json(&found);
+        return Ok(());
+    }
+    let lanes = found.as_array().cloned().unwrap_or_default();
+    if lanes.is_empty() {
+        println!("No open lane declared or changed {target}.");
+    }
+    for overlap in &lanes {
+        let text = |key: &str| overlap[key].as_str().unwrap_or_default();
+        let why = match overlap["intent"].as_str() {
+            Some(intent) => format!(", there for: {intent}"),
+            None => String::new(),
+        };
+        println!("{} of {} ({}){why}", text("lane"), text("agent"), text("kind"));
+        match text("kind") {
+            "caller" => println!("  {}", text("detail")),
+            _ => println!("  {}: {}", text("what"), text("detail")),
+        }
     }
     Ok(())
 }
@@ -762,20 +891,45 @@ fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
 fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
     let mut client = daemon(cli)?;
     match command {
-        LaneCmd::Open { agent, task, base } => {
-            let lane: LaneInfo = client
-                .call("open_lane", json!({ "agent": agent, "task": task, "base": base }))
+        LaneCmd::Open { agent, intent, scope, task, base } => {
+            let opened: Value = client
+                .call(
+                    "open_lane",
+                    json!({ "agent": agent, "task": task, "base": base, "intent": intent, "scope": scope }),
+                )
                 .map_err(fail)?;
             if cli.json {
-                print_json(&lane);
+                print_json(&opened);
             } else {
+                let lane: LaneInfo = serde_json::from_value(opened.clone()).map_err(fail)?;
                 println!("{} opened for {} on {}.", lane.id, lane.agent, lane.base);
                 println!("Working copy: {}", lane.workdir.as_deref().unwrap_or(Path::new("")).display());
+                println!("Scope: {}", lane.scope.join(", "));
+                print_overlaps(&opened["overlaps"]);
                 println!(
                     "Every save there is recorded on the lane; `kito integrate {}` brings it in.",
                     lane.id
                 );
             }
+        }
+        LaneCmd::Scope { lane, add } => {
+            if !add.is_empty() {
+                let grown: Value =
+                    client.call("extend_scope", json!({ "lane": lane, "scope": add })).map_err(fail)?;
+                if cli.json {
+                    print_json(&grown);
+                    return Ok(());
+                }
+                print_overlaps(&grown["overlaps"]);
+            }
+            let status: Value = client.call("lane_status", json!({ "lane": lane })).map_err(fail)?;
+            if cli.json {
+                print_json(
+                    &json!({ "lane": status["id"], "scope": status["scope"], "out_of_scope": status["out_of_scope"] }),
+                );
+                return Ok(());
+            }
+            print_scope(&status);
         }
         LaneCmd::Close { lane } => {
             let closed: LaneInfo = client.call("close_lane", json!({ "lane": lane })).map_err(fail)?;
@@ -818,6 +972,7 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
             for file in status["files"].as_array().into_iter().flatten() {
                 println!("  changed  {}", file.as_str().unwrap_or_default());
             }
+            print_scope(&status);
             let conflicts: Vec<ConflictInfo> =
                 serde_json::from_value(status["conflicts"].clone()).unwrap_or_default();
             conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
@@ -895,6 +1050,16 @@ fn print_integration(result: &IntegrationResult) {
             println!("  Nothing was integrated: fix it in the lane and integrate again.");
         }
         Integration::Failed => println!("{}: {}", result.lane, result.message.clone().unwrap_or_default()),
+        Integration::OutOfScope => {
+            println!("{}: not integrated, it changed things outside its scope", result.lane);
+            for item in &result.out_of_scope {
+                println!("  outside the scope  {item}");
+            }
+            println!(
+                "  Declare them with `kito lane scope {} --add <item>`, or undo them, then integrate again.",
+                result.lane
+            );
+        }
     }
 }
 
@@ -1206,6 +1371,8 @@ fn main() -> ExitCode {
         Cmd::Sync { lane } => cmd_sync(&cli, lane),
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
+        Cmd::Board => cmd_board(&cli),
+        Cmd::Who { target } => cmd_who(&cli, target),
         Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),
         Cmd::Conflicts { id, all } => cmd_conflicts(&cli, id, *all),
         Cmd::Resolve { conflict, main, lane, text, rewrite, keep } => {

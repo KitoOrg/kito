@@ -264,10 +264,56 @@ impl Daemon {
                 "open_lane" => {
                     let agent = text("agent")?;
                     let (task, base) = (optional("task"), optional("base"));
-                    let opened = self
-                        .with_repo(|repo| repo.open_lane(agent, task, base.as_deref()))
+                    let intent = optional("intent").unwrap_or_default();
+                    let scope = scope_of(params);
+                    let (opened, overlaps) = self
+                        .with_repo(|repo| {
+                            let opened = repo.open_lane(agent, task, base.as_deref(), &intent, &scope)?;
+                            // Who is already on the same code: told now, and
+                            // not again as a notice.
+                            let lane = repo.lane_of(&opened.id)?;
+                            Ok((opened, repo.take_notices(lane)?))
+                        })
                         .map_err(internal)?;
-                    to_json(serde_json::to_value(opened))
+                    let mut opened =
+                        serde_json::to_value(opened).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+                    opened["overlaps"] = to_json(serde_json::to_value(overlaps))?;
+                    Ok(opened)
+                }
+                "extend_scope" => {
+                    let lane = lane()?;
+                    let scope = scope_of(params);
+                    let (declared, overlaps) = self
+                        .with_repo(|repo| Ok((repo.extend_scope(lane, &scope)?, repo.take_notices(lane)?)))
+                        .map_err(internal)?;
+                    Ok(json!({
+                        "lane": lane.to_string(),
+                        "scope": to_json(serde_json::to_value(declared))?,
+                        "overlaps": to_json(serde_json::to_value(overlaps))?,
+                    }))
+                }
+                "board" => to_json(serde_json::to_value(
+                    self.with_repo(|repo| {
+                        // What is saved in each lane is part of what it is on.
+                        for lane in repo.lanes(false) {
+                            let lane = repo.lane_of(&lane.id)?;
+                            repo.scan_lane(lane)?;
+                        }
+                        repo.board()
+                    })
+                    .map_err(internal)?,
+                )),
+                "who_touches" => {
+                    let target = text("target")?;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.who_touches(target)).map_err(internal)?,
+                    ))
+                }
+                "notices" => {
+                    let lane = lane()?;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.take_notices(lane)).map_err(internal)?,
+                    ))
                 }
                 "close_lane" => {
                     let lane = lane()?;
@@ -839,4 +885,13 @@ pub async fn serve(root: &Path) -> Result<()> {
     closed?;
     eprintln!("kitod: stopped");
     Ok(())
+}
+
+/// The scope a request carries: a list of items, or one.
+fn scope_of(params: &Value) -> Vec<String> {
+    match params.get("scope") {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+        Some(Value::String(item)) => vec![item.clone()],
+        _ => Vec::new(),
+    }
 }

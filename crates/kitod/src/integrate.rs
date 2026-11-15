@@ -294,6 +294,21 @@ impl Repo {
         // involved are looked at: the rest is the watcher's business.
         self.scan_lane(lane)?;
         self.capture_main_under(lane, &[])?;
+        // A lane goes in for what it said it would change, and nothing else.
+        let outside = self.out_of_scope(lane)?;
+        if !outside.is_empty() {
+            let mut result = IntegrationResult::new(lane.to_string(), Outcome::OutOfScope);
+            result.message = Some(match self.lane_scope(lane)?.is_empty() {
+                true => "the lane has no scope: declare what it changes, then ask again".to_owned(),
+                false => {
+                    "the lane changed things outside the scope it declared: extend the scope to them, or \
+                          undo them, then ask again"
+                        .to_owned()
+                }
+            });
+            result.out_of_scope = outside;
+            return Ok(Preparation::Done(Box::new(result)));
+        }
         let answers = answers.filter(|answers| self.answers_hold(lane, answers));
         if answers.is_none() {
             if let Some(plan) = self.reference_plan(lane)? {

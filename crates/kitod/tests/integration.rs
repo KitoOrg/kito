@@ -78,8 +78,9 @@ fn workdir(repo: &Repo, lane: u64) -> PathBuf {
 #[test]
 fn two_agents_on_the_same_file_integrate_without_conflicts() {
     let (_tmp, root, mut repo) = shop();
-    repo.open_lane("alice", Some("cents everywhere".into()), None).unwrap();
-    repo.open_lane("bob", Some("receipts".into()), None).unwrap();
+    repo.open_lane("alice", Some("cents everywhere".into()), None, "work", &kitod::scope::everything())
+        .unwrap();
+    repo.open_lane("bob", Some("receipts".into()), None, "work", &kitod::scope::everything()).unwrap();
     let (alice, bob) = (workdir(&repo, 1), workdir(&repo, 2));
     let total = repo.symbols().find(Path::new("src/shop.ts"), "total")[0];
 
@@ -156,7 +157,7 @@ fn two_agents_on_the_same_file_integrate_without_conflicts() {
 #[test]
 fn a_lane_keeps_working_after_being_integrated_and_survives_a_restart() {
     let (_tmp, root, mut repo) = shop();
-    repo.open_lane("alice", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = workdir(&repo, 1);
 
     write(&alice, "src/shop.ts", &SHOP.replace("let sum = 0;", "let sum = 0; // cents"));
@@ -216,7 +217,7 @@ fn a_lane_keeps_working_after_being_integrated_and_survives_a_restart() {
 #[test]
 fn a_conflict_blocks_the_lane_until_it_is_decided() {
     let (_tmp, root, mut repo) = shop();
-    repo.open_lane("alice", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = workdir(&repo, 1);
     let ops_before = repo.status().unwrap().ops;
 
@@ -285,7 +286,7 @@ fn a_conflict_blocks_the_lane_until_it_is_decided() {
 #[test]
 fn a_decision_holds_only_for_the_texts_it_was_taken_on() {
     let (_tmp, root, mut repo) = shop();
-    repo.open_lane("alice", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = workdir(&repo, 1);
     write(&root, "src/shop.ts", &SHOP.replace("return sum;", "return Math.max(sum, 0);"));
     write(&alice, "src/shop.ts", &SHOP.replace("return sum;", "return Math.abs(sum);"));
@@ -318,7 +319,7 @@ fn what_fails_the_verification_does_not_reach_the_main_lane() {
         "[verify]\ncommands = [\"test -f src/shop.ts\", \"! grep -rq FIXME src\"]\ntimeout_secs = 30\n",
     );
     repo.reload_config().unwrap();
-    repo.open_lane("alice", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
     let alice = workdir(&repo, 1);
     let ops_before = repo.status().unwrap().ops;
 
@@ -354,8 +355,8 @@ fn what_fails_the_verification_does_not_reach_the_main_lane() {
 #[test]
 fn moves_renames_and_removals_arrive_as_what_they_are() {
     let (_tmp, root, mut repo) = shop();
-    repo.open_lane("alice", None, None).unwrap();
-    repo.open_lane("bob", None, None).unwrap();
+    repo.open_lane("alice", None, None, "work", &kitod::scope::everything()).unwrap();
+    repo.open_lane("bob", None, None, "work", &kitod::scope::everything()).unwrap();
     let (alice, bob) = (workdir(&repo, 1), workdir(&repo, 2));
     let discount = repo.symbols().find(Path::new("src/shop.ts"), "discount")[0];
 

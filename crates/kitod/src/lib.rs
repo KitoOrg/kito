@@ -15,6 +15,7 @@ pub mod refs;
 pub mod rename;
 pub mod repo;
 pub mod rpc;
+pub mod scope;
 pub mod semantic;
 pub mod server;
 pub mod simulate;

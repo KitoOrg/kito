@@ -72,6 +72,11 @@ pub struct Report {
     pub problems: Vec<String>,
     /// The integrations of the rounds, by agent and round.
     pub records: Vec<Record>,
+    /// Pairs of lanes that declared the same function, each seen from one
+    /// side, and how many of them were told before that side's first
+    /// integration.
+    pub overlaps_declared: usize,
+    pub overlaps_told_in_time: usize,
 }
 
 impl Report {
@@ -103,6 +108,10 @@ impl Report {
         );
         row("Kinds of the real conflicts", self.real_conflicts_found.join(", "));
         row("Verification failures", self.verification_failures.to_string());
+        row(
+            "Same-function overlaps told before the first integration",
+            format!("{} of {}", self.overlaps_told_in_time, self.overlaps_declared),
+        );
         row("Opening a lane", stat(&self.lane_open_ms));
         row("One integration, queue and verification included", stat(&self.integration_ms));
         row("Ops recorded on the lanes", self.ops_on_lanes.to_string());
@@ -188,6 +197,10 @@ struct Agent {
     lane: String,
     dir: PathBuf,
     client: Client,
+    /// The overlaps it was told about, when it was told: (the other lane,
+    /// what both are on) with the number of integrations it had asked.
+    told: BTreeMap<(String, String), usize>,
+    asked: usize,
 }
 
 impl Agent {
@@ -197,10 +210,36 @@ impl Agent {
             .map_err(|e| format!("{} ({}): {method}: {e}", self.name, self.lane))
     }
 
+    /// Takes note of the overlaps an answer of the daemon tells about.
+    fn hear(&mut self, overlaps: &Value) {
+        for overlap in overlaps.as_array().into_iter().flatten() {
+            if overlap["kind"] == "function" {
+                let key = (
+                    overlap["lane"].as_str().unwrap_or_default().to_owned(),
+                    overlap["what"].as_str().unwrap_or_default().to_owned(),
+                );
+                self.told.entry(key).or_insert(self.asked);
+            }
+        }
+    }
+
+    /// Declares more scope, and hears what the daemon answers.
+    fn declare(&mut self, scope: &[String]) -> Result<(), String> {
+        let lane = self.lane.clone();
+        let answer = self.call("extend_scope", json!({ "lane": lane, "scope": scope }))?;
+        self.hear(&answer["overlaps"]);
+        Ok(())
+    }
+
     /// Asks for integration and waits for the result.
     fn integrate(&mut self) -> Result<(IntegrationResult, Duration), String> {
         let started = Instant::now();
         let lane = self.lane.clone();
+        // What the other lanes declared since: an agent is told with the
+        // answer to whatever it asks next.
+        let news = self.call("notices", json!({ "lane": lane }))?;
+        self.hear(&news);
+        self.asked += 1;
         let asked = self.call("request_integration", json!({ "lane": lane }))?;
         let job = asked["job"].as_str().unwrap_or_default().to_owned();
         loop {
@@ -220,6 +259,9 @@ impl Agent {
     fn round(&mut self, k: usize, round: usize) -> Result<Vec<(String, String, bool)>, String> {
         let dir = self.dir.clone();
         let mut expect = Vec::new();
+        // The function this round adds does not exist yet: it is declared
+        // by the name it will have.
+        self.declare(&[format!("src/shared/registry.ts:f{k}_{round}")])?;
 
         // 1. Its own function in the file all agents share.
         let math = read(&dir, "src/shared/math.ts")?;
@@ -339,16 +381,37 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
     for k in 0..plan.agents {
         let mut client = Client::connect(&root).map_err(|e| e.to_string())?;
         let started = Instant::now();
+        // What the script will have it change: its function in the shared
+        // file, the class every agent adds a method to, its own module and
+        // the file a function of it moves to.
+        let scope = [
+            format!("src/shared/math.ts:op{k}"),
+            "src/shared/registry.ts:Registry".to_owned(),
+            format!("src/agents/agent{k}.ts"),
+            format!("src/agents/extra{k}.ts"),
+        ];
         let lane = client
-            .call_value("open_lane", json!({ "agent": format!("agent-{k}"), "task": format!("task #{k}") }))
+            .call_value(
+                "open_lane",
+                json!({
+                    "agent": format!("agent-{k}"),
+                    "task": format!("task #{k}"),
+                    "intent": format!("the work of agent {k}"),
+                    "scope": scope,
+                }),
+            )
             .map_err(|e| e.to_string())?;
         report.lane_open_ms.push(started.elapsed().as_secs_f64() * 1000.0);
-        agents.push(Agent {
+        let mut agent = Agent {
             name: format!("agent-{k}"),
             lane: lane["id"].as_str().unwrap_or_default().to_owned(),
             dir: PathBuf::from(lane["workdir"].as_str().unwrap_or_default()),
             client,
-        });
+            told: BTreeMap::new(),
+            asked: 0,
+        };
+        agent.hear(&lane["overlaps"]);
+        agents.push(agent);
     }
 
     // The rounds: all agents at once, each on its own thread.
@@ -423,6 +486,26 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
         agents.push(agent);
     }
 
+    // Every agent declared the class all of them add a method to: each must
+    // have been told of every other one before it first asked to integrate.
+    let class = "src/shared/registry.ts:Registry";
+    let lanes: Vec<String> = agents.iter().map(|agent| agent.lane.clone()).collect();
+    for agent in &agents {
+        for other in lanes.iter().filter(|lane| **lane != agent.lane) {
+            report.overlaps_declared += 1;
+            match agent.told.get(&(other.clone(), class.to_owned())) {
+                Some(0) => report.overlaps_told_in_time += 1,
+                Some(n) => report.problems.push(format!(
+                    "{} was told that {other} is on {class} only after asking {n} integrations",
+                    agent.name
+                )),
+                None => {
+                    report.problems.push(format!("{} was never told that {other} is on {class}", agent.name))
+                }
+            }
+        }
+    }
+
     // The real conflicts, one pair of agents each.
     if plan.real_conflicts && agents.len() >= 6 {
         report.real_conflicts_staged = 3;
@@ -432,6 +515,9 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
                          edits: [Edit<'_>; 2],
                          decision: Value|
          -> Result<(), String> {
+            for agent in [first, second] {
+                agents[agent].declare(&["src/shared/contested.ts".to_owned()])?;
+            }
             contested(&agents[first], edits[0])?;
             contested(&agents[second], edits[1])?;
             let (went_in, _) = agents[first].integrate()?;

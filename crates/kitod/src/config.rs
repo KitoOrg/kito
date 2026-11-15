@@ -46,6 +46,19 @@ email_domain = "kito.invalid"
 # through a link instead of a copy: what the tools need and no lane changes.
 # share = ["node_modules", ".venv"]
 
+[scope]
+# Every lane declares what it will change before it changes it: functions
+# (src/auth.ts:getUser), files, directories (src/billing/). A change outside
+# the declared scope is recorded, and stops the lane at integration until
+# the scope is extended or the change undone.
+# Files any lane may change without declaring them, in .gitignore syntax:
+# lock files, generated files.
+always_allowed = []
+# A scope that covers more files than this is shown as broad on the board.
+broad_files = 200
+# What to do with a broad scope: "warn" lets it through, "refuse" does not.
+broad = "warn"
+
 [verify]
 # Commands that must succeed before a lane is integrated into the main lane.
 # They run in order, with `sh -c`, in a copy of the merged result.
@@ -101,6 +114,36 @@ pub struct Config {
     pub lanes: LanesConfig,
     pub verify: VerifyConfig,
     pub semantic: SemanticConfig,
+    pub scope: ScopeConfig,
+}
+
+/// What lanes may declare, and what they may change without declaring it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScopeConfig {
+    /// Files any lane may change without declaring them, in `.gitignore`
+    /// syntax.
+    pub always_allowed: Vec<String>,
+    /// A scope that covers more files than this is broad.
+    pub broad_files: usize,
+    pub broad: BroadScope,
+}
+
+impl Default for ScopeConfig {
+    fn default() -> Self {
+        ScopeConfig { always_allowed: Vec::new(), broad_files: 200, broad: BroadScope::Warn }
+    }
+}
+
+/// What happens to a scope that covers more than `broad_files` files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BroadScope {
+    /// It is accepted, and shown as broad on the board.
+    #[default]
+    Warn,
+    /// It is refused: the lane must name files, directories or functions.
+    Refuse,
 }
 
 /// A language server, as the configuration describes it.

@@ -1,0 +1,111 @@
+
+$ kito init
+Kito repository created in /tmp/kito-demo/.kito
+The daemon is running: every save is recorded from now on.
+
+$ kito checkpoint -m the shop
+ckpt#1 created and exported as git commit 10a8fe3a7d
+
+
+# 1. No lane without an intent and a scope
+
+$ kito lane open hugo
+error: the following required arguments were not provided:
+  --intent <INTENT>
+  --scope <ITEM>...
+
+Usage: kito lane open --intent <INTENT> --scope <ITEM>... <AGENT>
+
+For more information, try '--help'.
+(exit status 2)
+
+$ kito lane open hugo --intent look around --scope ../elsewhere
+kito: "../elsewhere" is not a path inside the repository
+(exit status 1)
+
+
+# 2. erin starts changing what a price is; frank declares the same function
+
+$ kito lane open erin --intent prices in cents, not euros --scope shop.py:total
+lane/1 opened for erin on ckpt#1.
+Working copy: /tmp/kito-demo/.kito/lanes/1/work
+Scope: shop.py:total
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito lane open frank --intent a discount of 10 over 50 euros --scope shop.py:total
+lane/2 opened for frank on ckpt#1.
+Working copy: /tmp/kito-demo/.kito/lanes/2/work
+Scope: shop.py:total
+  overlap (function) with lane/1 of erin, there for: prices in cents, not euros
+    shop.py:total: erin declared it; you declared it
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+
+# 3. gina declares a function that calls it
+
+$ kito lane open gina --intent a receipt with the currency --scope shop.py:receipt
+lane/3 opened for gina on ckpt#1.
+Working copy: /tmp/kito-demo/.kito/lanes/3/work
+Scope: shop.py:receipt
+  overlap (caller) with lane/1 of erin, there for: prices in cents, not euros
+    your shop.py:receipt uses shop.py:total, which erin declared
+  overlap (caller) with lane/2 of frank, there for: a discount of 10 over 50 euros
+    your shop.py:receipt uses shop.py:total, which frank declared
+Every save there is recorded on the lane; `kito integrate lane/3` brings it in.
+
+
+# 4. The board, and who is on a function
+
+$ kito board
+lane/1  erin  active  prices in cents, not euros
+  scope    shop.py:total
+  overlap (caller) with lane/3 of gina, there for: a receipt with the currency
+    gina's shop.py:receipt uses shop.py:total, which you declared
+  overlap (function) with lane/2 of frank, there for: a discount of 10 over 50 euros
+    shop.py:total: frank declared it; you declared it
+lane/2  frank  active  a discount of 10 over 50 euros
+  scope    shop.py:total
+  overlap (caller) with lane/3 of gina, there for: a receipt with the currency
+    gina's shop.py:receipt uses shop.py:total, which you declared
+  overlap (function) with lane/1 of erin, there for: prices in cents, not euros
+    shop.py:total: erin declared it; you declared it
+lane/3  gina  active  a receipt with the currency
+  scope    shop.py:receipt
+  overlap (caller) with lane/1 of erin, there for: prices in cents, not euros
+    your shop.py:receipt uses shop.py:total, which erin declared
+  overlap (caller) with lane/2 of frank, there for: a discount of 10 over 50 euros
+    your shop.py:receipt uses shop.py:total, which frank declared
+
+$ kito who shop.py:total
+lane/3 of gina (caller), there for: a receipt with the currency
+  gina's shop.py:receipt uses it
+lane/1 of erin (function), there for: prices in cents, not euros
+  shop.py:total: erin declared it
+lane/2 of frank (function), there for: a discount of 10 over 50 euros
+  shop.py:total: frank declared it
+
+
+# 5. erin does her work, and one thing she did not declare
+
+$ kito integrate lane/1
+lane/1: not integrated, it changed things outside its scope
+  outside the scope  README.md
+  Declare them with `kito lane scope lane/1 --add <item>`, or undo them, then integrate again.
+(exit status 1)
+
+$ kito lane scope lane/1 --add README.md
+  overlap (caller) with lane/3 of gina, there for: a receipt with the currency
+    gina's shop.py:receipt uses shop.py:total, which you declared and changed
+  overlap (function) with lane/2 of frank, there for: a discount of 10 over 50 euros
+    shop.py:total: frank declared it; you declared and changed it
+Scope ............. shop.py:total, README.md
+
+$ kito integrate lane/1
+lane/1: integrated as ckpt#2 (git a2f09b271c)
+
+$ kito log -n 3
+◆ ckpt#2  prices in cents, not euros  (git a2f09b271c)
+  22c842f0  11-15 09:51  erin       shop.py    +1 −1  total changed
+  15110897  11-15 09:51  erin       README.md  +1 −1
+◆ ckpt#1  the shop  (git 10a8fe3a7d)
+  2b11d65f  11-15 09:51  francesco  shop.py    new    total, receipt created

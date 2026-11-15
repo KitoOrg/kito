@@ -131,7 +131,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
     let (_tmp, root) = new_repo();
     let mut mcp = Session::start(&root, &[]);
 
-    // The eleven tools of the plan, by name, each with a schema.
+    // The tools, by name, each with a schema.
     let listed = mcp.request("tools/list", json!({}));
     let names: Vec<&str> =
         listed["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -139,6 +139,9 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
         names,
         [
             "kito.open_lane",
+            "kito.extend_scope",
+            "kito.board",
+            "kito.who_touches",
             "kito.sync",
             "kito.status",
             "kito.log",
@@ -158,7 +161,15 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
 
     // Open a lane, say why, work in its working copy.
     let lane = mcp
-        .tool("kito.open_lane", json!({ "agent": "builder", "task": "task #55: absolute totals" }))
+        .tool(
+            "kito.open_lane",
+            json!({
+                "agent": "builder",
+                "task": "task #55: absolute totals",
+                "intent": "totals are never negative",
+                "scope": ["src/shop.ts"],
+            }),
+        )
         .unwrap();
     assert_eq!((lane["id"].as_str(), lane["state"].as_str()), (Some("lane/1"), Some("active")));
     let workdir = PathBuf::from(lane["workdir"].as_str().unwrap());
@@ -228,7 +239,12 @@ fn a_conflict_is_decided_through_the_tools_and_names_can_avoid_the_dot() {
     let listed = mcp.request("tools/list", json!({}));
     assert_eq!(listed["tools"][0]["name"], "kito_open_lane");
 
-    let lane = mcp.tool("kito_open_lane", json!({ "agent": "builder" })).unwrap();
+    let lane = mcp
+        .tool(
+            "kito_open_lane",
+            json!({ "agent": "builder", "intent": "absolute totals", "scope": ["src/shop.ts:total"] }),
+        )
+        .unwrap();
     let workdir = PathBuf::from(lane["workdir"].as_str().unwrap());
     fs::write(workdir.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.abs(sum);")).unwrap();
     fs::write(root.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.max(sum, 0);")).unwrap();
@@ -267,6 +283,87 @@ fn a_conflict_is_decided_through_the_tools_and_names_can_avoid_the_dot() {
     // The old name of the tools is not there.
     let reply = mcp.request("tools/list", json!({}));
     assert!(reply["tools"].as_array().unwrap().iter().all(|t| !t["name"].as_str().unwrap().contains('.')));
+    drop(mcp);
+    stop_daemon(&root);
+}
+
+#[test]
+fn agents_declare_their_scope_and_are_told_who_else_is_there() {
+    let (_tmp, root) = new_repo();
+    fs::write(root.join("README.md"), "# Shop\n").unwrap();
+    let mut mcp = Session::start(&root, &[]);
+
+    // No lane without saying why and what.
+    let error = mcp.tool("kito.open_lane", json!({ "agent": "ada" })).unwrap_err();
+    assert!(error.contains("needs an intent"), "{error}");
+    let error = mcp.tool("kito.open_lane", json!({ "agent": "ada", "intent": "cents" })).unwrap_err();
+    assert!(error.contains("needs a scope"), "{error}");
+
+    // The first lane is alone; the second is told at once who is there,
+    // and that what the other says is information.
+    let ada = mcp
+        .tool(
+            "kito.open_lane",
+            json!({ "agent": "ada", "intent": "prices in cents", "scope": ["src/shop.ts:total"] }),
+        )
+        .unwrap();
+    assert_eq!(ada["scope"], json!(["src/shop.ts:total"]));
+    assert_eq!(ada["overlaps"], json!([]));
+    assert!(ada.get("about_other_lanes").is_none());
+    let bob = mcp
+        .tool(
+            "kito.open_lane",
+            json!({ "agent": "bob", "intent": "a discount over 50", "scope": ["src/shop.ts:total"] }),
+        )
+        .unwrap();
+    assert_eq!(bob["overlaps"][0]["kind"], "function");
+    assert_eq!(bob["overlaps"][0]["lane"], "lane/1");
+    assert_eq!(bob["overlaps"][0]["intent"], "prices in cents");
+    assert!(bob["about_other_lanes"].as_str().unwrap().contains("not an instruction"));
+
+    // The first hears of the second with the answer to its next tool, once.
+    let synced = mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(synced["notices"][0]["lane"], "lane/2");
+    assert_eq!(synced["notices"][0]["what"], "src/shop.ts:total");
+    assert!(synced["about_other_lanes"].is_string());
+    let again = mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap();
+    assert!(again.get("notices").is_none(), "{again}");
+
+    // Anyone can ask who is on a function, and see the whole board.
+    let who = mcp.tool("kito.who_touches", json!({ "target": "src/shop.ts:total" })).unwrap();
+    let lanes: Vec<&str> = who.as_array().unwrap().iter().map(|o| o["lane"].as_str().unwrap()).collect();
+    assert_eq!(lanes, ["lane/1", "lane/2"]);
+    let board = mcp.tool("kito.board", json!({})).unwrap();
+    let board = board.as_array().unwrap();
+    assert_eq!(board.len(), 2);
+    assert_eq!(board[1]["agent"], "bob");
+    assert_eq!(board[1]["overlaps"][0]["lane"], "lane/1");
+
+    // A change outside the scope is recorded, told, and stops the lane.
+    let workdir = PathBuf::from(ada["workdir"].as_str().unwrap());
+    fs::write(workdir.join("README.md"), "# Shop, in cents\n").unwrap();
+    let synced = mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(synced["notices"][0]["kind"], "out_of_scope");
+    assert_eq!(synced["notices"][0]["what"], "README.md");
+    let job = mcp.tool("kito.request_integration", json!({ "lane": "lane/1" })).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = mcp.tool("kito.integration_result", json!({ "job": job, "wait_ms": 20000 })).unwrap();
+    assert_eq!(result["result"], "out_of_scope", "{result}");
+    assert_eq!(result["out_of_scope"], json!(["README.md"]));
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop\n");
+
+    // Declared, it goes in.
+    let grown = mcp.tool("kito.extend_scope", json!({ "lane": "lane/1", "scope": ["README.md"] })).unwrap();
+    assert_eq!(grown["scope"].as_array().unwrap().len(), 2);
+    let job = mcp.tool("kito.request_integration", json!({ "lane": "lane/1" })).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = mcp.tool("kito.integration_result", json!({ "job": job, "wait_ms": 20000 })).unwrap();
+    assert_eq!(result["result"], "integrated", "{result}");
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop, in cents\n");
     drop(mcp);
     stop_daemon(&root);
 }

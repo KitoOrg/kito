@@ -65,7 +65,9 @@ fn integrate(client: &mut Client, lane: &str) -> IntegrationResult {
 }
 
 fn open(client: &mut Client, agent: &str, task: &str) -> (String, PathBuf) {
-    let lane: LaneInfo = client.call("open_lane", json!({ "agent": agent, "task": task })).unwrap();
+    let lane: LaneInfo = client
+        .call("open_lane", json!({ "agent": agent, "task": task, "intent": task, "scope": ["./"] }))
+        .unwrap();
     (lane.id.clone(), lane.workdir.unwrap())
 }
 

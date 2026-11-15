@@ -49,7 +49,8 @@ fn a_lane_has_a_working_copy_of_its_own_and_is_captured_apart() {
     let main_ops = repo.status().unwrap().ops;
 
     // No checkpoint yet: the first one is made for the lane to be filed under.
-    let lane = repo.open_lane("builder", Some("task #7".into()), None).unwrap();
+    let lane =
+        repo.open_lane("builder", Some("task #7".into()), None, "work", &kitod::scope::everything()).unwrap();
     assert_eq!((lane.id.as_str(), lane.agent.as_str(), lane.state.as_str()), ("lane/1", "builder", "active"));
     assert_eq!((lane.base.as_str(), lane.task.as_deref(), lane.ops), ("ckpt#1", Some("task #7"), 0));
     let workdir = lane.workdir.clone().unwrap();
@@ -105,8 +106,8 @@ fn a_lane_has_a_working_copy_of_its_own_and_is_captured_apart() {
 fn lanes_survive_a_restart_and_a_lost_working_copy() {
     let (tmp, mut repo) = repo_with_files();
     let root = tmp.path().canonicalize().unwrap();
-    let first = repo.open_lane("one", None, None).unwrap();
-    let second = repo.open_lane("two", None, None).unwrap();
+    let first = repo.open_lane("one", None, None, "work", &kitod::scope::everything()).unwrap();
+    let second = repo.open_lane("two", None, None, "work", &kitod::scope::everything()).unwrap();
     let (one, two) = (LaneId(1), LaneId(2));
     assert_eq!(second.id, "lane/2");
     write(&first.workdir.clone().unwrap(), "src/auth.ts", &AUTH.replace("getUser", "fetchUser"));
@@ -167,16 +168,20 @@ fn intents_closing_and_bases() {
 
     // By default a lane starts from what the main lane is now; it can also
     // start from an earlier checkpoint.
-    let now = repo.open_lane("now", None, None).unwrap();
-    let then = repo.open_lane("then", None, Some("ckpt#1")).unwrap();
+    let now = repo.open_lane("now", None, None, "work", &kitod::scope::everything()).unwrap();
+    let then = repo.open_lane("then", None, Some("ckpt#1"), "work", &kitod::scope::everything()).unwrap();
     assert_eq!((now.base.as_str(), then.base.as_str()), ("ckpt#2", "ckpt#1"));
     let read = |lane: &kitod::lanes::LaneInfo| {
         fs::read_to_string(lane.workdir.clone().unwrap().join("README.md")).unwrap()
     };
     assert_eq!(read(&now), "# Demo, not yet in a checkpoint\n");
     assert_eq!(read(&then), "# Demo\n");
-    assert!(repo.open_lane("lost", None, Some("ckpt#9")).unwrap_err().to_string().contains("does not exist"));
-    assert!(repo.open_lane("  ", None, None).is_err());
+    assert!(repo
+        .open_lane("lost", None, Some("ckpt#9"), "work", &kitod::scope::everything())
+        .unwrap_err()
+        .to_string()
+        .contains("does not exist"));
+    assert!(repo.open_lane("  ", None, None, "work", &kitod::scope::everything()).is_err());
 
     // The "why" of what follows.
     let lane = LaneId(1);
@@ -188,10 +193,10 @@ fn intents_closing_and_bases() {
     write(&workdir, "b.txt", "after the intent\n");
     repo.scan_lane(lane).unwrap();
     let ops = repo.store().lane_ops(lane, 0, 10).unwrap();
-    assert_eq!(
-        ops.iter().map(|op| op.intent.map(|i| i.to_string())).collect::<Vec<_>>(),
-        [None, Some(intent)]
-    );
+    // What was saved before is under the intent the lane was opened with.
+    let whys: Vec<Option<String>> = ops.iter().map(|op| op.intent.map(|i| i.to_string())).collect();
+    assert!(whys[0].is_some() && whys[0] != whys[1], "{whys:?}");
+    assert_eq!(whys[1], Some(intent));
     let recorded = repo.store().intent(&ops[1].intent.unwrap()).unwrap();
     assert_eq!(
         (recorded.summary.as_str(), recorded.task.as_deref()),
@@ -219,7 +224,7 @@ fn intents_closing_and_bases() {
     repo.close().unwrap();
     let mut repo = Repo::open(&root).unwrap();
     assert_eq!(repo.lanes(false).len(), 1);
-    assert_eq!(repo.open_lane("next", None, None).unwrap().id, "lane/3");
+    assert_eq!(repo.open_lane("next", None, None, "work", &kitod::scope::everything()).unwrap().id, "lane/3");
     let _ = PathBuf::new();
 }
 
@@ -236,7 +241,7 @@ fn shared_paths_are_linked_not_copied() {
     repo.reload_config().unwrap();
     repo.scan().unwrap();
 
-    let lane = repo.open_lane("builder", None, None).unwrap();
+    let lane = repo.open_lane("builder", None, None, "work", &kitod::scope::everything()).unwrap();
     let workdir = lane.workdir.unwrap();
     let link = workdir.join("node_modules");
     assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());

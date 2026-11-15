@@ -14,6 +14,9 @@ pub enum Outcome {
     Conflicts,
     /// The merge composed, but the verification commands failed on it.
     VerificationFailed,
+    /// The lane changed things outside the scope it declared: nothing was
+    /// merged (see `out_of_scope`).
+    OutOfScope,
     /// The integration could not be carried out (see `message`).
     Failed,
 }
@@ -88,6 +91,9 @@ pub struct IntegrationResult {
     /// What went wrong, or what there was not to do, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// What the lane changed outside the scope it declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope: Vec<String>,
 }
 
 impl IntegrationResult {
@@ -103,6 +109,7 @@ impl IntegrationResult {
             verification: None,
             your_next_base: None,
             message: None,
+            out_of_scope: Vec::new(),
         }
     }
 

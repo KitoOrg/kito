@@ -49,8 +49,8 @@ export function discount(amount: number, percent: number): number {
 TS
 run kito checkpoint -m "shop"
 
-run kito lane open alice --task "taxes"
-run kito lane open bob --task "shipping"
+run kito lane open alice --intent "taxes" --scope src/shop.ts
+run kito lane open bob --intent "shipping" --scope src/shop.ts
 ALICE="$DEMO/.kito/lanes/1/work"
 BOB="$DEMO/.kito/lanes/2/work"
 

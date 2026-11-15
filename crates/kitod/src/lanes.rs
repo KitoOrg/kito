@@ -73,6 +73,14 @@ pub struct LaneInfo {
     pub files: Vec<String>,
     /// Conflicts waiting for a decision.
     pub conflicts: Vec<String>,
+    /// What the lane declared it would change: functions
+    /// (`src/auth.ts:getUser`), files, directories (`src/billing/`).
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// What it changed outside that scope: it is not integrated until the
+    /// scope is extended or the change undone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope: Vec<String>,
 }
 
 fn state_word(state: LaneState) -> &'static str {
@@ -167,11 +175,29 @@ impl Repo {
     }
 
     /// Opens a lane for an agent. It starts from the current state of the
-    /// main lane, or from the checkpoint given as `base`.
-    pub fn open_lane(&mut self, agent: &str, task: Option<String>, base: Option<&str>) -> Result<LaneInfo> {
+    /// main lane, or from the checkpoint given as `base`. No lane opens
+    /// without saying why (`intent`) and what it will change (`scope`).
+    pub fn open_lane(
+        &mut self,
+        agent: &str,
+        task: Option<String>,
+        base: Option<&str>,
+        intent: &str,
+        scope: &[String],
+    ) -> Result<LaneInfo> {
         let agent = agent.trim();
         if agent.is_empty() {
             return Err(Error::Other("a lane needs the name of the agent that works in it".into()));
+        }
+        if intent.trim().is_empty() {
+            return Err(Error::Other("a lane needs an intent: one sentence saying why it is opened".into()));
+        }
+        if scope.iter().all(|item| item.trim().is_empty()) {
+            return Err(Error::Other(
+                "a lane needs a scope: what it will change, as functions (src/auth.ts:getUser), files \
+                 (src/auth.ts) or directories (src/billing/)"
+                    .into(),
+            ));
         }
         self.scan()?;
         let main_head = self.main.head.ok_or_else(|| {
@@ -211,6 +237,7 @@ impl Repo {
             },
         };
         let (base_tree, base_symbols) = self.state_at(base_head)?;
+        let scope = self.read_scope(&base_tree, &base_symbols, &[], scope)?;
 
         let id = self.store.next_lane_id();
         let workdir = self.lane_dir(id).join("work");
@@ -233,9 +260,11 @@ impl Repo {
             task: task.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()),
             intent: None,
             next_symbol: 0,
+            scope,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
+        self.set_intent(id, intent, None, None)?;
         self.lane_info(id)
     }
 
@@ -249,6 +278,8 @@ impl Repo {
         self.put_lane_state(lane, LaneState::Closed)?;
         let info = self.lane_info(lane)?;
         self.lanes.remove(&lane);
+        self.claims_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
+        self.told.remove(&lane);
         let dir = self.lane_dir(lane);
         kito_lane::remove(&dir).map_err(Error::io(&dir))?;
         Ok(LaneInfo { workdir: None, ..info })
@@ -331,6 +362,11 @@ impl Repo {
                 .filter(|c| c.assigned_to == Some(record.id) && c.resolved_by.is_none())
                 .map(|c| c.id.to_string())
                 .collect(),
+            scope: record.scope.iter().map(|entry| crate::scope::show(&entry.item)).collect(),
+            out_of_scope: match self.lanes.contains_key(&record.id) {
+                true => self.out_of_scope(record.id).unwrap_or_default(),
+                false => Vec::new(),
+            },
         }
     }
 

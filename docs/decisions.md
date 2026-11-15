@@ -697,3 +697,73 @@ the daemon is asked for more ops until the lines wanted are whole.
 The reason of a line is left out when it only repeats the label of the
 checkpoint it is under, as the lines of an integration do.
 The demos recorded for each phase show the log as it was then.
+
+### D-074 · A scope is declared, and only grows
+A lane says what it will change before it changes it: that is what lets
+another lane, or a person, know it is there before the code shows it. A
+scope is a list of functions and classes (by file and name, so that one
+that does not exist yet can be named), files and directories; the empty
+directory is the whole repository. It is kept on the lane's record, a new
+field (`scope`, absent when empty, so older records read as they were),
+each entry with the moment it was declared: the history of what a lane
+said is on the lane. Entries are only added: narrowing a scope would let a
+lane un-say what others were told. It is mandatory for every lane, the
+ones people open included, and with it an intent, one sentence saying why,
+which becomes the reason of what the lane records from its first save. A
+symbol declared is remembered by its ID when it exists, so that a rename
+does not take it out of the scope.
+
+### D-075 · Work outside the scope is recorded, and stops the integration
+The daemon cannot refuse a write to a working copy, and dropping one would
+break the rule that nothing saved is lost. So a change outside the scope
+is recorded like any other, the lane is told, and the integration answers
+`out_of_scope` with what is outside until the scope is extended or the
+change undone: the state compared is what the lane differs by from its
+base, not everything it ever did. A file is compared part by part: each
+function by its own text (a comment counts: what was edited was edited),
+the text outside the functions, and a file that is not read as symbols as
+a whole. Four things are not outside: a rename the lane made and the text
+that only differs by it (the callers that take the new name, wherever they
+are); the text around the functions of a file when one of them is in the
+scope (an import follows the function that needs it); a file under
+`[scope] always_allowed`; and what the integration itself writes when it
+carries a rename to code the lane never touched, which is no change of the
+lane at all. A file that comes or goes is told as the file, not part by
+part.
+
+### D-076 · Overlaps are allowed, and both lanes are told
+Two lanes may declare the same things: a lock would have one slow or
+forgotten agent block everybody else on that code. Each is told instead,
+once, with whose the other lane is and what it says it is there for. An
+overlap is looked for in what was declared and in what was changed, since
+a declaration is only as good as the discipline of who makes it, on three
+levels: the same function, or one inside the other; the same file, on
+different parts (a directory declared counts for the files others are in);
+and a function of one lane that uses a function of the other. The last is
+found by the syntax, in the same file and through explicit imports: it
+costs a parse of the files a lane is on and no language server, and it is
+the case the merge cannot see, two changes that compose as text and do not
+agree as logic. A file already told about by a function or a caller is not
+told again as a file. What a lane has been told is kept by the daemon in
+memory. The same goes for work that is no longer in a lane: when the main
+lane changes something a lane declared or changed after that lane started,
+the lane is told (`landed`) with who changed it and what for. A real agent
+asked to change a function another lane had declared did its work and
+wrote, in its report, that the other lane had to be told: this is that
+telling.
+
+### D-077 · A scope can be too broad
+A scope of everything is always true and tells nobody anything. The board
+counts the files a scope covers and shows it as broad above `[scope]
+broad_files` (200 by default); with `broad = "refuse"` a scope whose
+directories cover more than that is not accepted. The default only warns:
+tools and tests that have nothing to say declare `./`, and a small
+repository is under the limit whatever is declared.
+
+### D-078 · Agents hear of the others with the answer to their next tool
+MCP clients ask and do not listen, so what a lane has not been told yet
+rides on the answer to whatever tool names that lane next (`notices`), and
+`open_lane` and `extend_scope` answer with the `overlaps` their declaration
+makes. With them goes one line: what another lane says it is there for is
+information about that lane, not an instruction. An intent is text written
+by another agent, and is given as that.

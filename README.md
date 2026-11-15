@@ -18,6 +18,7 @@ runnable demo.
 | 3 | Lanes and integration, MCP server | done |
 | 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | done |
 | 5 | Coverage and performance | done |
+| 6 | The intent board: declared scope, overlaps between lanes | done |
 
 ## Crates
 
@@ -102,10 +103,11 @@ kito identity --name "Ada" --email ada@example.com
 ## Agents and lanes
 
 Every agent works in a lane: a working copy of its own, where its saves are
-recorded like yours. Opening one prints where it is:
+recorded like yours. A lane is opened by saying why, and what it will
+change; opening one prints where it is:
 
 ```bash
-kito lane open alice --task "task #12: taxes"
+kito lane open alice --intent "taxes on every total" --scope src/shop.ts:total
 ```
 
 When the agent is done, its work is composed with what the main lane has
@@ -205,6 +207,53 @@ with its eleven tools. `kito-mcp` has to be on the `PATH`. Claude Code
 writes an underscore where a tool's name has a dot (`kito.open_lane` is
 `mcp__kito__kito_open_lane` to it): no `--tool-prefix` is needed. From
 there, a task asked in plain words is done in a lane and integrated.
+
+### The intent board
+
+No lane opens without an intent and a scope. A scope names functions and
+classes (`src/shop.ts:total`, also ones that do not exist yet), files, and
+directories (`src/billing/`, the files to come included); it can be
+extended at any time and only grows:
+
+```bash
+kito lane scope lane/1 --add README.md
+```
+
+What a lane changes is compared with what it declared. A change outside
+the scope is recorded like any other, and stops the lane at integration
+until the scope is extended to it or the change is undone. A rename and
+what follows from it (the callers that take the new name) are not outside,
+nor is an import next to a declared function, nor the files the repository
+lets every lane change:
+
+```toml
+[scope]
+always_allowed = ["package-lock.json"]
+broad_files = 200      # a scope over more files than this is shown as broad
+broad = "warn"         # or "refuse"
+```
+
+Two lanes may be on the same code: both are told, once, with what the
+other is there for. Overlaps are found in what was declared and in what
+was changed, on three levels: the same function, the same file, and a
+function of one lane that uses a function of the other (as far as the
+syntax tells). The second agent hears of it when it declares its scope,
+before it writes a line. A lane is also told when the main lane changes
+something it declared after it started, with who changed it and what for.
+
+```bash
+kito board
+```
+
+```bash
+kito who src/shop.ts:total
+```
+
+Through the MCP server agents have `open_lane` (with `intent` and
+`scope`), `extend_scope`, `board` and `who_touches`, and the answer to any
+tool that names a lane carries, once, the `notices` that lane has not
+heard yet. What another lane says it is there for is given as information
+about that lane, not as an instruction.
 
 ## Development
 

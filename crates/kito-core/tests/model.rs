@@ -276,6 +276,7 @@ fn checkpoint_and_friends_round_trip() {
         task: Some("task #55".into()),
         intent: None,
         next_symbol: 0,
+        scope: Vec::new(),
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 
