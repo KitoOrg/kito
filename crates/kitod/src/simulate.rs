@@ -31,6 +31,19 @@ pub struct Plan {
     pub rounds: usize,
     /// Stage the real conflicts too (needs at least 6 agents).
     pub real_conflicts: bool,
+    /// Where to keep each lane's working copy as it is when it asks for an
+    /// integration (`agent-<k>/round-<n>`): what another merge tool can be
+    /// given to do the same work.
+    pub snapshots: Option<PathBuf>,
+}
+
+/// One integration of the part of the script that has no real conflict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record {
+    pub agent: usize,
+    pub round: usize,
+    /// The git commit the integration was exported as.
+    pub git_commit: Option<String>,
 }
 
 /// What happened.
@@ -57,6 +70,8 @@ pub struct Report {
     pub checkpoints: u64,
     /// Anything that is not as the script says it must be.
     pub problems: Vec<String>,
+    /// The integrations of the rounds, by agent and round.
+    pub records: Vec<Record>,
 }
 
 impl Report {
@@ -296,6 +311,23 @@ fn contested(agent: &Agent, edit: impl FnOnce(&str) -> Result<String, String>) -
     write(&agent.dir, "src/shared/contested.ts", &edit(&text)?)
 }
 
+/// Copies the files under `from` to `to`, directories included.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for entry in fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        match entry.file_type().map_err(|e| e.to_string())? {
+            kind if kind.is_dir() => copy_tree(&source, &target)?,
+            kind if kind.is_file() => {
+                fs::copy(&source, &target).map_err(|e| format!("{}: {e}", source.display()))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Runs the simulation on the repository in `root`, whose daemon is running
 /// and whose main lane holds [`project`]`(plan.agents)`.
 pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
@@ -328,6 +360,7 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
             .enumerate()
             .map(|(k, mut agent)| {
                 let rounds = plan.rounds;
+                let snapshots = plan.snapshots.clone();
                 scope.spawn(move || {
                     let mut results = Vec::new();
                     // The latest word on each (file, text) wins: what a round adds a later one may remove.
@@ -340,6 +373,9 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
                         )?;
                         for (file, text, there) in agent.round(k, round)? {
                             expect.insert((file, text), there);
+                        }
+                        if let Some(snapshots) = &snapshots {
+                            copy_tree(&agent.dir, &snapshots.join(format!("agent-{k}/round-{round}")))?;
                         }
                         results.push(agent.integrate()?);
                     }
@@ -354,9 +390,10 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
     });
     let mut agents = Vec::new();
     let mut expect: Expectations = BTreeMap::new();
-    for outcome in outcomes {
+    for (k, outcome) in outcomes.into_iter().enumerate() {
         let (agent, results, expected) = outcome?;
-        for (result, took) in results {
+        for (round, (result, took)) in results.into_iter().enumerate() {
+            report.records.push(Record { agent: k, round, git_commit: result.git_commit.clone() });
             report.integrations += 1;
             report.integration_ms.push(took.as_secs_f64() * 1000.0);
             report.merged_by_themselves += result.auto_resolutions.len();

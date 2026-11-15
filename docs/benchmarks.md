@@ -220,6 +220,36 @@ git does not parse anything, which is the whole difference in the first row.
 The comparison says nothing about what git cannot do at any speed: the two
 agents of the phase 3 demo conflict in git and do not in Kito.
 
+### The same merges, given to git
+
+```
+cargo run --release -p kitod --example swarm -- --agents 10 --rounds 4 --compare-git
+```
+
+The swarm of phase 3 and, after it, the same integrations through git. For
+each one git is given what Kito merged: the state the lane started from,
+the main lane as it was, and the lane's working copy, through
+`git merge-tree --write-tree`, the merge of `git merge` without a working
+tree. Where git stops, the work goes on from Kito's result, as if someone
+had settled the conflict that way.
+
+| The same work | git | Kito |
+| --- | --- | --- |
+| 10 agents, 4 rounds: 40 integrations | 4 merged, 36 conflicts | 40 merged, 0 conflicts |
+| 6 agents, 8 rounds: 48 integrations | 8 merged, 40 conflicts | 48 merged, 0 conflicts |
+
+Where git merged, its files are the ones Kito wrote (12 of 12). Every
+conflict of git is in `src/shared/registry.ts`, the file where each agent
+adds a method and a function at the same place; the rest of the script (a
+function each in a shared file, the renames, the function that moves, the
+one that is removed) git merges too. The script was written around that
+case: the numbers say how far apart the two are on it, not how often real
+work looks like it. No history of real merges has been replayed.
+
+The same runs show what the queue costs: one integration at a time, each
+with its type check, kept an agent waiting 11.6 s at the median with ten
+agents and 7.1 s with six.
+
 ## Phase 4 · what a question to level 2 costs
 
 An integration in which neither side renamed anything asks nothing: finding

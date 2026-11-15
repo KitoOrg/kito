@@ -14,7 +14,7 @@ fn six_agents_four_rounds_and_the_three_real_conflicts() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     Repo::init(&root).unwrap().close().unwrap();
-    let plan = Plan { agents: 6, rounds: 4, real_conflicts: true };
+    let plan = Plan { agents: 6, rounds: 4, real_conflicts: true, snapshots: None };
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
     for (path, content) in project(plan.agents) {
         fs::create_dir_all(root.join(&path).parent().unwrap()).unwrap();
