@@ -421,6 +421,9 @@ pub struct Lane {
     /// only grows: what was declared stays declared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<ScopeEntry>,
+    /// The person the lane was opened for: whose agent works in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Author>,
 }
 
 /// Something a lane declares it will change, before it changes it.

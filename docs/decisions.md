@@ -767,3 +767,57 @@ rides on the answer to whatever tool names that lane next (`notices`), and
 makes. With them goes one line: what another lane says it is there for is
 information about that lane, not an instruction. An intent is text written
 by another agent, and is given as that.
+
+### D-079 · The server is a door, not a bigger daemon
+One server hosts several repositories. Each stays what it was, a directory
+with its own store and its own daemon: the server authenticates a client,
+checks the repository it names against what that person may use, and
+passes the requests on to that repository's daemon over its socket,
+starting it if it is not running. Nothing of the daemon had to learn about
+other repositories, a repository can be moved between a laptop and a
+server by moving its directory, and a daemon that fails takes its own
+repository down and no other. The cost is a process for each repository
+that has been asked for, and a hop for each request.
+
+### D-080 · Who a client is
+Over TCP a client presents a token: 32 random bytes, shown once when the
+person is added, of which the server keeps the hash. Through a command
+(`kito-server stdio`) the person is whoever started the command says, which
+is right when that is SSH with a forced command for each key, and why
+`stdio` is not offered over the network by the server itself. The server
+does not encrypt: `serve` listens on the loopback address unless told
+otherwise, and SSH is the transport between machines. TLS in the server
+was left out: it brings certificates to manage, and SSH is already where
+the people who run servers keep their keys. A refusal says as little as it
+can: the same words for no token and a wrong one, and for a repository
+that does not exist and one that is not the person's.
+
+### D-081 · What a client may ask
+The server passes on only the requests on a list: reading (status, log,
+history of a symbol, lanes, board, events, conflicts) and what lanes are
+for (open, close, scope, intent, rename, sync, integration, deciding a
+conflict). Stopping the daemon, reloading it, checkpoints and rollbacks of
+the main lane, exports and imports take a path on the server or change
+what everybody starts from, and stay with whoever runs it. On every
+request it passes, the server writes who is asking, over whatever the
+client put there: a lane opened through it belongs to the authenticated
+person (`owner`, a new field of the lane, absent on older records).
+
+### D-082 · Events are asked for, not pushed
+The daemon keeps the last few thousand things that happened, numbered, and
+answers "what came after number N" by waiting until there is something or
+the wait runs out. It is the same request and answer as everything else,
+so it needed no second protocol and passes through the server unchanged;
+a client that watches keeps a connection for it. A save is told wherever
+it was recorded (by the watcher, or by the scan an integration makes
+first): the recording itself leaves the ops for whoever tells.
+
+### D-083 · A connected directory
+`kito connect` writes one file, `.kito/remote.toml`: where the server is
+(an address and a token, or the command that reaches it) and which
+repository. A directory with that file is found like a repository is, and
+the client that would have looked for a socket connects to the server
+instead: the command line and the MCP server did not have to know. The
+file holds the token and is readable by its owner only. It is also where
+the files of a lane will be when lanes can be worked on from another
+machine.

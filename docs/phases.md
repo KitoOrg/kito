@@ -994,6 +994,111 @@ items and of what encloses a symbol.
 - The overlaps of every pair of lanes are computed when asked: nothing
   above ten lanes has been measured.
 
+## Phase 7 · one server, several repositories — done
+
+A server that keeps several repositories, clients that reach it from
+directories of their own, and what happens in a repository told to whoever
+watches it. The working copy of a lane is still on the server: editing it
+from another machine is phase 8.
+
+### What is there
+
+- **`kito-server`**, a door in front of ordinary repositories (D-079). Each
+  repository under the server's directory has its own daemon, started when
+  first asked for; the server knows who a client is, which repositories
+  that person may use, and passes the requests of a session on to the
+  daemon of the repository the session is about. `init`, `repo add` (empty,
+  or with the history of a git repository), `user add | list | remove`,
+  `serve`, `stdio`.
+- **Every session is authenticated** (D-080). Over TCP with a token, shown
+  once when the person is added and kept only as what it hashes to; through
+  a command (`stdio`), which is how SSH carries it, with the person SSH
+  established. No token, a wrong one, a repository that is not there and
+  one that is not theirs are refused, the last two in the same words.
+- **What a client may ask** is a list (D-081): seeing lanes and their
+  history, opening and closing them, scope, intents, integrations,
+  conflicts. Stopping a daemon, checkpoints and rollbacks of the main lane
+  are not on it.
+- **Whose lane it is.** A lane records the person it was opened for: the
+  one the server authenticated, whatever the client sent; on one machine,
+  whoever runs the repository. The board and the overlaps say whose agent
+  each lane is.
+- **Events** (D-082): the daemon numbers what happens (lanes opened and
+  closed, scope, intents, saves wherever they were recorded, integrations
+  and how they end, conflicts decided) and a request waits for what comes
+  after a number. `kito watch` prints them as they come.
+- **Connected directories** (D-083): `kito connect <server> <repository>`
+  makes a directory a client of a repository, with nothing in it but how
+  the server is reached. `kito`, and `kito-mcp` for agents, work there as
+  they do in a repository; `kito repos` lists what the person may use.
+
+### Demo
+
+```
+scripts/demo-phase7.sh
+```
+
+One server, two repositories, two people ([output](demo/phase7-demo.txt)).
+Ada may use both repositories, bob only the shop. Bob watches while ada
+opens a lane:
+
+```
+(bob) 10:40:01  lane/1    lane opened  by ada  builder: prices in cents [src/shop.py:total]
+Bob saw it 13 ms after ada asked.
+```
+
+His board says whose lane it is, and what is not his is refused:
+
+```
+$ kito board
+lane/1  builder (of ada)  active  prices in cents
+$ (bob) kito connect 127.0.0.1:7421 site bob-site --token kito_…
+kito: the server refused the connection: there is no repository `site` for bob on this server
+$ kito checkpoint -m from afar
+kito: `checkpoint` is not something a client can ask through the server
+```
+
+### Acceptance targets
+
+**A lane opened on one client shows on the other within 1 s.** In the test
+the second client is waiting on the events when the first opens the lane:
+it has the event well inside the second (the test fails above 1 s), and the
+demo measured 13 ms on one machine. Two machines were not available: the
+network between them is not in that number.
+
+**Every request is authenticated.** A session answers nothing before its
+greeting, and the greeting is refused without a token the server knows.
+Tested over TCP and through a command; SSH itself was not available to
+try.
+
+**Several repositories.** Two in the tests and in the demo: each with its
+own lanes, events and daemon, and a person limited to one cannot name the
+other.
+
+### Tests
+
+273 tests in all. New: the server with its real daemons
+(`kito-server/tests/server.rs`: people and tokens, authentication and
+access, a lane seen by another client, the protocol through a command); a
+directory connected to a server from the command line; the MCP tools from
+a connected directory.
+
+### Known limitations
+
+- **Nothing is encrypted by the server.** `serve` listens on this machine
+  only by default; across machines the transport is SSH, which could not
+  be tried here.
+- **A lane's working copy is on the server.** A client on another machine
+  sees lanes and decides about them, and cannot yet edit their files.
+- **One role.** Whoever may use a repository may do everything a client
+  can: who may integrate is phase 9.
+- **Tokens do not expire**, and removing a person is the only way to take
+  one back.
+- **A repository with no files cannot have lanes**: `repo add` without
+  `--from` makes one that is filled on the server.
+- One thread for each client, and one connection to a daemon for each
+  session: nothing above a handful of clients has been measured.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

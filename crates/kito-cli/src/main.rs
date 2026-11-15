@@ -6,7 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use kito_integrate::{ConflictInfo, IntegrationResult, JobState, Outcome as Integration};
-use kitod::client::{find_root, Client, ClientError};
+use kitod::client::{find_root, Client, ClientError, Remote};
 use kitod::identity::{self, Identity};
 use kitod::lanes::LaneInfo;
 use kitod::rename::RenameResult;
@@ -135,6 +135,33 @@ enum Cmd {
         /// Closed lanes too
         #[arg(long)]
         all: bool,
+    },
+    /// Connect a directory to a repository kept by a Kito server
+    Connect {
+        /// The server: host:port, or ssh://user@host/path/of/the/server
+        server: String,
+        /// The repository on the server
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The directory to connect (default: a new one named as the repository)
+        dir: Option<PathBuf>,
+        /// The token the server gave you, for host:port (default: $KITO_TOKEN)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// The repositories you may use on the server this directory is connected to
+    Repos,
+    /// What happens in the repository, as it happens
+    Watch {
+        /// Only what happens in this lane
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
+        /// Stop after this many events
+        #[arg(short = 'n', long, value_name = "N")]
+        count: Option<usize>,
+        /// Start with what the daemon still remembers, not from now
+        #[arg(long)]
+        past: bool,
     },
     /// Every open lane: whose it is, what for, what it declared and
     /// changed, and which lanes are on the same code
@@ -325,8 +352,21 @@ fn cmd_claude(cli: &Cli) -> Outcome {
     Ok(())
 }
 
+/// A directory connected to a server holds no repository of its own.
+fn not_connected(root: &Path) -> Outcome {
+    match Remote::load(root) {
+        Some(remote) => Err(format!(
+            "this directory is connected to `{}` on {}: the repository is kept there, not here",
+            remote.repo,
+            remote.place()
+        )),
+        None => Ok(()),
+    }
+}
+
 fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
+    not_connected(&root)?;
     std::fs::create_dir_all(&root).map_err(fail)?;
     if root.join(".git").exists() && !fresh && !root.join(".kito").join("format").is_file() {
         return Err("this directory is a git repository: use `kito import` to bring its history along, \
@@ -355,6 +395,7 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> 
 fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+    not_connected(&root)?;
     // The import works directly on the store: the daemon, if there is one, steps aside.
     stop_daemon(&root)?;
     let mut repo =
@@ -802,7 +843,12 @@ fn print_overlaps(overlaps: &Value) {
                     Some(intent) => format!(", there for: {intent}"),
                     None => String::new(),
                 };
-                println!("  overlap ({kind}) with {} of {}{why}", text("lane"), text("agent"));
+                // Whose agent it is, when it is somebody's.
+                let whose = match overlap["owner"].as_str() {
+                    Some(owner) if owner != text("agent") => format!(" ({owner})"),
+                    _ => String::new(),
+                };
+                println!("  overlap ({kind}) with {} of {}{whose}{why}", text("lane"), text("agent"));
                 // What a caller overlap is on is already a sentence.
                 match kind {
                     "caller" => println!("    {}", text("detail")),
@@ -828,6 +874,136 @@ fn print_scope(status: &Value) {
     }
 }
 
+/// How a server given on the command line is reached: `host:port` over
+/// TCP with a token, `ssh://user@host/dir` through SSH, where the person is
+/// who SSH says.
+fn remote_for(server: &str, repo: &str, token: &Option<String>) -> Result<Remote, String> {
+    if let Some(rest) = server.strip_prefix("ssh://") {
+        let (host, dir) = rest
+            .split_once('/')
+            .filter(|(host, dir)| !host.is_empty() && !dir.is_empty())
+            .ok_or("give the server as ssh://user@host/path/of/the/server")?;
+        let command = ["ssh", host, "kito-server", "--dir", &format!("/{dir}"), "stdio"];
+        return Ok(Remote {
+            server: None,
+            command: command.iter().map(|part| (*part).to_owned()).collect(),
+            repo: repo.to_owned(),
+            token: None,
+        });
+    }
+    let token = token
+        .clone()
+        .or_else(|| std::env::var("KITO_TOKEN").ok())
+        .filter(|token| !token.trim().is_empty())
+        .ok_or("a server reached as host:port wants a token: --token, or $KITO_TOKEN")?;
+    Ok(Remote {
+        server: Some(server.to_owned()),
+        command: Vec::new(),
+        repo: repo.to_owned(),
+        token: Some(token),
+    })
+}
+
+fn cmd_connect(
+    cli: &Cli,
+    server: &str,
+    repo: &str,
+    dir: &Option<PathBuf>,
+    token: &Option<String>,
+) -> Outcome {
+    let remote = remote_for(server, repo, token)?;
+    let dir = dir.clone().unwrap_or_else(|| PathBuf::from(repo));
+    if dir.join(".kito").join("format").is_file() {
+        return Err(format!("{} is a repository of its own: connect another directory", dir.display()));
+    }
+    // Asked first: a connection the server refuses leaves nothing behind.
+    let mut client = Client::remote(&remote, true).map_err(fail)?;
+    let me: Value = client.call("server.whoami", json!({})).map_err(fail)?;
+    std::fs::create_dir_all(&dir).map_err(fail)?;
+    remote.save(&dir).map_err(fail)?;
+    let dir = dir.canonicalize().map_err(fail)?;
+    if cli.json {
+        print_json(&json!({ "dir": dir, "repo": repo, "server": remote.place(), "user": me["user"] }));
+    } else {
+        println!(
+            "{} is connected to `{repo}` on {} as {}.",
+            dir.display(),
+            remote.place(),
+            me["user"].as_str().unwrap_or("?")
+        );
+        println!(
+            "In it, `kito board`, `kito lanes` and `kito watch` show the repository as the server has it."
+        );
+    }
+    Ok(())
+}
+
+fn cmd_repos(cli: &Cli) -> Outcome {
+    let root = root_of(cli)?;
+    let remote = Remote::load(&root)
+        .ok_or("this directory is a repository of its own: `kito repos` is for one connected to a server")?;
+    let repos: Vec<String> =
+        Client::remote(&remote, false).map_err(fail)?.call("server.repos", json!({})).map_err(fail)?;
+    if cli.json {
+        print_json(&json!({ "server": remote.place(), "repos": repos, "connected": remote.repo }));
+        return Ok(());
+    }
+    for repo in repos {
+        let here = if repo == remote.repo { "  (this directory)" } else { "" };
+        println!("{repo}{here}");
+    }
+    Ok(())
+}
+
+fn cmd_watch(cli: &Cli, lane: &Option<String>, count: Option<usize>, past: bool) -> Outcome {
+    use std::io::Write;
+    let mut client = daemon(cli)?;
+    let mut after = match past {
+        true => 0,
+        false => {
+            let now: Value = client.call("events", json!({})).map_err(fail)?;
+            now["next"].as_u64().unwrap_or(0)
+        }
+    };
+    let mut shown = 0;
+    loop {
+        // A request that waits for what happens next.
+        let heard: Value =
+            client.call("events", json!({ "after": after, "wait_ms": 25_000 })).map_err(fail)?;
+        after = heard["next"].as_u64().unwrap_or(after);
+        for event in heard["events"].as_array().into_iter().flatten() {
+            let text = |key: &str| event[key].as_str().unwrap_or_default();
+            if lane.as_deref().is_some_and(|only| only != text("lane")) {
+                continue;
+            }
+            if cli.json {
+                println!("{event}");
+            } else {
+                let when = utc(event["at_ms"].as_u64().unwrap_or(0));
+                let by = match text("by") {
+                    "" => String::new(),
+                    by => format!("  by {by}"),
+                };
+                let what = match text("what") {
+                    "" => String::new(),
+                    what => format!("  {what}"),
+                };
+                println!(
+                    "{}  {:<8}  {}{by}{what}",
+                    when.get(11..19).unwrap_or(&when),
+                    text("lane"),
+                    text("kind").replace('_', " ")
+                );
+            }
+            let _ = std::io::stdout().flush();
+            shown += 1;
+            if count.is_some_and(|limit| shown >= limit) {
+                return Ok(());
+            }
+        }
+    }
+}
+
 fn cmd_board(cli: &Cli) -> Outcome {
     let board: Value = daemon(cli)?.call("board", json!({})).map_err(fail)?;
     if cli.json {
@@ -840,7 +1016,11 @@ fn cmd_board(cli: &Cli) -> Outcome {
     }
     for lane in &lanes {
         let text = |key: &str| lane[key].as_str().unwrap_or_default();
-        println!("{}  {}  {}  {}", text("id"), text("agent"), text("state"), text("intent"));
+        let whose = match lane["owner"].as_str() {
+            Some(owner) if owner != text("agent") => format!(" (of {owner})"),
+            _ => String::new(),
+        };
+        println!("{}  {}{whose}  {}  {}", text("id"), text("agent"), text("state"), text("intent"));
         let scope: Vec<&str> =
             lane["scope"].as_array().into_iter().flatten().filter_map(|item| item["item"].as_str()).collect();
         let broad = match lane["broad"].as_bool() {
@@ -879,7 +1059,11 @@ fn cmd_who(cli: &Cli, target: &str) -> Outcome {
             Some(intent) => format!(", there for: {intent}"),
             None => String::new(),
         };
-        println!("{} of {} ({}){why}", text("lane"), text("agent"), text("kind"));
+        let whose = match overlap["owner"].as_str() {
+            Some(owner) if owner != text("agent") => format!(", {owner}'s"),
+            _ => String::new(),
+        };
+        println!("{} of {}{whose} ({}){why}", text("lane"), text("agent"), text("kind"));
         match text("kind") {
             "caller" => println!("  {}", text("detail")),
             _ => println!("  {}: {}", text("what"), text("detail")),
@@ -1372,6 +1556,9 @@ fn main() -> ExitCode {
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Board => cmd_board(&cli),
+        Cmd::Connect { server, name, dir, token } => cmd_connect(&cli, server, name, dir, token),
+        Cmd::Repos => cmd_repos(&cli),
+        Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),
         Cmd::Who { target } => cmd_who(&cli, target),
         Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),
         Cmd::Conflicts { id, all } => cmd_conflicts(&cli, id, *all),
@@ -1407,7 +1594,24 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::utc;
+    use super::{remote_for, utc};
+
+    #[test]
+    fn a_server_is_reached_with_a_token_or_through_ssh() {
+        let tcp = remote_for("kito.example.com:7421", "shop", &Some("kito_abc".into())).unwrap();
+        assert_eq!(
+            (tcp.server.as_deref(), tcp.token.as_deref()),
+            (Some("kito.example.com:7421"), Some("kito_abc"))
+        );
+        assert!(tcp.command.is_empty());
+        let ssh = remote_for("ssh://ada@kito.example.com/srv/kito", "shop", &None).unwrap();
+        assert_eq!(
+            ssh.command,
+            ["ssh", "ada@kito.example.com", "kito-server", "--dir", "/srv/kito", "stdio"]
+        );
+        assert_eq!((ssh.server, ssh.token, ssh.repo.as_str()), (None, None, "shop"));
+        assert!(remote_for("ssh://ada@host", "shop", &None).is_err());
+    }
 
     #[test]
     fn formats_utc_timestamps() {

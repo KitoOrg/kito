@@ -483,7 +483,14 @@ pub struct Repo {
     pub(crate) claims_cache: crate::scope::ClaimsCache,
     /// What each lane was already told about the other lanes.
     pub(crate) told: BTreeMap<LaneId, std::collections::BTreeSet<String>>,
+    /// What was recorded since somebody last asked: for whoever tells the
+    /// clients that watch the repository.
+    pub(crate) recorded: Vec<Op>,
 }
+
+/// How many recorded ops are kept for whoever asks: with nobody asking,
+/// the oldest are forgotten.
+const RECORDED_KEPT: usize = 4096;
 
 fn hex20(oid: &[u8; 20]) -> String {
     oid.iter().map(|b| format!("{b:02x}")).collect()
@@ -557,6 +564,7 @@ impl Repo {
             writing: std::sync::Arc::default(),
             claims_cache: Default::default(),
             told: BTreeMap::new(),
+            recorded: Vec::new(),
         };
         repo.load_state()?;
         repo.load_lanes()?;
@@ -1034,6 +1042,11 @@ impl Repo {
             self.store.commit()?;
             self.counters.captures += 1;
             self.counters.ops += ops.len() as u64;
+            self.recorded.extend(ops.iter().cloned());
+            if self.recorded.len() > RECORDED_KEPT {
+                let extra = self.recorded.len() - RECORDED_KEPT;
+                self.recorded.drain(..extra);
+            }
         }
         for (rel, stat) in stats {
             match stat {

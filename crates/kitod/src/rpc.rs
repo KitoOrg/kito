@@ -57,6 +57,27 @@ impl Response {
     }
 }
 
+/// Something that happened in a repository, as the clients that watch it
+/// are told.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    /// Events are numbered from 1, in the order they happened.
+    pub seq: u64,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// `lane_opened`, `lane_closed`, `scope_extended`, `intent`, `saved`,
+    /// `renamed`, `integration_requested`, `integrated`, `conflicts`,
+    /// `verification_failed`, `out_of_scope`, `nothing_to_integrate`,
+    /// `failed`, `conflict_resolved`, `checkpoint`.
+    pub kind: String,
+    /// The lane it happened in (`lane/1`, `main`).
+    pub lane: Option<String>,
+    /// Who did it: the person, or the agent.
+    pub by: Option<String>,
+    /// What, in a few words.
+    pub what: String,
+}
+
 /// Path of the socket of a repository's daemon.
 ///
 /// Normally `.kito/kitod.sock`; if the path exceeds the limit of Unix sockets

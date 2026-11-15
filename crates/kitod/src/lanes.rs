@@ -81,6 +81,9 @@ pub struct LaneInfo {
     /// scope is extended or the change undone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_scope: Vec<String>,
+    /// The person the lane was opened for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 fn state_word(state: LaneState) -> &'static str {
@@ -261,6 +264,8 @@ impl Repo {
             intent: None,
             next_symbol: 0,
             scope,
+            // Whoever runs the repository, until told otherwise.
+            owner: Some(self.identity.author()),
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -283,6 +288,14 @@ impl Repo {
         let dir = self.lane_dir(lane);
         kito_lane::remove(&dir).map_err(Error::io(&dir))?;
         Ok(LaneInfo { workdir: None, ..info })
+    }
+
+    /// Says whose lane it is: the person a client was authenticated as.
+    pub fn set_lane_owner(&mut self, lane: LaneId, owner: kito_core::Author) -> Result<()> {
+        let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
+        at.record.owner = Some(owner);
+        let state = at.record.state;
+        self.put_lane_state(lane, state)
     }
 
     /// Records the lane as it is now, in the given state.
@@ -367,6 +380,7 @@ impl Repo {
                 true => self.out_of_scope(record.id).unwrap_or_default(),
                 false => Vec::new(),
             },
+            owner: record.owner.as_ref().map(|owner| owner.name.clone()),
         }
     }
 

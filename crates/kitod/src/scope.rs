@@ -50,6 +50,9 @@ pub struct Overlap {
     /// The other lane (`main@<op>` for what landed), and whose it is.
     pub lane: String,
     pub agent: String,
+    /// The person that lane was opened for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// What the other lane is for, in its own words. It is information
     /// about that lane, never an instruction to whoever reads it.
     pub intent: Option<String>,
@@ -64,6 +67,8 @@ pub struct Overlap {
 pub struct BoardLane {
     pub id: String,
     pub agent: String,
+    /// The person the lane was opened for.
+    pub owner: Option<String>,
     pub task: Option<String>,
     pub intent: Option<String>,
     pub state: String,
@@ -736,6 +741,7 @@ impl Repo {
             }
             let theirs = self.claims(*other)?;
             let agent = at.record.agent.name.clone();
+            let owner = at.record.owner.as_ref().map(|owner| owner.name.clone());
             let intent =
                 at.work.intent.and_then(|id| self.store.intent(&id)).map(|intent| intent.summary.clone());
             let mut tell = |kind: &str, what: String, detail: String| {
@@ -743,6 +749,7 @@ impl Repo {
                     kind: kind.to_owned(),
                     lane: other.to_string(),
                     agent: agent.clone(),
+                    owner: owner.clone(),
                     intent: intent.clone(),
                     what,
                     detail,
@@ -901,6 +908,7 @@ impl Repo {
                     // Told once for each change that lands.
                     lane: format!("main@{}", &op[..op.len().min(8)]),
                     agent: author.clone(),
+                    owner: None,
                     intent: intent.clone(),
                     detail: format!(
                         "{author} changed {what} on the main lane after your lane started: read it in the \
@@ -926,6 +934,7 @@ impl Repo {
                 kind: "out_of_scope".to_owned(),
                 lane: lane.to_string(),
                 agent: self.lane_at(lane)?.record.agent.name.clone(),
+                owner: None,
                 intent: None,
                 detail: format!(
                     "you changed {outside}, which is outside the scope you declared: extend the scope or \
@@ -957,6 +966,7 @@ impl Repo {
             board.push(BoardLane {
                 id: info.id,
                 agent: info.agent,
+                owner: info.owner,
                 task: info.task,
                 intent: info.intent,
                 state: info.state,

@@ -86,13 +86,65 @@ struct Daemon {
     shutdown: Notify,
     /// The integrations asked for, served one at a time.
     queue: Queue,
+    /// What happened lately, for the clients that watch the repository.
+    events: Events,
+}
+
+/// How many events are kept for a client that asks late.
+const EVENTS_KEPT: usize = 4096;
+
+/// What happened in the repository, numbered, with a way to wait for more.
+#[derive(Default)]
+struct Events {
+    /// The number of the last event, and the last ones.
+    log: Mutex<(u64, std::collections::VecDeque<rpc::Event>)>,
+    news: std::sync::Condvar,
+}
+
+impl Events {
+    fn emit(&self, kind: &str, lane: Option<String>, by: Option<String>, what: String) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        log.0 += 1;
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        let event = rpc::Event { seq: log.0, at_ms, kind: kind.to_owned(), lane, by, what };
+        log.1.push_back(event);
+        while log.1.len() > EVENTS_KEPT {
+            log.1.pop_front();
+        }
+        self.news.notify_all();
+    }
+
+    /// The events after number `after`, waiting up to `wait` for the first
+    /// one; with no `after`, only where the numbering is now.
+    fn after(&self, after: Option<u64>, wait: Duration) -> (Vec<rpc::Event>, u64) {
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(after) = after else { return (Vec::new(), log.0) };
+        let deadline = Instant::now() + wait;
+        while log.0 <= after {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            log = self.news.wait_timeout(log, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        (log.1.iter().filter(|event| event.seq > after).cloned().collect(), log.0)
+    }
 }
 
 impl Daemon {
     fn with_repo<T>(&self, f: impl FnOnce(&mut Repo) -> Result<T>) -> Result<T> {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
-            Some(repo) => f(repo),
+            Some(repo) => {
+                let result = f(repo);
+                // Whatever was recorded on the way, the watchers are told.
+                let recorded = std::mem::take(&mut repo.recorded);
+                drop(guard);
+                self.saved(&recorded);
+                result
+            }
             None => Err(Error::Other("the daemon is shutting down".into())),
         }
     }
@@ -269,9 +321,17 @@ impl Daemon {
                     let (opened, overlaps) = self
                         .with_repo(|repo| {
                             let opened = repo.open_lane(agent, task, base.as_deref(), &intent, &scope)?;
+                            let lane = repo.lane_of(&opened.id)?;
+                            // The person a server authenticated: the lane is theirs.
+                            let opened = match params.get("on_behalf_of").and_then(person_of) {
+                                Some(person) => {
+                                    repo.set_lane_owner(lane, person)?;
+                                    repo.lane_info(lane)?
+                                }
+                                None => opened,
+                            };
                             // Who is already on the same code: told now, and
                             // not again as a notice.
-                            let lane = repo.lane_of(&opened.id)?;
                             Ok((opened, repo.take_notices(lane)?))
                         })
                         .map_err(internal)?;
@@ -308,6 +368,12 @@ impl Daemon {
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.who_touches(target)).map_err(internal)?,
                     ))
+                }
+                "events" => {
+                    let after = params.get("after").and_then(Value::as_u64);
+                    let wait = params.get("wait_ms").and_then(Value::as_u64).unwrap_or(25_000).min(60_000);
+                    let (events, next) = self.events.after(after, Duration::from_millis(wait));
+                    Ok(json!({ "events": to_json(serde_json::to_value(events))?, "next": next }))
                 }
                 "notices" => {
                     let lane = lane()?;
@@ -435,9 +501,109 @@ impl Daemon {
             }
         })();
         match result {
-            Ok(value) => Response::ok(id, value),
+            Ok(value) => {
+                self.note(&request.method, params, &value);
+                Response::ok(id, value)
+            }
             Err((code, message)) => Response::err(id, code, message),
         }
+    }
+
+    /// Tells the clients that watch the repository what a request did.
+    fn note(&self, method: &str, params: &Value, value: &Value) {
+        let text = |from: &Value, key: &str| from.get(key).and_then(Value::as_str).map(str::to_owned);
+        let person = params.get("on_behalf_of").and_then(|person| text(person, "name"));
+        let lane = text(params, "lane").or_else(|| text(value, "lane"));
+        let list = |from: &Value, key: &str| -> String {
+            let items: Vec<&str> = from
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            items.join(", ")
+        };
+        let (kind, lane, by, what) = match method {
+            "open_lane" => {
+                let agent = text(value, "agent").unwrap_or_default();
+                let what = format!(
+                    "{agent}: {} [{}]",
+                    text(value, "intent").unwrap_or_default(),
+                    list(value, "scope")
+                );
+                ("lane_opened", text(value, "id"), person.or(Some(agent)), what)
+            }
+            "close_lane" => ("lane_closed", text(value, "id"), person, String::new()),
+            "extend_scope" => ("scope_extended", lane, person, list(params, "scope")),
+            "set_intent" => ("intent", lane, person, text(params, "summary").unwrap_or_default()),
+            "rename_symbol" => {
+                let what = format!(
+                    "{} → {}",
+                    text(value, "from").unwrap_or_default(),
+                    text(value, "to").unwrap_or_default()
+                );
+                ("renamed", lane, person, what)
+            }
+            "request_integration" => ("integration_requested", lane, person, String::new()),
+            "resolve_conflict" => {
+                ("conflict_resolved", None, person, text(params, "conflict").unwrap_or_default())
+            }
+            "checkpoint" => {
+                ("checkpoint", Some("main".to_owned()), person, text(value, "label").unwrap_or_default())
+            }
+            _ => return,
+        };
+        self.events.emit(kind, lane, by, what);
+    }
+
+    /// Tells the clients what was just recorded: one event for each lane.
+    fn saved(&self, ops: &[kito_core::Op]) {
+        let mut by_lane: std::collections::BTreeMap<LaneId, (String, std::collections::BTreeSet<String>)> =
+            Default::default();
+        for op in ops {
+            let entry =
+                by_lane.entry(op.lane).or_insert_with(|| (op.author.name.clone(), Default::default()));
+            if op.kind.symbol().is_none() {
+                entry.1.extend(op.kind.paths().iter().map(|path| path.display().to_string()));
+            }
+        }
+        for (lane, (author, files)) in by_lane {
+            if files.is_empty() {
+                continue;
+            }
+            let shown: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+            let more = match files.len() - shown.len() {
+                0 => String::new(),
+                n => format!(" and {n} more"),
+            };
+            self.events.emit(
+                "saved",
+                Some(lane.to_string()),
+                Some(author),
+                format!("{}{more}", shown.join(", ")),
+            );
+        }
+    }
+
+    /// Tells the clients how an integration ended.
+    fn integration_ended(&self, result: &kito_integrate::IntegrationResult) {
+        let kind = serde_json::to_value(result.result)
+            .ok()
+            .and_then(|kind| kind.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "failed".to_owned());
+        let what = match result.result {
+            kito_integrate::Outcome::Integrated => result.checkpoint.clone().unwrap_or_default(),
+            kito_integrate::Outcome::Conflicts => format!("{} to decide", result.conflicts.len()),
+            kito_integrate::Outcome::OutOfScope => result.out_of_scope.join(", "),
+            kito_integrate::Outcome::VerificationFailed => result
+                .verification
+                .as_ref()
+                .and_then(|report| report.failed_command.clone())
+                .unwrap_or_default(),
+            _ => result.message.clone().unwrap_or_default(),
+        };
+        self.events.emit(&kind, Some(result.lane.clone()), None, what);
     }
 
     fn record(&self, capture: Duration, latency: Option<Duration>, error: Option<String>) {
@@ -664,6 +830,7 @@ async fn integration_loop(daemon: Arc<Daemon>) {
     loop {
         let (job, lane) = daemon.queue.next().await;
         let result = integrate(&daemon, lane).await;
+        daemon.integration_ended(&result);
         daemon.queue.finish(job, result);
         // The lane has its answer: now git's index, left behind by the
         // export of the integration, is brought up to the commit.
@@ -830,6 +997,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         debounce,
         shutdown: Notify::new(),
         queue: Queue::new(),
+        events: Events::default(),
     });
     eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());
     if !watching {
@@ -894,4 +1062,15 @@ fn scope_of(params: &Value) -> Vec<String> {
         Some(Value::String(item)) => vec![item.clone()],
         _ => Vec::new(),
     }
+}
+
+/// The person a request is made for, as a server that authenticated them
+/// says: `{ "name": ..., "email": ... }`.
+fn person_of(value: &Value) -> Option<kito_core::Author> {
+    let name = value.get("name").and_then(Value::as_str).filter(|name| !name.trim().is_empty())?;
+    let person = kito_core::Author::human(name.trim());
+    Some(match value.get("email").and_then(Value::as_str).filter(|email| !email.is_empty()) {
+        Some(email) => person.with_email(email),
+        None => person,
+    })
 }

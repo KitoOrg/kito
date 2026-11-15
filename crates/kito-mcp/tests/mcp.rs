@@ -367,3 +367,116 @@ fn agents_declare_their_scope_and_are_told_who_else_is_there() {
     drop(mcp);
     stop_daemon(&root);
 }
+
+/// The server binary sits next to the MCP server's; built if it is not there.
+fn kito_server() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kito-server");
+    BUILD.call_once(|| {
+        if !path.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kito-server", "--bin", "kito-server"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kito-server");
+        }
+    });
+    path
+}
+
+#[test]
+fn the_tools_reach_a_repository_kept_by_a_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let serverdir = base.join("server");
+    let run = |args: &[&str]| -> String {
+        let out = Command::new(kito_server())
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".absent-personal-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // A git repository for the server to host.
+    let src = base.join("src-repo");
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.ts"), SHOP).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"], &["commit", "-q", "-m", "start"]] {
+        let done = Command::new("git")
+            .current_dir(&src)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Ada")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+            .env("GIT_COMMITTER_NAME", "Ada")
+            .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+            .status()
+            .unwrap();
+        assert!(done.success(), "git {args:?}");
+    }
+    run(&["init", serverdir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let token = run(&["user", "add", "ada"]);
+    let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+
+    /// The server, stopped when the test ends, however it ends.
+    struct Serving(Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        Command::new(kito_server())
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(["serve", "--listen", "127.0.0.1:0"])
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".absent-personal-config"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(serving.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let address = line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap();
+
+    // A directory connected to the repository: the MCP server started in it
+    // speaks to the server, as the person the token belongs to.
+    let here = base.join("connected");
+    fs::create_dir(&here).unwrap();
+    let remote = kitod::client::Remote {
+        server: Some(address.to_owned()),
+        command: Vec::new(),
+        repo: "shop".to_owned(),
+        token: Some(token),
+    };
+    remote.save(&here).unwrap();
+    let mut mcp = Session::start(&here, &[]);
+    assert_eq!(mcp.tool("kito.board", json!({})).unwrap(), json!([]));
+    let lane = mcp
+        .tool(
+            "kito.open_lane",
+            json!({ "agent": "builder", "intent": "prices in cents", "scope": ["src/shop.ts:total"] }),
+        )
+        .unwrap();
+    assert_eq!((lane["id"].as_str(), lane["owner"].as_str()), (Some("lane/1"), Some("ada")));
+    let who = mcp.tool("kito.who_touches", json!({ "target": "src/shop.ts:total" })).unwrap();
+    assert_eq!(who[0]["agent"], "builder");
+    let closed = mcp.tool("kito.close_lane", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(closed["state"], "closed");
+    drop(mcp);
+    drop(serving);
+    stop_daemon(&serverdir.join("repos/shop"));
+}

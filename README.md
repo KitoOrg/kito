@@ -19,6 +19,7 @@ runnable demo.
 | 4 | Level 2 semantics: LSP, `SemanticRef` conflicts | done |
 | 5 | Coverage and performance | done |
 | 6 | The intent board: declared scope, overlaps between lanes | done |
+| 7 | One server for several repositories, clients on other machines | done |
 
 ## Crates
 
@@ -36,6 +37,7 @@ runnable demo.
 | `kitod` | Daemon: watcher, capture on every lane, integration, JSON-RPC socket |
 | `kito-cli` | The `kito` binary |
 | `kito-mcp` | The MCP server agents talk to |
+| `kito-server` | One server for several repositories: who a client is, what they may use |
 
 ## Trying it out
 
@@ -255,6 +257,64 @@ tool that names a lane carries, once, the `notices` that lane has not
 heard yet. What another lane says it is there for is given as information
 about that lane, not as an instruction.
 
+## A server for several repositories
+
+`kito-server` keeps several repositories behind one door. Each is an
+ordinary Kito repository with its own daemon; the server knows who a client
+is and which repositories that person may use, and passes the requests on.
+
+```bash
+kito-server init /srv/kito
+```
+
+```bash
+kito-server --dir /srv/kito repo add shop --from /path/to/a/git/repository
+```
+
+```bash
+kito-server --dir /srv/kito user add ada --email ada@example.com
+```
+
+`user add` prints the person's token once; the server keeps only what it
+hashes to. `--repo <name>` limits a person to some repositories.
+
+```bash
+kito-server --dir /srv/kito serve
+```
+
+A client connects a directory of its own to a repository, and from then on
+`kito` in that directory shows the repository as the server has it:
+
+```bash
+kito connect 127.0.0.1:7421 shop --token kito_...
+```
+
+```bash
+kito watch
+```
+
+`kito watch` prints what happens as it happens: lanes opened and closed,
+scopes extended, saves, integrations and how they end. A lane opened
+through the server belongs to the person the client was authenticated as,
+whatever the client says, and the board shows whose agent each lane is.
+
+`serve` listens on this machine only, and what it carries is not
+encrypted. From another machine the way in is SSH, where the person is who
+SSH says they are:
+
+```bash
+kito connect ssh://ada@host/srv/kito shop
+```
+
+For that, give each key a forced command in `authorized_keys` that names
+its person: `command="kito-server --dir /srv/kito stdio --as ada"`.
+
+What a client may ask is what lanes are for: seeing them, opening and
+closing them, declaring scope, integrating, deciding conflicts. Stopping a
+daemon, checkpoints of the main lane and rollbacks stay with whoever runs
+the server. A lane's working copy is on the server: editing it from
+another machine is the next phase.
+
 ## Development
 
 ```bash
@@ -267,6 +327,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 7 demo: one server, two repositories, two people; one opens a lane
+and the other sees it.
+
+```bash
+cargo build --release -p kitod -p kito-cli -p kito-server
+```
+
+```bash
+scripts/demo-phase7.sh
+```
+
+Phase 6 demo: three agents declare what they will change, and the ones on
+the same code are told before they write.
+
+```bash
+scripts/demo-phase6.sh
 ```
 
 Phase 5 demo: the acceptance criteria of the plan measured on a repository

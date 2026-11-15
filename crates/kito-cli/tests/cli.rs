@@ -673,27 +673,33 @@ fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
             "README.md",
         ],
     );
-    assert!(frank.contains("overlap (function) with lane/1 of erin, there for: prices in cents"), "{frank}");
+    assert!(
+        frank.contains("overlap (function) with lane/1 of erin (ada), there for: prices in cents"),
+        "{frank}"
+    );
     assert!(frank.contains("src/shop.py:total: erin declared it; you declared it"), "{frank}");
     // A function that uses hers is an overlap too.
     let gina =
         ok(root, &["lane", "open", "gina", "--intent", "a nicer receipt", "--scope", "src/shop.py:receipt"]);
-    assert!(gina.contains("overlap (caller) with lane/1 of erin"), "{gina}");
+    assert!(gina.contains("overlap (caller) with lane/1 of erin (ada)"), "{gina}");
     assert!(gina.contains("your src/shop.py:receipt uses src/shop.py:total, which erin declared"), "{gina}");
 
     let board = ok(root, &["board"]);
     for needle in [
-        "lane/1  erin  active  prices in cents",
+        "lane/1  erin (of ada)  active  prices in cents",
         "  scope    src/shop.py:total",
-        "lane/2  frank  active  a discount over 50",
+        "lane/2  frank (of ada)  active  a discount over 50",
         "  scope    src/shop.py:total, README.md",
-        "overlap (function) with lane/2 of frank, there for: a discount over 50",
+        "overlap (function) with lane/2 of frank (ada), there for: a discount over 50",
     ] {
         assert!(board.contains(needle), "missing {needle:?} in:\n{board}");
     }
     let who = ok(root, &["who", "src/shop.py:total"]);
-    assert!(who.contains("lane/1 of erin (function)") && who.contains("lane/2 of frank (function)"), "{who}");
-    assert!(ok(root, &["who", "README.md"]).contains("lane/2 of frank (file)"));
+    assert!(
+        who.contains("lane/1 of erin, ada's (function)") && who.contains("lane/2 of frank, ada's (function)"),
+        "{who}"
+    );
+    assert!(ok(root, &["who", "README.md"]).contains("lane/2 of frank, ada's (file)"));
     assert!(ok(root, &["who", "src/other.py"]).contains("No open lane declared or changed src/other.py"));
     assert_eq!(json(root, &["board", "--json"]).as_array().unwrap().len(), 3);
 
@@ -710,10 +716,124 @@ fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
     // Declared, it goes in; the scope only grows.
     let grown = ok(root, &["lane", "scope", "lane/1", "--add", "README.md"]);
     assert!(grown.contains("Scope ............. src/shop.py:total, README.md"), "{grown}");
-    assert!(grown.contains("overlap (file) with lane/2 of frank"), "{grown}");
+    assert!(grown.contains("overlap (file) with lane/2 of frank (ada)"), "{grown}");
     assert!(ok(root, &["integrate", "lane/1"]).contains("lane/1: integrated as ckpt#2"));
     assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop, in cents\n");
     let scope = json(root, &["lane", "scope", "lane/2", "--json"]);
     assert_eq!(scope["scope"], serde_json::json!(["src/shop.py:total", "README.md"]));
     ok(root, &["daemon", "stop"]);
+}
+
+/// The server binary sits next to the CLI's; built if it is not there.
+fn kito_server() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    let path = Path::new(env!("CARGO_BIN_EXE_kito")).with_file_name("kito-server");
+    BUILD.call_once(|| {
+        if !path.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kito-server", "--bin", "kito-server"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kito-server");
+        }
+    });
+    path
+}
+
+#[test]
+fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let serverdir = base.join("server");
+    let run = |args: &[&str]| -> String {
+        let out = Command::new(kito_server())
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".absent-personal-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // A git repository for the server to host.
+    let src = base.join("src-repo");
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.py"), SHOP_PY).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-q", "-m", "start"]);
+    run(&["init", serverdir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let token = run(&["user", "add", "ada"]);
+    let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    /// The server, stopped when the test ends, however it ends.
+    struct Serving(std::process::Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        Command::new(kito_server())
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(["serve", "--listen", "127.0.0.1:0"])
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".absent-personal-config"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(serving.0.stdout.take().unwrap()), &mut line)
+        .unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap().to_owned();
+
+    // A token the server does not know connects nothing, and leaves nothing.
+    let refused = kito(&base, &["connect", &address, "shop", "nope", "--token", "kito_wrong"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("this token is not one the server knows"));
+    assert!(!base.join("nope").exists());
+
+    let connected = ok(&base, &["connect", &address, "shop", "--token", &token]);
+    assert!(connected.contains("is connected to `shop` on") && connected.contains("as ada."), "{connected}");
+    let here = base.join("shop");
+    assert_eq!(ok(&here, &["repos"]), "shop  (this directory)\n");
+    assert!(ok(&here, &["lanes"]).contains("No open lanes"));
+
+    // The lane is opened on the server, for the person the token belongs to.
+    let opened = ok(
+        &here,
+        &["lane", "open", "builder", "--intent", "prices in cents", "--scope", "src/shop.py:total"],
+    );
+    assert!(opened.contains("lane/1 opened for builder"), "{opened}");
+    let board = ok(&here, &["board"]);
+    assert!(board.contains("lane/1  builder (of ada)  active  prices in cents"), "{board}");
+    assert!(serverdir.join("repos/shop/.kito/lanes/1/work/src/shop.py").is_file());
+    // What happened is there for whoever watches.
+    let watched = ok(&here, &["watch", "--past", "-n", "1"]);
+    assert!(watched.contains("lane/1") && watched.contains("lane opened  by ada"), "{watched}");
+    assert!(watched.contains("builder: prices in cents [src/shop.py:total]"), "{watched}");
+    assert!(ok(&here, &["log"]).contains("src/shop.py"));
+
+    // What belongs to whoever runs the server stays there; and a directory
+    // connected to a server is no repository of its own.
+    let checkpoint = kito(&here, &["checkpoint", "-m", "from afar"]);
+    assert!(!checkpoint.status.success());
+    assert!(String::from_utf8_lossy(&checkpoint.stderr)
+        .contains("not something a client can ask through the server"));
+    let init = kito(&here, &["init"]);
+    assert!(String::from_utf8_lossy(&init.stderr).contains("is connected to `shop`"));
+
+    drop(serving);
+    ok(&serverdir.join("repos/shop"), &["daemon", "stop"]);
 }

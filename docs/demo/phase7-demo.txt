@@ -1,0 +1,107 @@
+# 1. The server: two repositories, two people
+
+$ kito-server init /tmp/kito-demo/server
+Kito server created in /tmp/kito-demo/server
+Add a repository with `kito-server --dir /tmp/kito-demo/server repo add <name>`,
+a person with `user add <name>`, then run `serve`.
+
+$ kito-server --dir /tmp/kito-demo/server repo add shop --from /tmp/kito-demo/shop-src
+Repository `shop` created in /tmp/kito-demo/server/repos/shop
+
+$ kito-server --dir /tmp/kito-demo/server repo add site --from /tmp/kito-demo/site-src
+Repository `site` created in /tmp/kito-demo/server/repos/site
+
+$ kito-server --dir /tmp/kito-demo/server user add ada --email ada@example.com
+ada added. Their token, shown this once:
+kito_…
+
+$ kito-server --dir /tmp/kito-demo/server user add bob --repo shop
+bob added. Their token, shown this once:
+kito_…
+
+$ kito-server --dir /tmp/kito-demo/server user list
+ada <ada@example.com>: *
+bob: shop
+
+$ kito-server --dir /tmp/kito-demo/server serve --listen 127.0.0.1:7421 &
+kito-server: listening on 127.0.0.1:7421, 2 repositories
+
+
+# 2. Each connects a directory of their own
+
+$ kito connect 127.0.0.1:7421 shop ada-shop --token kito_…
+/tmp/kito-demo/ada-shop is connected to `shop` on 127.0.0.1:7421 as ada.
+In it, `kito board`, `kito lanes` and `kito watch` show the repository as the server has it.
+
+$ kito connect 127.0.0.1:7421 shop bob-shop --token kito_…
+/tmp/kito-demo/bob-shop is connected to `shop` on 127.0.0.1:7421 as bob.
+In it, `kito board`, `kito lanes` and `kito watch` show the repository as the server has it.
+
+$ kito repos
+shop  (this directory)
+site
+
+$ kito repos
+shop  (this directory)
+
+
+# 3. Bob watches; ada opens a lane
+
+$ (bob) kito watch -n 1 &
+
+$ kito lane open builder --intent prices in cents --scope src/shop.py:total
+lane/1 opened for builder on ckpt#1.
+Working copy: /tmp/kito-demo/server/repos/shop/.kito/lanes/1/work
+Scope: src/shop.py:total
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+(bob) 10:40:01  lane/1    lane opened  by ada  builder: prices in cents [src/shop.py:total]
+Bob saw it 13 ms after ada asked.
+
+
+# 4. Whose lane it is, and a second lane on the same function
+
+$ kito board
+lane/1  builder (of ada)  active  prices in cents
+  scope    src/shop.py:total
+
+$ kito lane open fixer --intent a discount over 50 --scope src/shop.py:total
+lane/2 opened for fixer on ckpt#1.
+Working copy: /tmp/kito-demo/server/repos/shop/.kito/lanes/2/work
+Scope: src/shop.py:total
+  overlap (function) with lane/1 of builder (ada), there for: prices in cents
+    src/shop.py:total: builder declared it; you declared it
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+
+# 5. What is refused
+
+$ kito connect 127.0.0.1:7421 shop nope --token kito_wrong
+kito: the server refused the connection: this token is not one the server knows
+(exit status 1)
+
+$ (bob) kito connect 127.0.0.1:7421 site bob-site --token kito_…
+kito: the server refused the connection: there is no repository `site` for bob on this server
+(exit status 1)
+
+$ kito checkpoint -m from afar
+kito: `checkpoint` is not something a client can ask through the server
+(exit status 1)
+
+$ kito daemon stop
+kito: `shutdown` is not something a client can ask through the server
+(exit status 1)
+
+
+# 6. The other repository knows nothing of the first
+
+$ kito connect 127.0.0.1:7421 site ada-site --token kito_…
+/tmp/kito-demo/ada-site is connected to `site` on 127.0.0.1:7421 as ada.
+In it, `kito board`, `kito lanes` and `kito watch` show the repository as the server has it.
+
+$ kito lanes
+No open lanes. Open one with `kito lane open <agent> --intent <why> --scope <what>`.
+
+$ kito lanes
+lane/1   builder      active      base ckpt#1     0 ops   0 files  prices in cents
+lane/2   fixer        active      base ckpt#1     0 ops   0 files  a discount over 50
