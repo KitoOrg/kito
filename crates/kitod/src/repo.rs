@@ -291,6 +291,10 @@ pub struct Status {
     /// The commands that must succeed before a lane is integrated.
     #[serde(default)]
     pub checks: Vec<String>,
+    /// How they run: `confined`, `confined, with network`, `off`, or
+    /// `unavailable` (this system cannot confine them).
+    #[serde(default)]
+    pub sandbox: String,
     /// The git remote every integration is pushed to.
     #[serde(default)]
     pub push: Option<String>,
@@ -1511,6 +1515,7 @@ impl Repo {
             unexported: checkpoints.iter().filter(|c| c.git_commit.is_none()).count(),
             protected: self.config.main.protected,
             checks: self.config.verify.commands.clone(),
+            sandbox: self.sandbox_state().to_owned(),
             push: self.config.git.push.clone(),
             refused: self.refusals.0,
             last_refused: self.refusals.1.clone(),

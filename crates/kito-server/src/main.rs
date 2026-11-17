@@ -24,6 +24,7 @@
 
 mod session;
 mod state;
+mod tls;
 
 use clap::{Parser, Subcommand};
 use kitod::client::Client;
@@ -59,8 +60,15 @@ enum Cmd {
         #[command(subcommand)]
         command: UserCmd,
     },
-    /// Serve the repositories to clients that connect over TCP, with a token
+    /// Print the fingerprint of the server's certificate: what clients
+    /// connect with (`kito connect ... --fingerprint`)
+    Fingerprint,
+    /// Serve the repositories to clients that connect over TCP, with a
+    /// token; connections are encrypted with the server's certificate
     Serve {
+        /// Do not encrypt: for clients on this machine only
+        #[arg(long)]
+        plain: bool,
         /// Address to listen on (default: the one in server.toml)
         #[arg(long, value_name = "ADDR")]
         listen: Option<String>,
@@ -159,6 +167,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             let dir = path.clone().unwrap_or_else(|| dir_of(cli));
             let server = Server::init(&dir)?;
             println!("Kito server created in {}", server.dir.display());
+            println!("Its certificate's fingerprint: {}", tls::fingerprint(&server.dir)?);
             println!("Add a repository with `kito-server --dir {} repo add <name>`,", server.dir.display());
             println!("a person with `user add <name>`, then run `serve`.");
         }
@@ -224,6 +233,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             let token = server.add_user(name, email.clone(), repos, *role)?;
             println!("{name} added. Their token, shown this once:");
             println!("{token}");
+            // What they connect with: the token, and what says the server
+            // they reach is this one.
+            println!("They connect with:");
+            println!(
+                "  kito connect <host>:<port> <repository> --token {token} --fingerprint {}",
+                tls::fingerprint(&server.dir)?
+            );
         }
         Cmd::User { command: UserCmd::Role { name, role, repo } } => {
             let mut server = Server::open(&dir_of(cli))?;
@@ -254,9 +270,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             server.remove_user(name)?;
             println!("{name} removed: their token no longer works.");
         }
-        Cmd::Serve { listen } => {
+        Cmd::Fingerprint => {
             let server = Server::open(&dir_of(cli))?;
-            session::serve(server, listen.as_deref())?;
+            println!("{}", tls::fingerprint(&server.dir)?);
+        }
+        Cmd::Serve { listen, plain } => {
+            let server = Server::open(&dir_of(cli))?;
+            session::serve(server, listen.as_deref(), *plain)?;
         }
         Cmd::Stdio { user } => {
             let server = Server::open(&dir_of(cli))?;

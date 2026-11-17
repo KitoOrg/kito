@@ -95,6 +95,8 @@ struct World {
     ada: String,
     bob: String,
     serving: Option<Child>,
+    /// What the server said when it last started.
+    said: String,
 }
 
 fn token_in(printed: &str) -> String {
@@ -113,19 +115,24 @@ impl World {
         ok(&dir, &["repo", "add", "site", "--from", site.to_str().unwrap()]);
         let ada = token_in(&ok(&dir, &["user", "add", "ada", "--email", "ada@example.com"]));
         let bob = token_in(&ok(&dir, &["user", "add", "bob", "--repo", "shop"]));
-        World { _tmp: tmp, dir, ada, bob, serving: None }
+        World { _tmp: tmp, dir, ada, bob, serving: None, said: String::new() }
     }
 
     /// Starts `serve` on a free port and returns its address.
     fn serve(&mut self) -> String {
-        let mut child = server(&self.dir, &["serve", "--listen", "127.0.0.1:0"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        self.serve_with(&[])
+    }
+
+    /// Starts the server; returns the address it listens on. What it
+    /// said when it started is kept in `said`.
+    fn serve_with(&mut self, more: &[&str]) -> String {
+        let args: Vec<&str> = ["serve", "--listen", "127.0.0.1:0"].iter().chain(more).copied().collect();
+        let mut child =
+            server(&self.dir, &args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
         self.serving = Some(child);
+        self.said = line.trim().to_owned();
         let address = line.trim().strip_prefix("kito-server: listening on ").expect(&line);
         address.split(',').next().unwrap().to_owned()
     }
@@ -164,6 +171,7 @@ fn remote(address: &str, token: &str, repo: &str) -> Remote {
         command: Vec::new(),
         repo: repo.to_owned(),
         token: Some(token.to_owned()),
+        ..Default::default()
     }
 }
 
@@ -231,12 +239,13 @@ fn every_session_is_authenticated_and_bound_to_what_its_person_may_use() {
     assert_eq!(not_bobs, "there is no repository `site` for bob on this server");
     assert_eq!(not_there, "there is no repository `nowhere` for bob on this server");
 
-    // A client that does not say hello gets nothing done.
+    // A client that does not encrypt gets nothing done, and nothing to read.
     let mut raw = std::net::TcpStream::connect(&address).unwrap();
     raw.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lanes\",\"params\":{}}\n").unwrap();
-    let mut answer = String::new();
-    BufReader::new(raw.try_clone().unwrap()).read_line(&mut answer).unwrap();
-    assert!(answer.contains("say hello first"), "{answer}");
+    let mut answer = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut raw, &mut answer);
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(!answer.contains("result") && !answer.contains("lane"), "{answer}");
 
     // Each sees the repositories they may use.
     let mut ada = Client::remote(&remote(&address, &world.ada, "shop"), false).unwrap();
@@ -368,6 +377,7 @@ fn the_same_protocol_over_a_command() {
         .collect(),
         repo: repo.to_owned(),
         token: None,
+        ..Default::default()
     };
     std::env::set_var("KITOD_BIN", kitod());
     let mut bob = Client::remote(&through("bob", "shop"), true).unwrap();
@@ -403,4 +413,97 @@ fn a_person_added_while_the_server_runs_is_known_at_once() {
     assert!(
         refusal(Client::remote(&remote(&address, &carol, "site"), true)).contains("not one the server knows")
     );
+}
+
+#[test]
+fn connections_are_encrypted_and_the_server_is_known_by_its_fingerprint() {
+    let mut world = World::new();
+    // The server has a certificate of its own from the start, and says
+    // which: with the token of every person it adds, and when it is asked.
+    let print = ok(&world.dir, &["fingerprint"]).trim().to_owned();
+    assert!(print.starts_with("sha256:") && print.len() == 71, "{print}");
+    let added = ok(&world.dir, &["user", "add", "carol"]);
+    assert!(added.contains(&format!("--fingerprint {print}")), "{added}");
+    let key = world.dir.join("tls/key.pem");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    let address = world.serve();
+    assert!(world.said.ends_with(&format!("encrypted (certificate {print})")), "{}", world.said);
+
+    // With the right fingerprint, however it is typed; not with another.
+    let pinned =
+        |print: &str| Remote { fingerprint: Some(print.to_owned()), ..remote(&address, &world.ada, "shop") };
+    let mut ada = Client::remote(&pinned(&print), true).unwrap();
+    assert_eq!(ada.call_value("server.whoami", json!({})).unwrap()["user"], "ada");
+    let shouted = print.strip_prefix("sha256:").unwrap().to_uppercase();
+    assert!(Client::remote(&pinned(&shouted), true).is_ok());
+    let other = format!("sha256:{}", "ab".repeat(32));
+    let error = Client::remote(&pinned(&other), true).err().unwrap().to_string();
+    assert!(error.contains("not the one this directory was connected with"), "{error}");
+    assert!(error.contains(&print), "it says what the server presents: {error}");
+
+    // What travels is not readable: the token is not in what a listener
+    // between the two would see. (A relay that copies the bytes it carries.)
+    let relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let through = relay.local_addr().unwrap().to_string();
+    let (to, seen) = (address.clone(), std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new())));
+    let copy = seen.clone();
+    std::thread::spawn(move || {
+        let (mut client, _) = relay.accept().unwrap();
+        let mut server = std::net::TcpStream::connect(to).unwrap();
+        let (mut back, mut forth) = (server.try_clone().unwrap(), client.try_clone().unwrap());
+        std::thread::spawn(move || std::io::copy(&mut back, &mut forth));
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = std::io::Read::read(&mut client, &mut buffer) {
+            if read == 0 || server.write_all(&buffer[..read]).is_err() {
+                break;
+            }
+            copy.lock().unwrap().extend_from_slice(&buffer[..read]);
+        }
+    });
+    let mut ada = Client::remote(&Remote { server: Some(through), ..pinned(&print) }, true).unwrap();
+    assert!(ada.call_value("status", json!({})).is_ok());
+    let seen = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    assert!(seen.len() > 200, "the relay saw the conversation");
+    assert!(
+        !seen.contains(&world.ada) && !seen.contains("hello") && !seen.contains("status"),
+        "in the clear"
+    );
+
+    // A server on another machine is not trusted on its word: without a
+    // fingerprint (or an authority) nothing is sent to it.
+    let far = Remote { server: Some("192.0.2.7:7421".to_owned()), ..remote(&address, &world.ada, "shop") };
+    let error = Client::remote(&far, true).err().unwrap().to_string();
+    assert!(error.contains("nothing says it is the server you mean"), "{error}");
+    let plain_far = Remote { plain: true, ..far };
+    let error = Client::remote(&plain_far, true).err().unwrap().to_string();
+    assert!(error.contains("a connection that is not encrypted is refused"), "{error}");
+}
+
+#[test]
+fn a_server_may_be_served_in_the_clear_on_its_own_machine() {
+    let mut world = World::new();
+    // Not on an address other machines reach.
+    let refused = server(&world.dir, &["serve", "--plain", "--listen", "0.0.0.0:0"]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("listens on this machine only"));
+
+    let address = world.serve_with(&["--plain"]);
+    assert!(world.said.ends_with("NOT encrypted (--plain)"), "{}", world.said);
+    let plain = Remote { plain: true, ..remote(&address, &world.ada, "shop") };
+    let mut ada = Client::remote(&plain, true).unwrap();
+    assert_eq!(ada.call_value("server.whoami", json!({})).unwrap()["user"], "ada");
+    // A client that does not say hello gets nothing done.
+    let mut raw = std::net::TcpStream::connect(&address).unwrap();
+    raw.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lanes\",\"params\":{}}\n").unwrap();
+    let mut answer = String::new();
+    BufReader::new(raw.try_clone().unwrap()).read_line(&mut answer).unwrap();
+    assert!(answer.contains("say hello first"), "{answer}");
+
+    // A client that expects encryption is told what the matter is.
+    let error = Client::remote(&remote(&address, &world.ada, "shop"), true).err().unwrap().to_string();
+    assert!(error.contains("does not seem to encrypt") && error.contains("--plain"), "{error}");
 }

@@ -75,6 +75,10 @@ pub struct VerificationReport {
     pub failed_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// The commands ran confined: they could write only in their own copy
+    /// of the files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confined: bool,
 }
 
 /// The structured result of an integration.

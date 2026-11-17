@@ -22,13 +22,30 @@ use kito_core::{
     Author, BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId,
     Resolution, SymbolId, SymbolTable, Tree, TreeEntry, Verification,
 };
-use kito_integrate::{AutoResolution, ConflictInfo, IntegrationResult, Outcome, VerificationReport};
+use kito_integrate::{
+    AutoResolution, Confinement, ConflictInfo, IntegrationResult, Outcome, VerificationReport,
+};
 use kito_merge::{Choice, Found, Subject};
 use kito_store::STORE_DIR;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The checks of an integration, ready to run on a copy of the merged result.
+pub struct Checks {
+    pub dir: PathBuf,
+    pub commands: Vec<String>,
+    pub timeout: Duration,
+    /// How they are confined.
+    pub confinement: Confinement,
+}
+
+impl Checks {
+    pub async fn run(&self) -> VerificationReport {
+        kito_integrate::verify(&self.dir, &self.commands, self.timeout, &self.confinement).await
+    }
+}
 
 /// A merge that composed, waiting to be verified and recorded.
 pub struct Prepared {
@@ -525,21 +542,66 @@ impl Repo {
         Ok(tree)
     }
 
+    /// How the checks of this repository run: confined, unless the
+    /// repository says otherwise or the system cannot. An error if they
+    /// must be confined and cannot be.
+    pub fn confinement(&self) -> Result<Confinement> {
+        use crate::config::SandboxMode;
+        let config = &self.config.sandbox;
+        if config.mode == SandboxMode::Off {
+            return Ok(Confinement::default());
+        }
+        match crate::sandbox::helper().filter(|_| crate::sandbox::available()) {
+            Some(helper) => {
+                let policy = crate::sandbox::for_checks(&self.root, config);
+                let network = match config.network {
+                    true => "",
+                    false => " and open no network connection",
+                };
+                Ok(Confinement {
+                    wrapper: crate::sandbox::wrap(&policy, &helper),
+                    hint: Some(format!(
+                        "the checks run confined: they write only in their own copy of the files{network}; \
+                         if that is what failed, see [sandbox] in the configuration of the repository"
+                    )),
+                })
+            }
+            None if config.mode == SandboxMode::Required => Err(Error::Other(
+                "the checks were not run: the repository requires them to be confined ([sandbox] mode = \
+                 \"required\") and this system cannot do it (it needs Linux 5.13 or later, and `kitod`)"
+                    .into(),
+            )),
+            None => Ok(Confinement::default()),
+        }
+    }
+
+    /// The same, in a word for whoever asks how the repository is kept:
+    /// `confined`, `confined, with network`, `off`, `unavailable`.
+    pub fn sandbox_state(&self) -> &'static str {
+        use crate::config::SandboxMode;
+        let able = crate::sandbox::helper().is_some() && crate::sandbox::available();
+        match (self.config.sandbox.mode, able, self.config.sandbox.network) {
+            (SandboxMode::Off, _, _) => "off",
+            (_, false, _) => "unavailable",
+            (_, true, true) => "confined, with network",
+            (_, true, false) => "confined",
+        }
+    }
+
     /// Step 2: materializes the merged result where the verification
     /// commands will run. `None` if no command is configured.
-    pub fn verification_copy(
-        &mut self,
-        prepared: &Prepared,
-    ) -> Result<Option<(PathBuf, Vec<String>, Duration)>> {
+    pub fn verification_copy(&mut self, prepared: &Prepared) -> Result<Option<Checks>> {
         let commands = self.config.verify.commands.clone();
         if commands.is_empty() {
             return Ok(None);
         }
+        let confinement = self.confinement()?;
         let tree = self.merged_tree(prepared)?;
         self.store.commit()?;
         let dir = self.root.join(STORE_DIR).join("verify").join("work");
         self.materialize_tree(&tree, &dir)?;
-        Ok(Some((dir, commands, Duration::from_secs(self.config.verify.timeout_secs.max(1)))))
+        let timeout = Duration::from_secs(self.config.verify.timeout_secs.max(1));
+        Ok(Some(Checks { dir, commands, timeout, confinement }))
     }
 
     /// Step 3: records the merged result on the main lane, under a new
@@ -800,9 +862,8 @@ impl Repo {
                     continue;
                 }
             };
-            let verification = self.verification_copy(&prepared)?.map(|(dir, commands, timeout)| {
-                runtime.block_on(kito_integrate::verify(&dir, &commands, timeout))
-            });
+            let verification =
+                self.verification_copy(&prepared)?.map(|checks| runtime.block_on(checks.run()));
             if let Some(result) = self.finish_integration(prepared, verification)? {
                 return Ok(result);
             }

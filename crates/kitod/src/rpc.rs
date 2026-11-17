@@ -140,6 +140,49 @@ pub fn socket_path(root: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("kito-{}.sock", digest.short()))
 }
 
+/// The file that holds the key of a daemon's socket.
+pub const SOCKET_KEY: &str = "socket.key";
+
+/// The key a client says first on the daemon's socket. Whoever can read
+/// `.kito/` can command the daemon; a command that runs confined (the
+/// checks of an integration, what an agent starts in its lane) cannot read
+/// it, and so cannot.
+pub fn socket_key(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(kito_store::STORE_DIR).join(SOCKET_KEY)).ok()?;
+    Some(text.trim().to_owned()).filter(|key| !key.is_empty())
+}
+
+/// The key of the socket, made if there is none yet: read by its owner only.
+pub fn ensure_socket_key(root: &Path) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(key) = socket_key(root) {
+        return Ok(key);
+    }
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let key: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let path = root.join(kito_store::STORE_DIR).join(SOCKET_KEY);
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    file.write_all(key.as_bytes())?;
+    Ok(key)
+}
+
+/// What a client says first: `{"key": "<the key>"}`. `Some(true)` if the
+/// line is that and the key is right, `Some(false)` if it is wrong, `None`
+/// if the line is something else (a request sent without a key).
+pub fn key_said(line: &str, key: &str) -> Option<bool> {
+    let said: serde_json::Value = serde_json::from_str(line).ok()?;
+    let said = said.as_object().filter(|object| object.len() == 1)?.get("key")?.as_str()?;
+    Some(said == key)
+}
+
+/// What a connection that did not say the key is told.
+pub const NO_KEY: &str =
+    "this connection did not say the key of the repository's daemon (.kito/socket.key): \
+                          a command that runs confined cannot command the daemon";
+
 /// Watcher statistics returned by `status`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WatcherStatus {

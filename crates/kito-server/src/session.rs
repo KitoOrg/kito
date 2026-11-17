@@ -214,32 +214,60 @@ fn forward(
     Response::err(id, rpc::INTERNAL_ERROR, "the repository's daemon did not answer")
 }
 
-fn serve_client(server: &Server, stream: TcpStream) {
+fn serve_client(server: &Server, stream: TcpStream, tls: Option<Arc<rustls::ServerConfig>>) {
     let _ = stream.set_nodelay(true);
-    let Ok(read) = stream.try_clone() else { return };
-    let mut writer = stream;
-    run(server, &mut BufReader::new(read), &mut writer, None);
+    match tls {
+        // Encrypted: the handshake is made with the first bytes read.
+        Some(config) => {
+            let Ok(encrypted) = crate::tls::Encrypted::new(config, stream) else { return };
+            let mut writer = encrypted.clone();
+            run(server, &mut BufReader::new(encrypted), &mut writer, None);
+        }
+        None => {
+            let Ok(read) = stream.try_clone() else { return };
+            let mut writer = stream;
+            run(server, &mut BufReader::new(read), &mut writer, None);
+        }
+    }
 }
 
-/// Listens for clients, each served on a thread of its own.
-pub fn serve(server: Server, listen: Option<&str>) -> Result<(), String> {
+/// Listens for clients, each served on a thread of its own. Connections
+/// are encrypted with the server's certificate; `plain`: they are not,
+/// and the server listens on this machine only.
+pub fn serve(server: Server, listen: Option<&str>, plain: bool) -> Result<(), String> {
     let address = listen.unwrap_or(&server.config.listen).to_owned();
     let listener = TcpListener::bind(&address).map_err(|e| format!("{address}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
-    // Said on standard output, flushed: whoever started the server reads
-    // the port from it when it asked for any free one.
-    println!("kito-server: listening on {bound}, {} repositories", server.repos().len());
-    let _ = std::io::stdout().flush();
+    if plain && !bound.ip().is_loopback() {
+        return Err(format!(
+            "{bound} is reachable from other machines: a server that does not encrypt (--plain) \
+             listens on this machine only"
+        ));
+    }
+    let tls = match plain {
+        true => None,
+        false => Some(crate::tls::config(&server.dir)?),
+    };
+    // Said on standard output in one line, flushed: whoever started the
+    // server reads the port from it when it asked for any free one, and
+    // may stop listening right after.
+    let how = match plain {
+        true => "NOT encrypted (--plain)".to_owned(),
+        false => format!("encrypted (certificate {})", crate::tls::fingerprint(&server.dir)?),
+    };
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "kito-server: listening on {bound}, {} repositories, {how}", server.repos().len());
+    let _ = out.flush();
     let server = Arc::new(server);
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let server = server.clone();
+        let (server, tls) = (server.clone(), tls.clone());
         std::thread::spawn(move || {
             // People and repositories added since the server started
             // count for a connection made now.
             match Server::open(&server.dir) {
-                Ok(now) => serve_client(&now, stream),
-                Err(_) => serve_client(&server, stream),
+                Ok(now) => serve_client(&now, stream, tls),
+                Err(_) => serve_client(&server, stream, tls),
             }
         });
     }

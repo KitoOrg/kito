@@ -24,6 +24,7 @@ runnable demo.
 | 9 | Protected main and team rules: roles, approval, checks and git push on the server | done |
 | 10 | The why graph: the reasons of every function, file and line, to ask before changing them | done |
 | 11 | The rules as behaviour: hooks that refuse an edit outside a lane or its scope, and the reasons told before code changes | done |
+| 12 | Encrypted connections and a sandbox per lane: a server known by its certificate; checks and lane commands that write only in their own copy | done |
 
 ## Crates
 
@@ -410,7 +411,7 @@ main lane come into it and are kept as the server has them, and from then
 on `kito` in that directory works as it does in a repository:
 
 ```bash
-kito connect 127.0.0.1:7421 shop --token kito_...
+kito connect host:7421 shop --token kito_... --fingerprint sha256:...
 ```
 
 ```bash
@@ -422,9 +423,32 @@ scopes extended, saves, integrations and how they end. A lane opened
 through the server belongs to the person the client was authenticated as,
 whatever the client says, and the board shows whose agent each lane is.
 
-`serve` listens on this machine only, and what it carries is not
-encrypted. From another machine the way in is SSH, where the person is who
-SSH says they are:
+What travels between a client and the server is encrypted (TLS). The
+server makes a key and a certificate for itself the first time it needs
+them (`tls/` in its directory), and clients know it by the certificate's
+fingerprint, as they know an SSH host by its key: `user add` prints the
+whole `kito connect` line with it, and this prints it again:
+
+```bash
+kito-server --dir /srv/kito fingerprint
+```
+
+A client that is given a fingerprint keeps it (`.kito/remote.toml`): a
+server that presents another certificate is refused before the token is
+sent. A server on the same machine may be connected without one, and is
+held to the certificate it showed the first time. For a server behind a
+certificate from a public authority, put the certificate and its key in
+`tls/cert.pem` and `tls/key.pem`, and connect with `--authority`: the
+server is then known by its name. To listen on more than this machine:
+
+```bash
+kito-server --dir /srv/kito serve --listen 0.0.0.0:7421
+```
+
+`serve --plain` (and `kito connect --plain`) is the server as it was before
+0.12: nothing encrypted, for clients on the same machine only.
+
+The other way in is SSH, where the person is who SSH says they are:
 
 ```bash
 kito connect ssh://ada@host/srv/kito shop
@@ -528,6 +552,51 @@ What the protection does not do is listed in
 [`docs/phases.md`](docs/phases.md): it undoes an edit within milliseconds
 rather than preventing it, and whoever runs the server can lift it.
 
+### A sandbox per lane
+
+The checks of an integration run code that a lane wrote, as the user that
+runs the daemon; so does anything an agent starts in its lane. Both run
+confined (Linux 5.13 or later, with Landlock):
+
+- they **write** only in their own copy of the files (the copy of the
+  merged result for the checks, the lane's working copy for a command) and
+  in a temporary directory of their own;
+- they do **not read** Kito's own data (`.kito/`: the history, the other
+  lanes, the token of a connected directory), the other repositories of a
+  server and the server's own files, or the keys of the user that runs
+  them (`~/.ssh`, `~/.aws`, `~/.gnupg` and a few more);
+- the checks open **no TCP connection**; a command in a lane may.
+
+Nor can they command the daemon: its socket asks for a key that is in
+`.kito/`, which they cannot read.
+
+`kito status` says how the checks of a repository run. A check that fails
+confined says so after its output, since the confinement may be why. What
+is allowed is in the repository's configuration:
+
+```toml
+[sandbox]
+mode = "auto"        # "required": checks do not run where they cannot be confined; "off"
+network = false      # the checks may open TCP connections
+write = []           # more places they may write
+hide = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gcloud", "~/.kube", "~/.docker", "~/.netrc", "~/.git-credentials"]
+```
+
+A command of your own, or of an agent, runs confined to a lane with:
+
+```bash
+kito lane run lane/3 -- npm test
+```
+
+It runs in the lane's working copy, and its exit code is the command's.
+`--no-network` takes the network away too. Agents have the same as the
+tool `run` of the MCP server.
+
+Where the system cannot confine a command (macOS, an older kernel), the
+checks run as before and `kito status` says that they are not confined;
+`mode = "required"` refuses to run them instead, and `kito lane run`
+always refuses.
+
 ## Development
 
 ```bash
@@ -540,6 +609,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 12 demo: a server known by its certificate, what somebody between
+a client and the server can read with and without encryption, and a lane
+whose check tries to read another repository, write outside its copy and
+call out (needs `python3`).
+
+```bash
+cargo build --release -p kitod -p kito-cli -p kito-server
+```
+
+```bash
+scripts/demo-phase12.sh
 ```
 
 Phase 11 demo: what Claude Code runs around its tools, run by hand: an

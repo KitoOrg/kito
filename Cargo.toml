@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-semantic", "crates/kito-lane", "crates/kito-integrate", "crates/kito-git", "crates/kitod", "crates/kito-cli", "crates/kito-mcp", "crates/kito-server"]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -55,6 +55,11 @@ tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 zstd = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.14"
+webpki-roots = "1"
+sha2 = "0.11"
+landlock = "0.4"
 
 # test / bench
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

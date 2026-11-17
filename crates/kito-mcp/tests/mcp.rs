@@ -147,6 +147,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
             "kito.log",
             "kito.set_intent",
             "kito.rename_symbol",
+            "kito.run",
             "kito.request_integration",
             "kito.integration_result",
             "kito.why",
@@ -464,6 +465,91 @@ fn an_agent_is_told_why_before_its_work_lands() {
     stop_daemon(&root);
 }
 
+#[test]
+fn an_agent_runs_its_commands_confined_to_its_lane() {
+    if !kitod::sandbox::available() {
+        return;
+    }
+    let (_tmp, root) = new_repo();
+    let mut mcp = Session::start(&root, &[]);
+    let lane = mcp
+        .tool("kito.open_lane", json!({ "agent": "alice", "intent": "a build", "scope": ["src/"] }))
+        .unwrap();
+    let work = PathBuf::from(lane["workdir"].as_str().unwrap());
+
+    // In the lane's working copy, with its output and how it ended.
+    let ran = mcp
+        .tool(
+            "kito.run",
+            json!({ "lane": "lane/1", "command": "pwd; wc -l < src/shop.ts; echo built > src/out.txt" }),
+        )
+        .unwrap();
+    assert_eq!((ran["exit_code"].as_i64(), ran["confined"].as_bool()), (Some(0), Some(true)), "{ran}");
+    assert!(ran["output"].as_str().unwrap().starts_with(&format!("{}\n7", work.display())), "{ran}");
+    assert_eq!(fs::read_to_string(work.join("src/out.txt")).unwrap(), "built\n");
+
+    // Not outside it; a failure is the command's, told with what it said.
+    let script = format!("echo x > {}/hacked.txt", root.display());
+    let tried = mcp.tool("kito.run", json!({ "lane": "lane/1", "command": script })).unwrap();
+    assert_ne!(tried["exit_code"], 0);
+    assert!(tried["output"].as_str().unwrap().contains("Permission denied"), "{tried}");
+    assert!(!root.join("hacked.txt").exists());
+
+    // One that does not end is stopped.
+    let slow =
+        mcp.tool("kito.run", json!({ "lane": "lane/1", "command": "sleep 30", "timeout_s": 1 })).unwrap();
+    assert_eq!(slow["exit_code"], Value::Null);
+    assert!(slow["output"].as_str().unwrap().contains("still running after 1 s"), "{slow}");
+
+    drop(mcp);
+    stop_daemon(&root);
+}
+
+#[test]
+fn an_agent_runs_a_command_confined_to_its_lane() {
+    let (_tmp, root) = new_repo();
+    let mut mcp = Session::start(&root, &[]);
+    let lane = mcp
+        .tool("kito.open_lane", json!({ "agent": "builder", "intent": "a build", "scope": ["src/"] }))
+        .unwrap();
+    let work = PathBuf::from(lane["workdir"].as_str().unwrap());
+    let ran = mcp.tool(
+        "kito.run",
+        json!({ "lane": "lane/1", "command": "ls src && echo built > src/out.txt && echo ok" }),
+    );
+    let ran = match ran {
+        Ok(ran) => ran,
+        // A system that cannot confine a command says so, and runs nothing.
+        Err(why) => {
+            assert!(why.contains("cannot be confined here"), "{why}");
+            drop(mcp);
+            return stop_daemon(&root);
+        }
+    };
+    assert_eq!((ran["exit_code"].as_i64(), ran["confined"].as_bool()), (Some(0), Some(true)), "{ran}");
+    assert_eq!(ran["output"], "shop.ts\nok");
+    assert_eq!(fs::read_to_string(work.join("src/out.txt")).unwrap(), "built\n");
+
+    // Outside the lane nothing is written, and the command says how it ended.
+    let script = format!("echo x > {}/hacked.txt", root.display());
+    let tried = mcp.tool("kito.run", json!({ "lane": "lane/1", "command": script })).unwrap();
+    assert_ne!(tried["exit_code"], 0, "{tried}");
+    assert!(tried["output"].as_str().unwrap().contains("Permission denied"), "{tried}");
+    assert!(!root.join("hacked.txt").exists());
+
+    // A command that takes too long is stopped.
+    let slow =
+        mcp.tool("kito.run", json!({ "lane": "lane/1", "command": "sleep 30", "timeout_s": 1 })).unwrap();
+    assert_eq!(slow["exit_code"], Value::Null, "{slow}");
+    assert!(slow["output"].as_str().unwrap().contains("still running after 1 s"), "{slow}");
+
+    // What the command wrote is a save of the lane like any other.
+    let status = mcp.tool("kito.status", json!({ "lane": "lane/1" })).unwrap();
+    assert!(status["files"].as_array().unwrap().contains(&json!("src/out.txt")), "{status}");
+    drop(mcp);
+    stop_daemon(&root);
+}
+
 fn kito_server() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
     let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kito-server");
@@ -556,6 +642,7 @@ fn the_tools_reach_a_repository_kept_by_a_server() {
         command: Vec::new(),
         repo: "shop".to_owned(),
         token: Some(token),
+        ..Default::default()
     };
     remote.save(&here).unwrap();
     let mut mcp = Session::start(&here, &[]);

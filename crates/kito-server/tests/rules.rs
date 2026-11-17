@@ -171,6 +171,7 @@ impl World {
             command: Vec::new(),
             repo: "shop".to_owned(),
             token: Some(token.to_owned()),
+            ..Default::default()
         };
         remote.save(&dir).unwrap();
         self.connected.push(dir.clone());

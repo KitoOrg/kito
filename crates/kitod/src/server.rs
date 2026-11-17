@@ -66,6 +66,9 @@ fn percentile(samples: &VecDeque<f64>, p: f64) -> Option<f64> {
 struct Daemon {
     root: PathBuf,
     socket: PathBuf,
+    /// What a client says first on the socket. `None` if it could not be
+    /// made: the socket then answers anybody, as it used to.
+    key: Option<String>,
     /// `None` after shutdown.
     repo: Mutex<Option<Repo>>,
     stats: Mutex<WatchStats>,
@@ -1117,7 +1120,7 @@ async fn integrate(
             Err(e) => return failed(e.to_string()),
         };
         let report = match copy {
-            Some((dir, commands, timeout)) => Some(kito_integrate::verify(&dir, &commands, timeout).await),
+            Some(checks) => Some(checks.run().await),
             None => None,
         };
         let (worker, held, approved_by) = (daemon.clone(), hold.clone(), approver.clone());
@@ -1235,9 +1238,27 @@ async fn integration_loop(daemon: Arc<Daemon>) {
 async fn serve_connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
+    // Whoever speaks first says the key of the socket.
+    let mut trusted = daemon.key.is_none();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
+        }
+        if !trusted {
+            match daemon.key.as_deref().and_then(|key| rpc::key_said(&line, key)) {
+                Some(true) => {
+                    trusted = true;
+                    continue;
+                }
+                _ => {
+                    let id = serde_json::from_str::<Request>(&line).map_or(0, |request| request.id);
+                    let mut bytes =
+                        serde_json::to_vec(&Response::err(id, rpc::REFUSED, rpc::NO_KEY)).unwrap_or_default();
+                    bytes.push(b'\n');
+                    let _ = writer.write_all(&bytes).await;
+                    break;
+                }
+            }
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
@@ -1364,6 +1385,7 @@ pub async fn serve(root: &Path) -> Result<()> {
     let daemon = Arc::new(Daemon {
         root: root.clone(),
         socket: socket.clone(),
+        key: rpc::ensure_socket_key(&root).ok(),
         repo: Mutex::new(Some(repo)),
         stats: Mutex::new(WatchStats::default()),
         signals,

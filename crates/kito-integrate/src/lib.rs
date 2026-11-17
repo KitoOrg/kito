@@ -16,4 +16,4 @@ mod verify;
 
 pub use queue::{JobId, JobState, Queue};
 pub use result::{AutoResolution, ConflictInfo, IntegrationResult, Outcome, VerificationReport};
-pub use verify::verify;
+pub use verify::{verify, Confinement};

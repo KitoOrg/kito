@@ -47,6 +47,20 @@ protected = false
 # `false` it is told when it declares, and nothing is held back.
 why = true
 
+[sandbox]
+# The checks of an integration, and what `kito lane run` starts, run
+# confined (Linux 5.13 or later): they write only in their own copy of the
+# files and a temporary directory, and do not read Kito's own data, the
+# other repositories of a server, or the keys of the user that runs them.
+# "auto": wherever the system can; "required": or not at all; "off".
+mode = "auto"
+# The checks may open TCP connections (a registry, a local test server).
+network = false
+# More places they may write, and more they may not read. `~` is the home
+# of the user that runs them; other paths start at the main directory.
+write = []
+hide = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gcloud", "~/.kube", "~/.docker", "~/.netrc", "~/.git-credentials"]
+
 [git]
 # Export every checkpoint as a git commit as soon as it is created.
 export_on_checkpoint = true
@@ -129,6 +143,7 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub main: MainConfig,
     pub agents: AgentsConfig,
+    pub sandbox: SandboxConfig,
     pub git: GitConfig,
     pub lanes: LanesConfig,
     pub verify: VerifyConfig,
@@ -346,6 +361,52 @@ impl Default for GitConfig {
 pub struct MainConfig {
     /// The main lane changes only when a lane is integrated.
     pub protected: bool,
+}
+
+/// Whether commands that run for a lane are confined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    /// Wherever the system can.
+    #[default]
+    Auto,
+    /// Or they do not run.
+    Required,
+    Off,
+}
+
+/// How the checks, and what an agent starts in its lane, are confined.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    pub mode: SandboxMode,
+    /// The checks may open TCP connections.
+    pub network: bool,
+    /// More places a confined command may write.
+    pub write: Vec<String>,
+    /// What it may not read, besides Kito's own data.
+    pub hide: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        let hide = [
+            "~/.ssh",
+            "~/.aws",
+            "~/.gnupg",
+            "~/.config/gcloud",
+            "~/.kube",
+            "~/.docker",
+            "~/.netrc",
+            "~/.git-credentials",
+        ];
+        SandboxConfig {
+            mode: SandboxMode::Auto,
+            network: false,
+            write: Vec::new(),
+            hide: hide.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
 }
 
 /// What agents are held to.

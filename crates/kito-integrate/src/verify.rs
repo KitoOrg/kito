@@ -1,6 +1,7 @@
 //! The verifier: runs the configured commands on a merged result.
 
 use crate::result::VerificationReport;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -17,18 +18,44 @@ fn tail(mut bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).trim_end().to_owned()
 }
 
+/// How the commands are started: as they are, or through a program that
+/// confines them (the daemon's sandbox).
+#[derive(Clone, Debug, Default)]
+pub struct Confinement {
+    /// What is put before `sh -c <command>`: a program and its arguments.
+    /// Empty: the commands are not confined.
+    pub wrapper: Vec<OsString>,
+    /// What is said after the output of a command that failed confined:
+    /// the failure may be the confinement's doing.
+    pub hint: Option<String>,
+}
+
 /// Runs `commands` in order with `sh -c`, in `dir`, and stops at the first
 /// one that fails. A command that runs longer than `timeout` is killed, with
 /// everything it started, and counts as failed.
 ///
 /// The commands see `KITO_VERIFY=1`, and nothing on their standard input.
-pub async fn verify(dir: &Path, commands: &[String], timeout: Duration) -> VerificationReport {
+pub async fn verify(
+    dir: &Path,
+    commands: &[String],
+    timeout: Duration,
+    confinement: &Confinement,
+) -> VerificationReport {
     let started = Instant::now();
     let mut ran = Vec::new();
     let mut failure: Option<(String, String)> = None;
+    let confined = !confinement.wrapper.is_empty();
     for command in commands {
         ran.push(command.clone());
-        let spawned = Command::new("sh")
+        let mut shell = match confinement.wrapper.split_first() {
+            Some((program, args)) => {
+                let mut wrapped = Command::new(program);
+                wrapped.args(args).arg("sh");
+                wrapped
+            }
+            None => Command::new("sh"),
+        };
+        let spawned = shell
             .arg("-c")
             .arg(command)
             .current_dir(dir)
@@ -74,7 +101,12 @@ pub async fn verify(dir: &Path, commands: &[String], timeout: Duration) -> Verif
                     Some(code) => format!("exit code {code}"),
                     None => "killed by a signal".to_owned(),
                 };
-                failure = Some((command.clone(), format!("{}\n({how})", tail(output)).trim().to_owned()));
+                let hint = match &confinement.hint {
+                    Some(hint) => format!("\n({hint})"),
+                    None => String::new(),
+                };
+                failure =
+                    Some((command.clone(), format!("{}\n({how}){hint}", tail(output)).trim().to_owned()));
                 break;
             }
             Ok((Err(e), _)) => {
@@ -98,5 +130,6 @@ pub async fn verify(dir: &Path, commands: &[String], timeout: Duration) -> Verif
         duration_ms: started.elapsed().as_millis() as u64,
         failed_command: failure.as_ref().map(|(command, _)| command.clone()),
         output: failure.map(|(_, output)| output),
+        confined,
     }
 }

@@ -46,6 +46,18 @@ pub struct Remote {
     /// The token the server gave this person, for a server reached over TCP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The fingerprint of the server's certificate (`sha256:…`): what says
+    /// that the server reached is the one meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// The server has a certificate from a public authority, and is known
+    /// by its name instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority: bool,
+    /// The server does not encrypt its connections (`serve --plain`):
+    /// accepted for a server on this machine only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain: bool,
 }
 
 impl Remote {
@@ -69,6 +81,42 @@ impl Remote {
             .mode(0o600)
             .open(dir.join(REMOTE_FILE))?;
         file.write_all(text.as_bytes())
+    }
+
+    /// The address of the server, resolved, and its host name.
+    pub fn address(&self) -> Result<(std::net::SocketAddr, String), ClientError> {
+        use std::net::ToSocketAddrs;
+        let server = self.server.as_deref().unwrap_or_default();
+        let unreachable = |e: std::io::Error| ClientError::Server(format!("{server}: {e}"));
+        let address = server
+            .to_socket_addrs()
+            .map_err(unreachable)?
+            .next()
+            .ok_or_else(|| ClientError::Server(format!("{server}: no such address")))?;
+        let host = server.rsplit_once(':').map_or(server, |(host, _)| host);
+        Ok((address, host.trim_matches(['[', ']']).to_owned()))
+    }
+
+    /// How the server is known to be the one meant; `None`: the
+    /// connection is not encrypted. An error for a server on another
+    /// machine that nothing vouches for.
+    pub fn trust(&self, address: &std::net::SocketAddr) -> Result<Option<crate::tls::Trust>, ClientError> {
+        use crate::tls::Trust;
+        let here = address.ip().is_loopback();
+        match (self.plain, &self.fingerprint, self.authority) {
+            (true, ..) if here => Ok(None),
+            (true, ..) => Err(ClientError::Server(format!(
+                "{address} is not on this machine: a connection that is not encrypted is refused"
+            ))),
+            (_, Some(pin), _) => Ok(Some(Trust::Fingerprint(pin.clone()))),
+            (_, None, true) => Ok(Some(Trust::Authority)),
+            (_, None, false) if here => Ok(Some(Trust::Anything)),
+            _ => Err(ClientError::Server(format!(
+                "{address} is not on this machine, and nothing says it is the server you mean: connect \
+                 with --fingerprint <what `kito-server fingerprint` prints there> (or --authority if \
+                 its certificate comes from a public authority)"
+            ))),
+        }
     }
 
     /// Where the server is, in words.
@@ -136,7 +184,16 @@ impl Client {
         let socket = rpc::socket_path(root);
         let stream = UnixStream::connect(&socket)
             .map_err(|e| ClientError::Connect(format!("{}: {e}", socket.display())))?;
-        let writer = stream.try_clone()?;
+        let mut writer = stream.try_clone()?;
+        // The key of the socket first: it says this client can read the
+        // repository's own data. A daemon that has none ignores nothing:
+        // none is sent.
+        if let Some(key) = rpc::socket_key(root) {
+            let mut line = serde_json::to_vec(&json!({ "key": key }))
+                .map_err(|e| ClientError::Protocol(e.to_string()))?;
+            line.push(b'\n');
+            writer.write_all(&line)?;
+        }
         Ok(Client {
             reader: Box::new(BufReader::new(stream)),
             writer: Box::new(writer),
@@ -151,25 +208,23 @@ impl Client {
     pub fn remote(remote: &Remote, repo: bool) -> Result<Client, ClientError> {
         let mut client = match (&remote.server, remote.command.as_slice()) {
             (Some(server), _) => {
-                use std::net::ToSocketAddrs;
                 let unreachable = |e: std::io::Error| ClientError::Server(format!("{server}: {e}"));
-                let address = server
-                    .to_socket_addrs()
-                    .map_err(unreachable)?
-                    .next()
-                    .ok_or_else(|| ClientError::Server(format!("{server}: no such address")))?;
+                let (address, host) = remote.address()?;
+                let trust = remote.trust(&address)?;
                 let stream =
                     std::net::TcpStream::connect_timeout(&address, CONNECT_WITHIN).map_err(unreachable)?;
                 let _ = stream.set_nodelay(true);
                 // A server that went away without a word is not waited for forever.
                 let _ = stream.set_read_timeout(Some(ANSWER_WITHIN));
-                let writer = stream.try_clone()?;
-                Client {
-                    reader: Box::new(BufReader::new(stream)),
-                    writer: Box::new(writer),
-                    child: None,
-                    next_id: 1,
-                }
+                let (reader, writer): crate::tls::Ends = match trust {
+                    Some(trust) => crate::tls::connect(stream, &host, &trust)
+                        .map_err(|e| ClientError::Server(format!("{server}: {e}")))?,
+                    None => {
+                        let writer = stream.try_clone()?;
+                        (Box::new(BufReader::new(stream)), Box::new(writer))
+                    }
+                };
+                Client { reader, writer, child: None, next_id: 1 }
             }
             (None, [program, args @ ..]) => {
                 let mut child = Command::new(program)
@@ -202,12 +257,19 @@ impl Client {
         line.push(b'\n');
         client.writer.write_all(&line)?;
         client.writer.flush()?;
-        let mut answer = String::new();
-        if client.reader.read_line(&mut answer)? == 0 {
+        let mut answer = Vec::new();
+        if client.reader.read_until(b'\n', &mut answer)? == 0 {
             return Err(ClientError::Server(format!("{}: it closed the connection", remote.place())));
         }
-        let answer: Value =
-            serde_json::from_str(&answer).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        // A server that encrypts answers a plain hello with something
+        // that is not text.
+        let answer: Value = serde_json::from_slice(&answer).map_err(|_| {
+            ClientError::Server(format!(
+                "{}: it does not answer as a server that does not encrypt would: connect again without \
+                 --plain",
+                remote.place()
+            ))
+        })?;
         match answer.get("error").and_then(Value::as_str) {
             Some(reason) => Err(ClientError::Refused(reason.to_owned())),
             None if answer.get("ok").is_some() => Ok(client),

@@ -194,3 +194,38 @@ fn what_a_protected_main_lane_refuses_and_how_it_is_opened_again() {
     repo.checkpoint("by hand again").unwrap();
     assert!(repo.rollback("ckpt#1", &[], false).is_ok());
 }
+
+/// A test is not `kitod`, and has none next to it: nothing here can
+/// confine the checks.
+#[test]
+fn checks_that_must_be_confined_do_not_run_where_they_cannot_be() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::env::remove_var("KITOD_BIN");
+    drop(Repo::init(&root).unwrap());
+    let config = root.join(".kito/config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    let checked = text.replace("# commands = [\"npx tsc --noEmit\", \"npm test\"]", "commands = [\"true\"]");
+    assert_ne!(checked, text);
+    fs::write(&config, &checked).unwrap();
+    let mut repo = Repo::open(&root).unwrap();
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::write(root.join("a.txt"), "one\n").unwrap();
+    repo.checkpoint("start").unwrap();
+
+    // Left to choose, the repository runs them as they are, and says so.
+    assert_eq!(repo.sandbox_state(), "unavailable");
+    let lane = repo.open_lane("ada", None, None, "two", &["a.txt".to_owned()]).unwrap();
+    fs::write(lane.workdir.as_ref().unwrap().join("a.txt"), "two\n").unwrap();
+    let done = repo.integrate(lane.id.parse().unwrap()).unwrap();
+    assert_eq!(done.result, kito_integrate::Outcome::Integrated);
+    assert!(!done.verification.unwrap().confined);
+
+    // Told that they must be confined, it does not run them.
+    fs::write(&config, checked.replace("mode = \"auto\"", "mode = \"required\"")).unwrap();
+    repo.reload_config().unwrap();
+    fs::write(lane.workdir.as_ref().unwrap().join("a.txt"), "three\n").unwrap();
+    let refused = repo.integrate(lane.id.parse().unwrap()).unwrap_err().to_string();
+    assert!(refused.contains("requires them to be confined"), "{refused}");
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "two\n", "nothing was integrated");
+}

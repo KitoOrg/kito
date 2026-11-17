@@ -401,3 +401,21 @@ Before an edit the daemon looks at the lane's working copy (what the hook
 judges is the file as it is), then reads the history of one file. The cost
 does not grow with the repository but with how often that one file
 changed (at most 400 versions are read).
+
+## Phase 12 · the cost of confining and of encrypting
+
+Release builds, one machine; times are of the whole `kito` command.
+
+| | time |
+| --- | --- |
+| `kito integrate` of a lane with one check (`true`), confined, median of 20 | 36 ms |
+| The same with `[sandbox] mode = "off"` | 36 ms |
+| `kito lane run <lane> -- true` (`sh -c true` alone: 3 ms) | 10 ms |
+| A new connection to the server and one request, encrypted, median of 30 | 5 ms |
+| The same on a server started with `--plain` | 5 ms |
+| A request on a connection the daemon keeps, encrypted / not | 4 ms / 5 ms |
+
+Neither shows at this grain. The policy of a confined command is made
+for each run (the siblings of what is hidden are listed again), which is
+what the 7 ms of `kito lane run` over a bare shell mostly are, with the
+start of two programs.

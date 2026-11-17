@@ -1,7 +1,7 @@
 //! The verifier and the queue.
 
 use kito_core::LaneId;
-use kito_integrate::{verify, IntegrationResult, JobId, JobState, Outcome, Queue};
+use kito_integrate::{verify, Confinement, IntegrationResult, JobId, JobState, Outcome, Queue};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,7 @@ async fn commands_run_in_order_in_the_directory_and_stop_at_the_first_failure() 
             "echo two >> trace",
         ]),
         Duration::from_secs(30),
+        &Confinement::default(),
     )
     .await;
     assert!(passed.passed, "{passed:?}");
@@ -34,6 +35,7 @@ async fn commands_run_in_order_in_the_directory_and_stop_at_the_first_failure() 
         tmp.path(),
         &commands(&["true", "echo checking; echo broken >&2; exit 3", "echo never > after"]),
         Duration::from_secs(30),
+        &Confinement::default(),
     )
     .await;
     assert!(!failed.passed);
@@ -51,9 +53,15 @@ async fn commands_run_in_order_in_the_directory_and_stop_at_the_first_failure() 
     assert!(!tmp.path().join("after").exists());
 
     // No commands: nothing to fail.
-    assert!(verify(tmp.path(), &[], Duration::from_secs(1)).await.passed);
+    assert!(verify(tmp.path(), &[], Duration::from_secs(1), &Confinement::default()).await.passed);
     // A command that cannot even start in a directory that is not there.
-    let nowhere = verify(&tmp.path().join("missing"), &commands(&["true"]), Duration::from_secs(1)).await;
+    let nowhere = verify(
+        &tmp.path().join("missing"),
+        &commands(&["true"]),
+        Duration::from_secs(1),
+        &Confinement::default(),
+    )
+    .await;
     assert!(!nowhere.passed && nowhere.output.unwrap().contains("could not be started"));
 }
 
@@ -66,6 +74,7 @@ async fn a_command_that_hangs_is_stopped_with_everything_it_started() {
         tmp.path(),
         &commands(&["(sleep 3; echo late > late.txt) & sleep 60"]),
         Duration::from_millis(300),
+        &Confinement::default(),
     )
     .await;
     assert!(!report.passed);

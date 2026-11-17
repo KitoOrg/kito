@@ -171,6 +171,19 @@ enum Cmd {
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
         #[arg(long)]
         token: Option<String>,
+        /// The fingerprint of the server's certificate, as `kito-server
+        /// fingerprint` prints it there: what says the server you reach
+        /// is the one you mean. Not needed for a server on this machine
+        #[arg(long, value_name = "SHA256")]
+        fingerprint: Option<String>,
+        /// The server's certificate comes from a public authority: it is
+        /// known by its name
+        #[arg(long, conflicts_with = "fingerprint")]
+        authority: bool,
+        /// The server does not encrypt (`kito-server serve --plain`): on
+        /// this machine only
+        #[arg(long, conflicts_with_all = ["fingerprint", "authority"])]
+        plain: bool,
         /// Do not set the directory up for Claude Code
         #[arg(long)]
         no_claude: bool,
@@ -301,6 +314,17 @@ enum LaneCmd {
     Close { lane: String },
     /// Ops since the base, files touched, open conflicts
     Status { lane: String },
+    /// Run a command in the working copy of a lane, confined to it: it
+    /// writes only there, and does not read Kito's own data or your keys
+    Run {
+        lane: String,
+        /// The command opens no TCP connection either
+        #[arg(long)]
+        no_network: bool,
+        /// The command and its arguments, after `--`
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Show what a lane declared it would change, or add to it
     Scope {
         lane: String,
@@ -1199,6 +1223,26 @@ fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
     Ok(())
 }
 
+/// Runs a command in the working copy of a lane, confined to it. Returns
+/// its exit code (128 and more: stopped by a signal).
+fn cmd_lane_run(cli: &Cli, lane: &str, network: bool, command: &[String]) -> Result<u8, String> {
+    let root = root_of(cli)?;
+    let status: Value = daemon(cli)?.call("lane_status", json!({ "lane": lane })).map_err(fail)?;
+    let workdir = status["workdir"].as_str().map(PathBuf::from).ok_or_else(|| {
+        format!("{lane} has no working copy on this machine: `kito lane attach {lane} --write`")
+    })?;
+    // Where the command was asked from, if that is inside the lane.
+    let here = std::env::current_dir().ok().and_then(|dir| dir.canonicalize().ok());
+    let inside = here.filter(|dir| workdir.canonicalize().is_ok_and(|work| dir.starts_with(work)));
+    let (program, args) = command.split_first().ok_or("no command to run")?;
+    let mut confined = kitod::sandbox::lane_command(&root, &workdir, network)?;
+    if let Some(dir) = inside {
+        confined.current_dir(dir);
+    }
+    let status = confined.arg(program).args(args).status().map_err(|e| format!("{program}: {e}"))?;
+    Ok(status.code().map_or(137, |code| code.clamp(0, 255) as u8))
+}
+
 /// The strings of a JSON list.
 fn strings(value: &Value) -> Vec<&str> {
     value.as_array().into_iter().flatten().filter_map(Value::as_str).collect()
@@ -1298,10 +1342,9 @@ fn remote_for(server: &str, repo: &str, token: &Option<String>) -> Result<Remote
             .ok_or("give the server as ssh://user@host/path/of/the/server")?;
         let command = ["ssh", host, "kito-server", "--dir", &format!("/{dir}"), "stdio"];
         return Ok(Remote {
-            server: None,
             command: command.iter().map(|part| (*part).to_owned()).collect(),
             repo: repo.to_owned(),
-            token: None,
+            ..Remote::default()
         });
     }
     let token = token
@@ -1311,21 +1354,52 @@ fn remote_for(server: &str, repo: &str, token: &Option<String>) -> Result<Remote
         .ok_or("a server reached as host:port wants a token: --token, or $KITO_TOKEN")?;
     Ok(Remote {
         server: Some(server.to_owned()),
-        command: Vec::new(),
         repo: repo.to_owned(),
         token: Some(token),
+        ..Remote::default()
     })
 }
 
-fn cmd_connect(
-    cli: &Cli,
-    server: &str,
-    repo: &str,
-    dir: &Option<PathBuf>,
-    token: &Option<String>,
-    no_claude: bool,
-) -> Outcome {
-    let remote = remote_for(server, repo, token)?;
+/// Says how the server is known to be the one meant, before anything is
+/// sent to it: by the fingerprint given, by an authority, or, for a server
+/// on this machine, by the certificate it presents now, kept from then on.
+fn trusted(
+    mut remote: Remote,
+    fingerprint: &Option<String>,
+    authority: bool,
+    plain: bool,
+) -> Result<Remote, String> {
+    if remote.server.is_none() {
+        // Through SSH: it encrypts, and knows its hosts by their keys.
+        return Ok(remote);
+    }
+    remote.fingerprint = fingerprint.clone();
+    remote.authority = authority;
+    remote.plain = plain;
+    if plain || authority || remote.fingerprint.is_some() {
+        return Ok(remote);
+    }
+    let (address, host) = remote.address().map_err(fail)?;
+    let presented = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(10))
+        .map_err(|e| format!("cannot reach the server: {}: {e}", remote.place()))
+        .and_then(|stream| {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            kitod::tls::presented(stream, &host).map_err(|e| format!("{}: {e}", remote.place()))
+        })?;
+    if address.ip().is_loopback() {
+        remote.fingerprint = Some(presented);
+        return Ok(remote);
+    }
+    Err(format!(
+        "{} is on another machine, and nothing says it is the server you mean. It presents a certificate \
+         with fingerprint\n  {presented}\nIf that is what `kito-server fingerprint` prints on the server, \
+         connect again with\n  --fingerprint {presented}\n(or with --authority if its certificate comes \
+         from a public authority).",
+        remote.place()
+    ))
+}
+
+fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_claude: bool) -> Outcome {
     let dir = dir.clone().unwrap_or_else(|| PathBuf::from(repo));
     if dir.join(".kito").join("format").is_file() {
         return Err(format!("{} is a repository of its own: connect another directory", dir.display()));
@@ -1358,6 +1432,15 @@ fn cmd_connect(
             remote.place(),
             me["user"].as_str().unwrap_or("?")
         );
+        match (&remote.fingerprint, remote.authority, remote.plain) {
+            (Some(print), ..) => println!(
+                "The connection is encrypted, and the server is known by its certificate ({print}): one that \
+                 presents another is refused."
+            ),
+            (None, true, _) => println!("The connection is encrypted, and the server is known by its name."),
+            (None, false, true) => println!("The connection is NOT encrypted (--plain)."),
+            _ => {}
+        }
         match &main {
             Ok(main) => println!(
                 "The main lane is in it ({}), kept as the server has it: to change something, open a lane.",
@@ -1616,6 +1699,8 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 );
             }
         }
+        // Run before any of these: its exit code is the command's.
+        LaneCmd::Run { .. } => {}
         LaneCmd::Scope { lane, add } => {
             if !add.is_empty() {
                 let grown: Value =
@@ -1982,6 +2067,19 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
         true => println!("Checks ............ none: a lane is integrated as soon as it merges"),
         false => println!("Checks ............ {}", repo.checks.join("; ")),
     }
+    // How the checks run matters once there are some.
+    if !repo.checks.is_empty() {
+        let how = match repo.sandbox.as_str() {
+            "confined" => "confined: they write only in their own copy and open no network connection",
+            "confined, with network" => "confined: they write only in their own copy",
+            "off" => "NOT confined: the repository turned it off ([sandbox] mode)",
+            "unavailable" => "NOT confined: this system cannot (it needs Linux 5.13 or later)",
+            _ => "",
+        };
+        if !how.is_empty() {
+            println!("                    {how}");
+        }
+    }
     if let Some(remote) = &repo.push {
         let state = match (&repo.push_error, &repo.pushed) {
             (Some(error), _) => format!("the last push failed: {error}"),
@@ -2179,6 +2277,16 @@ fn main() -> ExitCode {
             HookCmd::SessionStart => hook::session_start(),
         };
     }
+    // So does a command run in a lane: its exit code is the command's.
+    if let Cmd::Lane { command: LaneCmd::Run { lane, no_network, command } } = &cli.command {
+        return match cmd_lane_run(&cli, lane, !*no_network, command) {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("kito: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let outcome = match &cli.command {
         Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
         Cmd::Import { path, no_claude } => cmd_import(&cli, path, *no_claude),
@@ -2205,8 +2313,13 @@ fn main() -> ExitCode {
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Board => cmd_board(&cli),
-        Cmd::Connect { server, name, dir, token, no_claude } => {
-            cmd_connect(&cli, server, name, dir, token, *no_claude)
+        Cmd::Connect { server, name, dir, token, fingerprint, authority, plain, no_claude } => {
+            let how = remote_for(server, name, token)
+                .and_then(|remote| trusted(remote, fingerprint, *authority, *plain));
+            match how {
+                Ok(remote) => cmd_connect(&cli, remote, name, dir, *no_claude),
+                Err(e) => Err(e),
+            }
         }
         Cmd::Repos => cmd_repos(&cli),
         Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),

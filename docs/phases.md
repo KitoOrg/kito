@@ -1087,7 +1087,7 @@ a connected directory.
 
 - **Nothing is encrypted by the server.** `serve` listens on this machine
   only by default; across machines the transport is SSH, which could not
-  be tried here.
+  be tried here. (Encrypted since phase 12.)
 - **A lane's working copy is on the server.** A client on another machine
   sees lanes and decides about them, and cannot yet edit their files.
 - **One role.** Whoever may use a repository may do everything a client
@@ -1243,7 +1243,8 @@ through the MCP tools from a connected directory.
 
 - **Two real machines were not available.** Everything was measured and
   tried over the loopback interface; SSH as the transport is still
-  untried, and the server still encrypts nothing.
+  untried, and the server still encrypts nothing (it does since phase
+  12).
 - **Opening a lane brings all its files**, each time: copies on one
   machine do not share contents, and whole files travel (no differences,
   one message for each file). Large binary files are costly.
@@ -1386,8 +1387,7 @@ from the command line; the rules for agents brought up to date.
   server**: with a shell there the protection can be turned off, and
   `.kito/` edited.
 - **The checks run on the server as the server's user**, on code a lane
-  wrote, with no sandbox: that comes with the agents started from the
-  server (phase 12 now).
+  wrote, with no sandbox. (They are confined since phase 12.)
 - **Approval is one person integrating.** No comments on a lane, no number
   of approvals, and the owner learns that their lane went in from the
   board and the events.
@@ -1403,8 +1403,8 @@ from the command line; the rules for agents brought up to date.
 
 Not in the first plan: asked for after phase 9, so that the agents of a
 team can find out why code is the way it is before they change it. (The
-plan's phase 10, agents started from the server, moved to phase 11 then,
-and is phase 12 now.)
+plan's phase 10, agents started from the server, moved on as phases were
+added: it is the last of the plan.)
 
 Kito already records a reason with everything: the intent a lane declares,
 the lane, the agent, the person it works for, the integration, the checks.
@@ -1543,8 +1543,7 @@ through a server, for somebody who may only read, with who let a lane in.
 
 Not in the first plan either: asked for right after phase 10. The why
 graph was there to be asked, and the rules told agents to ask; whether
-they did was up to each model. Now it is not. (Agents started from the
-server become phase 12.)
+they did was up to each model. Now it is not.
 
 Three rules hold for every agent: work in a lane, change what the lane
 declared, know why code is the way it is before changing it. Each is
@@ -1708,6 +1707,134 @@ connected directory, through a server.
   is not reported after a command (a changed one is).
 - **Reasons are as good as what was declared**, as before.
 
+## Phase 12 · encrypted connections and a sandbox per lane — done
+
+The first of five phases asked for after phase 11, to make a shared
+server safe: until now it encrypted nothing, and the checks of an
+integration ran code written in a lane as the server's own user. (Of the
+plan's "agents started from the server", the sandbox is here; the runner
+is still to come.)
+
+### What is there
+
+- **TLS between clients and `kito-server`** (`kitod/src/tls.rs`,
+  `kito-server/src/tls.rs`; rustls with ring). The server makes a key and
+  a self-signed certificate the first time it needs them, in `tls/`.
+  Clients know the server by the SHA-256 fingerprint of the certificate:
+  `kito-server fingerprint` prints it, `user add` prints the `kito connect`
+  line with it, and `serve` says it when it starts.
+- **`kito connect --fingerprint`**: kept in `.kito/remote.toml`; a server
+  that presents another certificate is refused before the token is sent.
+  A server on this machine is taken at its word the first time and held to
+  it afterwards. `--authority` for a certificate from a public authority
+  (the server is known by its name); a server on another machine with
+  neither is refused, and the error shows the fingerprint it presents.
+- **`serve --plain` / `connect --plain`**: no encryption, loopback only.
+  `serve` may now listen on any address, since what it carries is
+  encrypted.
+- **The sandbox** (`kitod/src/sandbox.rs`): Landlock, applied by `kitod
+  sandbox <policy> -- <command>`, which gives up rights and then becomes
+  the command. A confined command writes only where its policy says, does
+  not read what is hidden from it, and (without network) makes and accepts
+  no TCP connection. "Everything but these directories" is spelled as the
+  siblings of the hidden ones up to the root.
+- **The checks run confined** by default (`[sandbox] mode = "auto"`):
+  they write in `.kito/verify/` (the copy of the merged result, a
+  temporary directory emptied before each run, a cache of their own:
+  `TMPDIR`, `XDG_CACHE_HOME`, `GOCACHE`, `npm_config_cache`,
+  `PIP_CACHE_DIR` point there); `.kito/`, the rest of a server's directory
+  and the keys of the user are hidden; no network unless
+  `network = true`. The result of an integration says whether its checks
+  were confined, a failed check says that it ran confined, and
+  `kito status` says how the checks of the repository run.
+  `mode = "required"` refuses to run checks that cannot be confined.
+- **`kito lane run <lane> -- <command>`** and the MCP tool **`run`**: a
+  command in the working copy of a lane, confined to it (network allowed
+  unless `--no-network`).
+- **A key on the daemon's socket** (`.kito/socket.key`): the first line a
+  client sends. Whoever can read `.kito/` can command the daemon; a
+  confined command cannot read it, and so cannot. Without it the sandbox
+  could be left through the socket.
+
+### Demo
+
+```bash
+cargo build --release -p kitod -p kito-cli -p kito-server
+```
+
+```bash
+scripts/demo-phase12.sh
+```
+
+Output: [`docs/demo/phase12-demo.txt`](demo/phase12-demo.txt). An excerpt
+(a lane's check tries to leave its copy):
+
+```text
+(mallory) $ kito integrate 1
+lane/1: verification failed: `sh check.sh`
+  | payroll, another repository of this server:
+  | who may connect to this server:
+  | the key of this repository's daemon:
+  | writing in the main directory of the shop:
+  | calling out:
+  | PermissionError: [Errno 13] Permission denied
+  | the check itself, in its own copy:
+  | ok
+  | cat: /demo/server/repos/payroll/src/salaries.py: Permission denied
+  | cat: /demo/server/server.toml: Permission denied
+  | cat: /demo/server/repos/shop/.kito/socket.key: Permission denied
+  | check.sh: 8: cannot create /demo/server/repos/shop/src/shop.py: Permission denied
+```
+
+And what a listener between a client and the server hears: 525 bytes of
+noise from this server; from one started with `--plain`, the hello with
+the token in full.
+
+### What it costs
+
+An integration with one check takes 36 ms confined and 36 ms not (median
+of 20): the confinement is below what the measure can tell apart.
+`kito lane run <lane> -- true` takes 10 ms. A new encrypted connection
+with one request takes 5 ms, the same as one that is not encrypted, on
+one machine.
+
+### Tests
+
+329 tests in all. New: a check that tries eleven things, confined, with
+the network, and not confined (`kitod/tests/sandbox.rs`); `required` where
+nothing can confine; the fingerprint however it is typed, a wrong one, a
+relay that sees no token, a server on another machine with nothing to
+vouch for it, `--plain` and what each side says when the other does not
+match (`kito-server/tests/server.rs`); `kito lane run`, the key of the
+socket and the fingerprint kept by `kito connect` from the command line;
+the `run` tool.
+
+### Known limitations
+
+- **Linux only** (Landlock, 5.13; the network part 6.7). Elsewhere the
+  checks run as before, and `kito status` says so.
+- **No TCP is not no network**: UDP and Unix sockets are not confined. A
+  check can still resolve names, and reach a local service that listens
+  on a Unix socket.
+- **A check that starts a local server on a port fails** without
+  `network = true`: loopback is TCP too.
+- **Tools that write caches in the home fail or complain** (cargo locks
+  `~/.cargo`, for one): name the directories in `[sandbox] write`. A cache
+  shared between checks can be poisoned by one of them, which is why none
+  is writable by default.
+- **Names are not hidden**: a confined command cannot read hidden files,
+  but it can see that a path exists.
+- **Not limited**: CPU, memory, disk and the number of processes; only
+  the time a check may take.
+- **The shell of an agent is not confined by itself**: `kito lane run` and
+  the `run` tool confine what goes through them. Claude Code's own Bash
+  tool is checked after the fact, as in phase 11.
+- **A self-signed certificate does not expire here and is not rotated**:
+  a new one means a new fingerprint for every client.
+- **Clients are known by their token**, not by a certificate.
+- **Two real machines were still not tried.**
+
+## After phase 5
 ## After phase 5
 ## After phase 5
 

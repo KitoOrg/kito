@@ -1,0 +1,111 @@
+# 1. A server with a certificate of its own
+
+$ kito-server init /demo/server
+Kito server created in /demo/server
+Its certificate's fingerprint: sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3
+Add a repository with `kito-server --dir /demo/server repo add <name>`,
+a person with `user add <name>`, then run `serve`.
+
+$ kito-server --dir /demo/server user add ada --repo shop
+ada added. Their token, shown this once:
+kito_<token>
+They connect with:
+  kito connect <host>:<port> <repository> --token kito_<token> --fingerprint sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3
+
+$ kito-server --dir /demo/server serve --listen 127.0.0.1:0 &
+kito-server: listening on 127.0.0.1:33021, 2 repositories, encrypted (certificate sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3)
+
+
+# 2. A client that is given another fingerprint does not connect
+
+$ kito connect 127.0.0.1:33021 shop eve --token kito_<token> --fingerprint sha256:abababababababababababababababababababababababababababababababab
+kito: cannot reach the server: 127.0.0.1:33021: the server presents a certificate with fingerprint
+sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3, not the one this directory
+was connected with: either the server has a new certificate (ask whoever runs it, then connect
+again with --fingerprint) or this is not the server
+
+$ kito connect 127.0.0.1:33021 shop ada --token kito_<token> --fingerprint sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3
+/demo/ada is connected to `shop` on 127.0.0.1:33021 as ada.
+The connection is encrypted, and the server is known by its certificate
+(sha256:983a088d07244a9c4ae1357666412b973024b962fb40eab24ca3098736f636b3): one that presents
+another is refused.
+
+
+# 3. What somebody between the two can read
+
+(a listener sits between a client and the server, and the client asks for the lanes)
+
+this server:
+  525 bytes heard from the client. They begin:
+  ............J.O.GN...YKc|3.5....N!a.....d.. .l....o....C.L?...S.c...f..?...
+  O.........,.+...0./.......t.#.......................................-......
+  the token is in them: no
+
+the same on a server started with --plain, as every server was before this version:
+  183 bytes heard from the client. They begin:
+  {"hello":{"repo":"shop","token":"kito_<the token, in full>","version":1}}.{
+  "jsonrpc":"2.0","id":1,"method":"lanes","params":{"all":false}}.
+  the token is in them: YES
+
+
+# 4. The checks of a lane are confined
+
+$ kito-server --dir /demo/server repo set shop --check sh check.sh
+shop  [main protected, checks: sh check.sh]
+Checks ............ sh check.sh
+                    confined: they write only in their own copy and open no network connection
+
+(mallory may use `shop`, not `payroll`. Her lane brings a check of its own.)
+
+(mallory) $ kito lane open agent-m --intent a check for the shop --scope check.sh
+lane/1 opened for agent-m on ckpt#1.
+
+(mallory) $ cat check.sh
+echo "payroll, another repository of this server:"
+cat /demo/server/repos/payroll/src/salaries.py
+echo "who may connect to this server:"
+cat /demo/server/server.toml
+echo "the key of this repository's daemon:"
+cat /demo/server/repos/shop/.kito/socket.key
+echo "writing in the main directory of the shop:"
+echo 'def total(prices): return 0' > /demo/server/repos/shop/src/shop.py
+echo "calling out:"
+python3 -c 'import socket; socket.create_connection(("example.com", 80), 3)' 2>&1 | tail -1
+echo "the check itself, in its own copy:"
+echo ok > result.txt && cat result.txt
+exit 1
+
+(mallory) $ kito integrate 1
+lane/1: verification failed: `sh check.sh`
+  | payroll, another repository of this server:
+  | who may connect to this server:
+  | the key of this repository's daemon:
+  | writing in the main directory of the shop:
+  | calling out:
+  | PermissionError: [Errno 13] Permission denied
+  | the check itself, in its own copy:
+  | ok
+  | cat: /demo/server/repos/payroll/src/salaries.py: Permission denied
+  | cat: /demo/server/server.toml: Permission denied
+  | cat: /demo/server/repos/shop/.kito/socket.key: Permission denied
+  | check.sh: 8: cannot create /demo/server/repos/shop/src/shop.py: Permission denied
+  | (exit code 1)
+  | (the checks run confined: they write only in their own copy of the files and open no network
+connection; if that is what failed, see [sandbox] in the configuration of the repository)
+  Nothing was integrated: fix it in the lane and integrate again.
+
+$ cat /demo/server/repos/shop/src/shop.py     # as it was
+def total(prices):
+    return sum(prices)
+
+
+# 5. A command run in a lane is confined to the lane
+
+(mallory) $ kito lane run 1 -- sh -c echo "print(41 + 1)" > answer.py && python3 answer.py
+42
+
+(mallory) $ kito lane run 1 -- sh -c "echo x > ../../../../hacked.txt; cat ../../../remote.toml"
+sh: 1: cannot create ../../../../hacked.txt: Permission denied
+cat: ../../../remote.toml: Permission denied
+
+(the token of this directory is in remote.toml: the command could not read it)

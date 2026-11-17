@@ -1027,6 +1027,75 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
 }
 
 #[test]
+fn a_command_runs_confined_to_its_lane() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::write(root.join("app.py"), "def a():\n    return 1\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+    ok(root, &["lane", "open", "alice", "--intent", "two", "--scope", "app.py"]);
+    let work = root.join(".kito/lanes/1/work");
+    // Whether this system can confine a command at all.
+    let able = kito(root, &["lane", "run", "1", "--", "true"]);
+    if !able.status.success() {
+        let why = String::from_utf8_lossy(&able.stderr).into_owned();
+        assert!(why.contains("cannot be confined here"), "{why}");
+        ok(root, &["daemon", "stop"]);
+        return;
+    }
+
+    // In its lane it reads, writes and runs; its exit code is its own.
+    let wrote = kito(root, &["lane", "run", "1", "--", "sh", "-c", "pwd && cat app.py && echo x > made.txt"]);
+    assert!(wrote.status.success(), "{wrote:?}");
+    let said = String::from_utf8_lossy(&wrote.stdout).into_owned();
+    assert!(said.starts_with(&format!("{}\n", work.display())) && said.contains("def a()"), "{said}");
+    assert!(work.join("made.txt").is_file());
+    assert_eq!(kito(root, &["lane", "run", "1", "--", "sh", "-c", "exit 7"]).status.code(), Some(7));
+
+    // Outside it: the main directory, another place of the machine,
+    // Kito's own data and the key of the daemon's socket.
+    let script = format!(
+        "echo x > {root}/hacked.txt; echo x > {root}/../outside.txt; cat {root}/.kito/config.toml; \
+         cat {root}/.kito/socket.key; ls {root}/.kito/lanes; echo done",
+        root = root.display()
+    );
+    let tried = kito(root, &["lane", "run", "1", "--", "sh", "-c", &script]);
+    let (out, err) = (String::from_utf8_lossy(&tried.stdout), String::from_utf8_lossy(&tried.stderr));
+    assert_eq!(out.trim(), "done", "nothing was read: {out}");
+    assert_eq!(err.matches("Permission denied").count(), 5, "{err}");
+    assert!(!root.join("hacked.txt").exists() && !root.parent().unwrap().join("outside.txt").exists());
+
+    // It cannot command the daemon either: the socket asks for a key it cannot read.
+    use std::io::{BufRead, Write};
+    let mut raw = std::os::unix::net::UnixStream::connect(root.join(".kito/kitod.sock")).unwrap();
+    raw.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"protect\",\"params\":{\"on\":false}}\n")
+        .unwrap();
+    let mut answer = String::new();
+    std::io::BufReader::new(raw).read_line(&mut answer).unwrap();
+    assert!(answer.contains("did not say the key"), "{answer}");
+
+    // The network is its to use unless it is told otherwise.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let reach = format!(
+        "import socket; socket.create_connection(('127.0.0.1', {}), 2)",
+        listener.local_addr().unwrap().port()
+    );
+    if Command::new("python3").arg("--version").output().is_ok_and(|out| out.status.success()) {
+        assert!(kito(root, &["lane", "run", "1", "--", "python3", "-c", &reach]).status.success());
+        let cut = kito(root, &["lane", "run", "1", "--no-network", "--", "python3", "-c", &reach]);
+        assert!(!cut.status.success());
+        assert!(String::from_utf8_lossy(&cut.stderr).contains("Permission"), "{cut:?}");
+    }
+
+    // What it wrote in the lane is the lane's, like any other save.
+    ok(root, &["sync", "1"]);
+    assert!(ok(root, &["lane", "status", "1"]).contains("made.txt"));
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn a_protected_main_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -1170,9 +1239,24 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("this token is not one the server knows"));
     assert!(!base.join("nope").exists());
 
+    // The connection is encrypted. Another certificate than the one that
+    // was given with the token is not the server.
+    let wrong = format!("sha256:{}", "0f".repeat(32));
+    let refused =
+        kito(&base, &["connect", &address, "shop", "nope", "--token", &token, "--fingerprint", &wrong]);
+    assert!(!refused.status.success());
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(said.contains("not the one this directory was connected with"), "{said}");
+    assert!(!base.join("nope").exists());
+
     let connected = ok(&base, &["connect", &address, "shop", "--token", &token]);
     assert!(connected.contains("is connected to `shop` on") && connected.contains("as ada."), "{connected}");
     let here = base.join("shop");
+    // A server on this machine is taken at its word the first time, and
+    // held to it from then on: the directory keeps its fingerprint.
+    let print = run(&["fingerprint"]).trim().to_owned();
+    let kept = fs::read_to_string(here.join(".kito/remote.toml")).unwrap();
+    assert!(kept.contains(&format!("fingerprint = \"{print}\"")), "{kept}");
     // The directory is the project: the main lane's files are in it.
     assert!(connected.contains("The main lane is in it (1 file)"), "{connected}");
     assert_eq!(fs::read_to_string(here.join("src/shop.py")).unwrap(), SHOP_PY);

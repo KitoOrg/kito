@@ -11,6 +11,11 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
+    // `kitod sandbox <policy> -- <command>`: not a daemon, but a command
+    // run confined on behalf of one.
+    if std::env::args().nth(1).as_deref() == Some("sandbox") {
+        return kitod::sandbox::run(args.skip(1));
+    }
     let mut repo: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {

@@ -1101,3 +1101,49 @@ directory and outside the scope of a lane. It is told for what was
 recorded since the command started (what Claude Code says it took, and a
 quarter of a second). Nothing is reverted: the main lane, when protected,
 already puts files back, and a lane out of its scope is not integrated.
+
+### D-115 · A server is known by its fingerprint
+A team that sets up a server has no certificate authority and often no
+public name. The server signs its own certificate and clients pin its
+SHA-256 fingerprint, given with the token, as SSH does with host keys.
+`--authority` is there for who has a real certificate. A server on the
+same machine is trusted the first time: whoever could stand in for it
+there already has the machine.
+
+### D-116 · Encrypted unless asked otherwise, and then only locally
+`serve` encrypts; `--plain` exists for the same machine and refuses any
+other address, on both sides. A client and a server of different minds
+say what the matter is instead of failing on bytes.
+
+### D-117 · Landlock, through a helper that becomes the command
+The sandbox had to work without privileges, without a program to install
+and without `unsafe` outside `kito-store`. Landlock is in the kernel and
+needs no privilege; `kitod sandbox` restricts itself and then execs the
+command, so nothing runs between `fork` and `exec` in the daemon.
+Namespaces would also give a private network, but need either privileges
+or a root-mapped user namespace that changes who the tools think they
+are.
+
+### D-118 · What is hidden is said by naming everything else
+Landlock allows; it does not forbid. To hide `.kito/`, the other
+repositories and the keys, the policy allows every sibling of each hidden
+path, up to the root. A file created later next to a hidden one is not
+readable until the next command: the list is made for each run.
+
+### D-119 · The checks get no network and no shared cache by default
+A check that can call out can send away what it reads; one that can write
+a cache other checks read can change what they run. Both are off unless
+the repository says otherwise, and a check that fails confined says that
+it ran confined, because the first thing to suspect is the confinement.
+
+### D-120 · The daemon's socket asks for a key
+A confined command could still connect to the daemon's socket and ask it
+to lift the protection of the main lane: Landlock does not stop a
+connection to a Unix socket. The socket now wants a key kept in `.kito/`,
+which a confined command cannot read. Reading `.kito/` is what it takes
+to command the daemon, as it was already what it took to change its data.
+
+### D-121 · Where nothing can confine, the checks still run
+On macOS and old kernels `auto` runs the checks as before and says so;
+`required` is for a server that must not. Refusing by default would stop
+every local repository that has checks on a system without Landlock.

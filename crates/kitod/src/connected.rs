@@ -49,6 +49,8 @@ struct Running {
 
 struct Daemon {
     root: PathBuf,
+    /// What a client says first on the socket.
+    key: Option<String>,
     remote: Remote,
     /// This machine, as the server knows the copy that writes in a lane.
     writer: String,
@@ -529,8 +531,26 @@ fn serve_client(daemon: &Arc<Daemon>, stream: UnixStream) {
     let mut writer = stream;
     let kept = daemon.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
     let mut up = kept.unwrap_or_else(|| Upstream::new(&daemon.remote));
+    // Whoever speaks first says the key of the socket.
+    let mut trusted = daemon.key.is_none();
     for line in BufReader::new(read).lines() {
         let Ok(line) = line else { break };
+        if !trusted {
+            match daemon.key.as_deref().and_then(|key| rpc::key_said(&line, key)) {
+                Some(true) => {
+                    trusted = true;
+                    continue;
+                }
+                _ => {
+                    let id = serde_json::from_str::<Request>(&line).map_or(0, |request| request.id);
+                    if let Ok(mut out) = serde_json::to_vec(&Response::err(id, rpc::REFUSED, rpc::NO_KEY)) {
+                        out.push(b'\n');
+                        let _ = writer.write_all(&out).and_then(|()| writer.flush());
+                    }
+                    return;
+                }
+            }
+        }
         let (response, last) = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
                 let response = match daemon.handle(&mut up, &request) {
@@ -585,6 +605,7 @@ pub fn serve(root: &Path) -> Result<(), String> {
         mirrors: Mutex::default(),
         idle: Mutex::default(),
         remote: remote.clone(),
+        key: rpc::ensure_socket_key(&root).ok(),
         root: root.clone(),
     });
     for dir in std::fs::read_dir(kito.join("lanes")).into_iter().flatten().flatten() {
