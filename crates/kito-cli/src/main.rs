@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod claude;
+mod hook;
 mod log;
 
 #[derive(Parser)]
@@ -253,6 +254,12 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
+    /// What Claude Code runs around its tools, written into the project by
+    /// `kito claude`: edits are checked before they are made
+    Hook {
+        #[command(subcommand)]
+        what: HookCmd,
+    },
     /// Protect the main lane: from then on it changes only when a lane is
     /// integrated, and a file edited in the main directory is put back
     Protect {
@@ -340,6 +347,25 @@ enum DaemonCmd {
     Start,
     /// Stop the daemon
     Stop,
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// Before an edit: may it be made? Reads what Claude Code says about
+    /// the edit on the standard input; with --file, answers in words for
+    /// any other tool and leaves with 2 when the edit should not be made
+    BeforeEdit {
+        /// The file about to be edited
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// The lines about to be replaced, as 12 or 12-18 (default: the whole file)
+        #[arg(long = "lines")]
+        lines: Vec<String>,
+    },
+    /// After a shell command: what it changed where it should not have
+    AfterShell,
+    /// When a session starts: the rules that are enforced, and who is on what
+    SessionStart,
 }
 
 type Outcome = Result<(), String>;
@@ -1178,6 +1204,43 @@ fn strings(value: &Value) -> Vec<&str> {
     value.as_array().into_iter().flatten().filter_map(Value::as_str).collect()
 }
 
+/// Why what a lane declared is the way it is, as the daemon told it when
+/// it was declared.
+fn print_scope_why(answer: &Value) {
+    let told: Vec<kitod::guard::ScopeWhy> = serde_json::from_value(answer["why"].clone()).unwrap_or_default();
+    if !told.is_empty() {
+        println!("Why it is the way it is:");
+    }
+    for item in &told {
+        println!("  {}", item.item);
+        for reason in &item.reasons {
+            println!("    {}", kitod::guard::line_of(reason));
+        }
+        if item.earlier > 0 {
+            println!(
+                "    and {} before: `kito why {}`",
+                count(item.earlier as u64, "reason", "reasons"),
+                item.item
+            );
+        }
+        if !item.used_by.is_empty() {
+            let more = match item.used_by_more {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            println!("    used by {}{more}", item.used_by.join(", "));
+        }
+        for decision in &item.decisions {
+            if let Some(decided) = &decision.decided {
+                println!("    decided ({}): {decided}", decision.conflict);
+            }
+        }
+    }
+    if let Some(note) = answer["why_note"].as_str() {
+        println!("  ({note})");
+    }
+}
+
 /// The other lanes on the same code, as the daemon told them.
 fn print_overlaps(overlaps: &Value) {
     for overlap in overlaps.as_array().into_iter().flatten() {
@@ -1348,7 +1411,9 @@ fn cmd_watch(cli: &Cli, lane: &Option<String>, count: Option<usize>, past: bool)
         after = heard["next"].as_u64().unwrap_or(after);
         for event in heard["events"].as_array().into_iter().flatten() {
             let text = |key: &str| event[key].as_str().unwrap_or_default();
-            if lane.as_deref().is_some_and(|only| only != text("lane")) {
+            // `3`, `lane/3` and `main` all name a lane.
+            let bare = |lane: &str| lane.strip_prefix("lane/").unwrap_or(lane).to_owned();
+            if lane.as_deref().is_some_and(|only| bare(only) != bare(text("lane"))) {
                 continue;
             }
             if cli.json {
@@ -1544,6 +1609,7 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 println!("Working copy: {}", lane.workdir.as_deref().unwrap_or(Path::new("")).display());
                 println!("Scope: {}", lane.scope.join(", "));
                 print_overlaps(&opened["overlaps"]);
+                print_scope_why(&opened);
                 println!(
                     "Every save there is recorded on the lane; `kito integrate {}` brings it in.",
                     lane.id
@@ -1559,6 +1625,7 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                     return Ok(());
                 }
                 print_overlaps(&grown["overlaps"]);
+                print_scope_why(&grown);
             }
             let status: Value = client.call("lane_status", json!({ "lane": lane })).map_err(fail)?;
             if cli.json {
@@ -2104,6 +2171,14 @@ fn main() -> ExitCode {
         report(panic);
     }));
     let cli = Cli::parse();
+    // A hook answers whoever runs it in its own words and with its own code.
+    if let Cmd::Hook { what } = &cli.command {
+        return match what {
+            HookCmd::BeforeEdit { file, lines } => hook::before_edit(file.as_deref(), lines),
+            HookCmd::AfterShell => hook::after_shell(),
+            HookCmd::SessionStart => hook::session_start(),
+        };
+    }
     let outcome = match &cli.command {
         Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
         Cmd::Import { path, no_claude } => cmd_import(&cli, path, *no_claude),
@@ -2144,6 +2219,7 @@ fn main() -> ExitCode {
         }
         Cmd::Rename { symbol, new_name, lane } => cmd_rename(&cli, symbol, new_name, lane),
         Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
+        Cmd::Hook { .. } => Ok(()),
         Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

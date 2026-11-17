@@ -383,6 +383,39 @@ impl Daemon {
         })
     }
 
+    /// What a command changed where it should not have: the server says
+    /// it of the lanes, this machine of its own main directory, which
+    /// follows the main lane and keeps what is written in it to itself.
+    fn after_shell(&self, up: &mut Upstream, params: &Value) -> Result<Value, (i64, String)> {
+        let named =
+            params.get("lanes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+        for mirror in named.filter_map(|lane| self.mirror(lane)).filter(|mirror| mirror.writes()) {
+            mirror.flush(up);
+        }
+        let mut asked = params.clone();
+        asked["main"] = json!(false);
+        let mut answer = self.forward(up, "after_shell", &asked)?;
+        let since = params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
+        // The directory follows the main lane, unless the lane is written from here.
+        let held: Vec<String> = match self.mirror("main").filter(|main| !main.writes()) {
+            Some(main) => main.changed_here(since),
+            None => Vec::new(),
+        };
+        if !held.is_empty() {
+            let here = format!(
+                "Kito: files of the main directory were changed: {}. This directory follows the main \
+                 lane: the change stays on this machine and is recorded nowhere (`kito lane take main \
+                 <file> --theirs` puts a file back as the main lane has it). To change them, open a \
+                 lane with the open_lane tool and work in its working copy.",
+                held.join(", ")
+            );
+            let before = answer.get("message").and_then(Value::as_str).unwrap_or_default();
+            answer["message"] = json!(format!("{here}\n{before}").trim_end());
+            answer["main"] = json!([{ "at_ms": since, "paths": held, "put_back": false }]);
+        }
+        Ok(answer)
+    }
+
     /// Before a request that must find on the server everything saved
     /// here: sends it, and says no if it does not get there.
     fn barrier(&self, up: &mut Upstream, params: &Value, strict: bool) -> Result<(), (i64, String)> {
@@ -470,6 +503,20 @@ impl Daemon {
                 self.barrier(up, params, false)?;
                 self.forward(up, method, params)?
             }
+            // Asked before an edit in a lane: the server judges the file
+            // as it is here. The main directory has nothing to send.
+            "before_edit" => {
+                if params.get("lane").is_some() {
+                    self.barrier(up, params, false)?;
+                }
+                self.forward(up, "before_edit", params)?
+            }
+            // Asked before an integration: of everything the lane has here.
+            "reasons_behind" => {
+                self.barrier(up, params, true)?;
+                self.forward(up, "reasons_behind", params)?
+            }
+            "after_shell" => self.after_shell(up, params)?,
             method => self.forward(up, method, params)?,
         };
         self.here(&mut answer);

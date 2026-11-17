@@ -39,6 +39,9 @@ const ALLOWED: &[&str] = &[
     "claim_writer",
     "why_graph",
     "reasons",
+    "before_edit",
+    "reasons_behind",
+    "after_shell",
 ];
 
 /// Of those, what somebody who may only read can ask.
@@ -57,6 +60,10 @@ const READ: &[&str] = &[
     "get_blobs",
     "why_graph",
     "reasons",
+    // Asked before an edit and after a command: the answer changes nothing
+    // of the repository.
+    "before_edit",
+    "after_shell",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
 ];

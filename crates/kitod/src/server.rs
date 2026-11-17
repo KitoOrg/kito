@@ -377,7 +377,14 @@ impl Daemon {
                     let target = text("target")?;
                     let uses = params.get("uses").and_then(Value::as_bool).unwrap_or(false);
                     to_json(serde_json::to_value(
-                        self.with_repo(|repo| repo.why_graph(lane, target, uses)).map_err(internal)?,
+                        self.with_repo(|repo| {
+                            let graph = repo.why_graph(lane, target, uses)?;
+                            // A lane that asked was told: no edit of its
+                            // is held back for these reasons.
+                            repo.tell(lane, &graph.reasons);
+                            Ok(graph)
+                        })
+                        .map_err(internal)?,
                     ))
                 }
                 "reasons" => {
@@ -438,7 +445,7 @@ impl Daemon {
                     let (task, base) = (optional("task"), optional("base"));
                     let intent = optional("intent").unwrap_or_default();
                     let scope = scope_of(params);
-                    let (opened, overlaps) = self
+                    let (opened, overlaps, (why, why_note)) = self
                         .with_repo(|repo| {
                             let opened = repo.open_lane(agent, task, base.as_deref(), &intent, &scope)?;
                             let lane = repo.lane_of(&opened.id)?;
@@ -451,27 +458,89 @@ impl Daemon {
                                 None => opened,
                             };
                             // Who is already on the same code: told now, and
-                            // not again as a notice.
-                            Ok((opened, repo.take_notices(lane)?))
+                            // not again as a notice. And why the code it
+                            // declared is the way it is.
+                            let overlaps = repo.take_notices(lane)?;
+                            Ok((opened, overlaps, repo.why_of_scope(lane, &scope)))
                         })
                         .map_err(internal)?;
                     let mut opened =
                         serde_json::to_value(opened).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
                     opened["overlaps"] = to_json(serde_json::to_value(overlaps))?;
+                    opened["why"] = to_json(serde_json::to_value(why))?;
+                    if let Some(note) = why_note {
+                        opened["why_note"] = Value::String(note);
+                    }
                     Ok(opened)
                 }
                 "extend_scope" => {
                     let lane = lane()?;
                     owned(lane)?;
                     let scope = scope_of(params);
-                    let (declared, overlaps) = self
-                        .with_repo(|repo| Ok((repo.extend_scope(lane, &scope)?, repo.take_notices(lane)?)))
+                    let (declared, overlaps, (why, why_note)) = self
+                        .with_repo(|repo| {
+                            let declared = repo.extend_scope(lane, &scope)?;
+                            let overlaps = repo.take_notices(lane)?;
+                            Ok((declared, overlaps, repo.why_of_scope(lane, &scope)))
+                        })
                         .map_err(internal)?;
-                    Ok(json!({
+                    let mut extended = json!({
                         "lane": lane.to_string(),
                         "scope": to_json(serde_json::to_value(declared))?,
                         "overlaps": to_json(serde_json::to_value(overlaps))?,
-                    }))
+                        "why": to_json(serde_json::to_value(why))?,
+                    });
+                    if let Some(note) = why_note {
+                        extended["why_note"] = Value::String(note);
+                    }
+                    Ok(extended)
+                }
+                "before_edit" => {
+                    let path = crate::scope::clean(text("path")?).map_err(internal)?;
+                    let lane = match params.get("lane").and_then(Value::as_str) {
+                        Some(spec) => Some(
+                            spec.trim()
+                                .parse::<LaneId>()
+                                .map_err(|_| (rpc::INVALID_PARAMS, format!("{spec:?} is not a lane")))?,
+                        ),
+                        None => None,
+                    };
+                    let lines: Vec<(u32, u32)> = params
+                        .get("lines")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|pair| {
+                            let pair = pair.as_array()?;
+                            Some((pair.first()?.as_u64()? as u32, pair.get(1)?.as_u64()? as u32))
+                        })
+                        .collect();
+                    let whole = params.get("whole").and_then(Value::as_bool).unwrap_or(false);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.before_edit(lane, &path, &lines, whole))
+                            .map_err(internal)?,
+                    ))
+                }
+                "reasons_behind" => {
+                    let lane = lane()?;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.reasons_behind(lane)).map_err(internal)?,
+                    ))
+                }
+                "after_shell" => {
+                    let since = params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
+                    let lanes: Vec<LaneId> = params
+                        .get("lanes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter_map(|spec| spec.trim().parse().ok())
+                        .collect();
+                    let main = params.get("main").and_then(Value::as_bool).unwrap_or(true);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.after_shell(since, &lanes, main)).map_err(internal)?,
+                    ))
                 }
                 "board" => to_json(serde_json::to_value(
                     self.with_repo(|repo| {
@@ -752,6 +821,20 @@ impl Daemon {
             }
             "close_lane" => ("lane_closed", text(value, "id"), person, String::new()),
             "extend_scope" => ("scope_extended", lane, person, list(params, "scope")),
+            // An edit that was not made because of where it was: a team
+            // that watches sees an agent off its lane. One held back for
+            // its reasons is the ordinary course of things, and is not told.
+            "before_edit" => {
+                let path = text(params, "path").unwrap_or_default();
+                let what = match text(value, "kind").as_deref() {
+                    Some("main") => format!("{path}: an edit in the main directory, not made"),
+                    Some("out_of_scope") => {
+                        format!("{}: outside the scope, not made", list(value, "outside"))
+                    }
+                    _ => return,
+                };
+                ("edit_refused", lane.or(Some("main".to_owned())), person, what)
+            }
             "set_intent" => ("intent", lane, person, text(params, "summary").unwrap_or_default()),
             "rename_symbol" => {
                 let what = format!(

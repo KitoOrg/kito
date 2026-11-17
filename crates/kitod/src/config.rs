@@ -39,6 +39,14 @@ max_file_bytes = 268435456
 # under .kito/refused/. Turned on and off with `kito protect`.
 protected = false
 
+[agents]
+# An agent is told why code is the way it is before it changes it: when it
+# declares what it will change, and once more, with the edit held back,
+# when it is about to change lines written for a reason it was not told
+# (or, without hooks, when it asks for its lane to be integrated). With
+# `false` it is told when it declares, and nothing is held back.
+why = true
+
 [git]
 # Export every checkpoint as a git commit as soon as it is created.
 export_on_checkpoint = true
@@ -120,6 +128,7 @@ pub struct Config {
     pub author: AuthorConfig,
     pub capture: CaptureConfig,
     pub main: MainConfig,
+    pub agents: AgentsConfig,
     pub git: GitConfig,
     pub lanes: LanesConfig,
     pub verify: VerifyConfig,
@@ -337,6 +346,21 @@ impl Default for GitConfig {
 pub struct MainConfig {
     /// The main lane changes only when a lane is integrated.
     pub protected: bool,
+}
+
+/// What agents are held to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// A change is held back once, until the agent that makes it was told
+    /// the reasons the code it changes was written for.
+    pub why: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        AgentsConfig { why: true }
+    }
 }
 
 /// Sets one value of a table of a configuration file, leaving everything

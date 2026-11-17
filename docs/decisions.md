@@ -1042,3 +1042,62 @@ language server, which can take seconds. Above 5,000 files they are not
 looked for unless asked (`--uses`, `"uses": true`), and the answer says
 so: at 20,000 files it adds 0.3 s.
 
+### D-107 · The why is given, not asked for
+Phase 10 let agents ask why; the rules told them to. Whether they did was
+each model's choice. The reasons now come in the answer of the one call no
+lane can skip, the declaration of its scope: `open_lane` and
+`extend_scope` carry the last reasons of each function and file declared,
+and who uses it. Short (five reasons, eight users, eight items): `why`
+tells the rest.
+
+### D-108 · An edit is refused before it is made, by hooks
+Where an agent may edit and what it declared were checked at integration,
+after the work. For Claude Code they are now checked by a `PreToolUse`
+hook, which the harness runs whatever the model decided: `deny`, with
+words that say what to do instead. The hook is a thin command (`kito hook
+before-edit`) that asks the daemon: the rules live in one place, and a
+connected directory gets the server's answer. Hooks were chosen over a
+wrapper around the tools because they are what the harness guarantees.
+
+### D-109 · Held once, then let through
+An edit on lines written for a reason the lane was not told is refused
+once with the reasons, and goes through when made again. Stronger (the
+agent must answer, somebody must approve) would stall swarms on every
+legacy line; weaker (tell it after the edit) lets the change be written
+first. Once is enough to put the reason in front of the model at the
+moment it matters. What a lane was told is kept with the lane so that it
+is once, and `[agents] why = false` turns the holding off.
+
+### D-110 · Lines, not files
+What is held for is the reasons behind the lines an edit replaces, found
+through the history of the file as `kito why file:line` finds them, not
+every reason the file ever changed for: an agent that fixes one function
+of a long file is not told forty reasons. A file written whole is told
+all of its reasons that were not told yet.
+
+### D-111 · The integration is the net
+A shell command, another editor, an agent with no hooks: none goes through
+`before_edit`. So the MCP tool `request_integration` first asks for the
+reasons behind what the lane replaced that it was never told, and answers
+`read_first` instead of starting. It is in `kito-mcp`, not in the daemon's
+queue: agents integrate through the tools, people through `kito integrate`,
+and people are not held.
+
+### D-112 · A hook that cannot ask lets the edit through
+With no daemon to ask (stopped, a broken connection to the server), the
+hook leaves with an error Claude Code does not treat as a refusal, and
+says the edit was not checked. Blocking every edit when the infrastructure
+is down would make people remove the hooks; the scope is still checked at
+integration and a protected main lane still puts edits back.
+
+### D-113 · Kito's own files are not an agent's to edit
+An edit under `.kito/` other than a lane's working copy is refused by the
+hook without asking anybody: the configuration there includes the rules
+the agent is held to. To change a rule, it asks its person.
+
+### D-114 · A shell command is told about, not undone
+After `Bash`, a hook tells the model what the command changed in the main
+directory and outside the scope of a lane. It is told for what was
+recorded since the command started (what Claude Code says it took, and a
+quarter of a second). Nothing is reverted: the main lane, when protected,
+already puts files back, and a lane out of its scope is not integrated.

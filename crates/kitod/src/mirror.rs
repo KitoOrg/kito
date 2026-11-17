@@ -50,6 +50,7 @@ const REPEATABLE: &[&str] = &[
     "extend_scope",
     "why_graph",
     "reasons",
+    "after_shell",
 ];
 
 /// A connection left alone this long is checked before it is trusted with
@@ -583,6 +584,26 @@ impl Mirror {
         let file = Synced { blob: BlobId::of(&bytes).to_string(), executable, symlink: false };
         state.stats.insert(path.to_owned(), (meta.len(), modified, file.clone()));
         Local::File(file, bytes)
+    }
+
+    /// The files of the lane written here since `since_ms` that are not as
+    /// they were last in step with the server: for a copy that only
+    /// follows, what was changed in it by hand.
+    pub fn changed_here(&self, since_ms: u64) -> Vec<String> {
+        let mut state = self.state();
+        let known: Vec<(String, Synced)> =
+            state.saved.files.iter().map(|(path, file)| (path.clone(), file.clone())).collect();
+        let since = SystemTime::UNIX_EPOCH + Duration::from_millis(since_ms);
+        let mut changed = Vec::new();
+        for (path, file) in known {
+            let written = fs::symlink_metadata(self.work.join(&path)).and_then(|meta| meta.modified());
+            if written.is_ok_and(|at| at >= since)
+                && self.local(&mut state, &path, false).synced() != Some(&file)
+            {
+                changed.push(path);
+            }
+        }
+        changed
     }
 
     /// `true` if nothing between the working copy and the file is a

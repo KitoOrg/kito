@@ -541,6 +541,7 @@ fn init_sets_the_project_up_for_claude_code() {
     let settings: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap()).unwrap();
     assert_eq!(settings["permissions"]["allow"][0], "mcp__kito__*");
+    assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "kito hook before-edit");
     assert!(fs::read_to_string(root.join("CLAUDE.md")).unwrap().contains("`open_lane`"));
 
     // They are files of the project like the others: recorded, and in git
@@ -852,6 +853,176 @@ fn why_tells_the_reasons_of_code_and_reasons_are_found_by_their_words() {
     // What cannot be answered says why.
     let missing = kito(root, &["why", "src/shop.ts:nothing"]);
     assert!(String::from_utf8_lossy(&missing.stderr).contains("the file has: discount, total"));
+    ok(root, &["daemon", "stop"]);
+}
+
+/// Runs a hook as Claude Code does: what it says about the tool on the
+/// standard input. Returns what the hook answered (`Null` for nothing),
+/// its exit code and what it wrote for people.
+fn hook(cwd: &Path, args: &[&str], input: &Value) -> (Value, i32, String) {
+    use std::io::Write;
+    let mut child = command(cwd, args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let answer = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (answer, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// An edit as Claude Code announces it before making it.
+fn edit(file: &Path, old: &str, new: &str) -> Value {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "cwd": file.parent().unwrap(),
+        "tool_input": { "file_path": file, "old_string": old, "new_string": new, "replace_all": false },
+    })
+}
+
+/// The words of a refusal; empty if the edit was let through.
+fn refusal(answer: &(Value, i32, String)) -> String {
+    let said = &answer.0["hookSpecificOutput"];
+    assert_eq!(answer.1, 0, "a hook that answers leaves with 0: {answer:?}");
+    match said["permissionDecision"].as_str() {
+        Some("deny") => {
+            assert_eq!(said["hookEventName"], "PreToolUse");
+            said["permissionDecisionReason"].as_str().unwrap().to_owned()
+        }
+        _ => {
+            assert_eq!(answer.0, Value::Null, "nothing to say for an edit that may be made");
+            String::new()
+        }
+    }
+}
+
+#[test]
+fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = (amount * percent) / 100;\n  return amount - cut;\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\nbuild/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    fs::write(root.join("README.md"), "# Shop\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "src/shop.ts:total"]);
+    let work = root.join(".kito/lanes/1/work");
+    fs::write(work.join("src/shop.ts"), shop.replace("sum += price;", "sum += Math.round(price * 100);"))
+        .unwrap();
+    assert!(ok(root, &["integrate", "1"]).contains("integrated as ckpt#2"));
+    ok(root, &["lane", "close", "1"]);
+
+    // 1. The main directory is no place for an agent to edit.
+    let no =
+        refusal(&hook(root, &["hook", "before-edit"], &edit(&root.join("src/shop.ts"), "let sum = 0;", "x")));
+    assert!(no.contains("src/shop.ts is in the main directory"), "{no}");
+    assert!(no.contains("open_lane"), "{no}");
+    // What Kito does not record may be written; so may anything outside the repository.
+    let built = edit(&root.join("build/out.js"), "", "x");
+    assert_eq!(refusal(&hook(root, &["hook", "before-edit"], &built)), "");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let other = edit(&elsewhere.path().join("notes.txt"), "", "x");
+    assert_eq!(refusal(&hook(root, &["hook", "before-edit"], &other)), "");
+    // Kito's own files are nobody's to edit.
+    let no = refusal(&hook(root, &["hook", "before-edit"], &edit(&root.join(".kito/config.toml"), "", "x")));
+    assert!(no.contains("one of Kito's own files"), "{no}");
+
+    // 2. A lane is told why what it declares is the way it is.
+    let opened =
+        ok(root, &["lane", "open", "bob", "--intent", "a flat discount", "--scope", "src/shop.ts:discount"]);
+    assert!(opened.contains("Why it is the way it is:\n  src/shop.ts:discount\n"), "{opened}");
+    assert!(opened.contains("    \"first version\": ada, checkpoint ckpt#1\n"), "{opened}");
+    let work = root.join(".kito/lanes/2/work");
+
+    // 3. Its own function may be edited: it was told. Another one may not.
+    let own = edit(&work.join("src/shop.ts"), "  return amount - cut;", "  return amount - percent;");
+    assert_eq!(refusal(&hook(root, &["hook", "before-edit"], &own)), "");
+    let other = edit(&work.join("src/shop.ts"), "    sum += Math.round(price * 100);", "    sum += price;");
+    let no = refusal(&hook(root, &["hook", "before-edit"], &other));
+    assert!(no.contains("src/shop.ts:total is outside what lane/2 declared (src/shop.ts:discount)"), "{no}");
+    assert!(no.contains("scope [\"src/shop.ts:total\"]"), "{no}");
+    // A file it did not declare, written whole.
+    let write = serde_json::json!({
+        "hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": root,
+        "tool_input": { "file_path": work.join("README.md"), "content": "# The shop\n" },
+    });
+    let no = refusal(&hook(root, &["hook", "before-edit"], &write));
+    assert!(no.contains("README.md is outside what lane/2 declared"), "{no}");
+
+    // 4. Declared as a directory, nothing is told up front: the edit is
+    //    held back once, with the reasons behind its lines.
+    let grown = ok(root, &["lane", "scope", "2", "--add", "src/"]);
+    assert!(grown.contains("a directory was declared"), "{grown}");
+    let held = refusal(&hook(root, &["hook", "before-edit"], &other));
+    assert!(held.contains("this edit was held back once"), "{held}");
+    assert!(held.contains("- \"prices in cents\": alice for ada, lane/1, checkpoint ckpt#2"), "{held}");
+    assert!(!held.contains("first version"), "told when the lane was opened: {held}");
+    assert_eq!(refusal(&hook(root, &["hook", "before-edit"], &other)), "", "the second time it goes through");
+
+    // 5. For any other tool: in words, and 2 when the edit should not be made.
+    let (_, code, said) = hook(root, &["hook", "before-edit", "--file", "src/shop.ts"], &Value::Null);
+    assert_eq!(code, 2, "{said}");
+    assert!(said.contains("is in the main directory"), "{said}");
+    let file = work.join("src/shop.ts");
+    let (_, code, said) = hook(
+        root,
+        &["hook", "before-edit", "--file", file.to_str().unwrap(), "--lines", "2-3"],
+        &Value::Null,
+    );
+    assert_eq!((code, said.as_str()), (0, ""));
+
+    // 6. After a shell command: what it changed outside the scope of its
+    //    lane. What was written before it started (the files of this test,
+    //    a moment ago) is not its doing.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    fs::write(work.join("README.md"), "# The shop\n").unwrap();
+    let ran = serde_json::json!({
+        "hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": root, "duration_ms": 40,
+        "tool_input": { "command": format!("sed -i s/Shop/The\\ shop/ {}", work.join("README.md").display()) },
+        "tool_response": { "stdout": "", "stderr": "" },
+    });
+    let (answer, code, _) = hook(root, &["hook", "after-shell"], &ran);
+    assert_eq!(code, 0);
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    let told = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(told.starts_with("Kito: lane/2 (bob) has changes outside what it declared: README.md"), "{told}");
+    // A command that changed nothing where it should not have has nothing to add.
+    fs::write(work.join("README.md"), "# Shop\n").unwrap();
+    let (answer, code, _) = hook(root, &["hook", "after-shell"], &ran);
+    assert_eq!((answer, code), (Value::Null, 0));
+    // One that wrote in the main directory is told so.
+    fs::write(root.join("README.md"), "# Shop\n\nWritten where it stands.\n").unwrap();
+    ok(root, &["sync"]);
+    let (answer, _, _) = hook(root, &["hook", "after-shell"], &ran);
+    let told = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(told.contains("files of the main directory were changed: README.md"), "{told}");
+
+    // 7. When a session starts: the rules that are enforced, and who is on what.
+    let start = serde_json::json!({ "hook_event_name": "SessionStart", "source": "startup", "cwd": root });
+    let (answer, code, _) = hook(root, &["hook", "session-start"], &start);
+    assert_eq!(code, 0);
+    let told = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(told.contains("They are enforced, not advice"), "{told}");
+    assert!(told.contains("Lanes open right now (1)"), "{told}");
+    assert!(
+        told.contains("- lane/2 bob for ada, active: \"a flat discount\" [src/shop.ts:discount, src/]"),
+        "{told}"
+    );
+    // Outside a repository a hook has nothing to say.
+    let (answer, code, _) =
+        hook(elsewhere.path(), &["hook", "session-start"], &serde_json::json!({ "cwd": elsewhere.path() }));
+    assert_eq!((answer, code), (Value::Null, 0));
+
+    // Somebody who watches sees the edits that were not made.
+    let seen = ok(root, &["watch", "--past", "--lane", "lane/2", "-n", "2"]);
+    assert!(seen.contains("edit refused"), "{seen}");
+    assert!(seen.contains("src/shop.ts:total: outside the scope, not made"), "{seen}");
     ok(root, &["daemon", "stop"]);
 }
 

@@ -108,7 +108,7 @@ impl Repo {
         self.config.capture.ignore.iter().cloned().chain(shared).collect()
     }
 
-    fn lane_dir(&self, lane: LaneId) -> PathBuf {
+    pub(crate) fn lane_dir(&self, lane: LaneId) -> PathBuf {
         self.root.join(STORE_DIR).join("lanes").join(format!("{:x}", lane.0))
     }
 
@@ -291,6 +291,7 @@ impl Repo {
         self.lanes.remove(&lane);
         self.claims_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
         self.told.remove(&lane);
+        self.reasons_told.remove(&lane);
         let dir = self.lane_dir(lane);
         kito_lane::remove(&dir).map_err(Error::io(&dir))?;
         Ok(LaneInfo { workdir: None, ..info })

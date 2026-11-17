@@ -379,3 +379,25 @@ reads them one at a time. And it looked at the whole main directory
 before every question, which took 2 s here and tells nothing: what is
 saved there is recorded as it is saved.
 
+## Phase 11 · the rules, checked before an edit
+
+The same repository of 20,000 files and 500,000 operations, with one lane
+integrated and others open. Release builds, one machine; times are of the
+whole command, as Claude Code runs it around a tool.
+
+| | time |
+| --- | --- |
+| `kito hook before-edit`, a file of a lane, let through | 21–24 ms |
+| `kito hook before-edit`, held for a reason | 22–25 ms |
+| `kito hook before-edit`, a file of the main directory (refused) | 3 ms |
+| `kito hook after-shell` (60 ms of it waiting for the save to be recorded) | 88–106 ms |
+| `kito hook session-start` (the board of every open lane) | 100–130 ms |
+| `kito lane open` on one function, with why it is the way it is | 0.4 s |
+| `kito lane open` on a directory of 100 files | 0.7 s |
+| `kito lane scope --add` of one function, with its why | 0.14 s |
+| The first of these after the daemon starts (reads the log once) | +1.3 s |
+
+Before an edit the daemon looks at the lane's working copy (what the hook
+judges is the file as it is), then reads the history of one file. The cost
+does not grow with the repository but with how often that one file
+changed (at most 400 versions are read).

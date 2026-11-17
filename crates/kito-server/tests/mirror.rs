@@ -562,3 +562,84 @@ fn one_machine_writes_in_a_lane_at_a_time() {
     call(&tower, "detach", json!({ "lane": "1", "discard": true }));
     assert!(!other.exists());
 }
+
+#[test]
+fn an_agent_is_held_to_the_rules_from_a_connected_directory() {
+    let mut world = World::new();
+    let (ada, bob) = (world.ada.clone(), world.bob.clone());
+    let laptop = world.connect("laptop", &ada);
+    let now =
+        || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+    // The lane is told why what it declares is the way it is: the server
+    // knows, and the history it took in from git is part of it.
+    let opened = call(
+        &laptop,
+        "open_lane",
+        json!({ "agent": "alice", "intent": "prices in cents", "scope": ["src/shop.ts:total"] }),
+    );
+    assert_eq!(opened["why"][0]["item"], "src/shop.ts:total");
+    assert_eq!(opened["why"][0]["reasons"][0]["why"], "start");
+    let work = PathBuf::from(opened["workdir"].as_str().unwrap());
+
+    // The directory itself follows the main lane: no place to edit.
+    let answer = call(&laptop, "before_edit", json!({ "path": "src/shop.ts", "lines": [[1, 2]] }));
+    assert_eq!((answer["allowed"].as_bool(), answer["kind"].as_str()), (Some(false), Some("main")));
+
+    // In the lane: its own function, and another one.
+    let edit = |lines: Value| {
+        call(&laptop, "before_edit", json!({ "lane": "lane/1", "path": "src/shop.ts", "lines": lines }))
+    };
+    assert_eq!(edit(json!([[2, 2]]))["allowed"], true);
+    let no = edit(json!([[6, 6]]));
+    assert_eq!(no["kind"], "out_of_scope");
+    assert_eq!(no["outside"], json!(["src/shop.ts:discount"]));
+    assert!(no["message"].as_str().unwrap().contains("extend_scope"), "{no}");
+
+    // The file is judged as it is here: what was saved a moment ago is on
+    // the server before the question is. Three lines more at the top, and
+    // line 5 is in `total`, where `discount` began.
+    write(&work, "src/shop.ts", &format!("// Prices.\n// In cents.\n\n{SHOP}"));
+    assert_eq!(edit(json!([[5, 5]]))["allowed"], true);
+    assert_eq!(edit(json!([[9, 9]]))["kind"], "out_of_scope");
+
+    // Declared, the other function comes with its reasons; and the edit goes through.
+    let grown = call(&laptop, "extend_scope", json!({ "lane": "lane/1", "scope": ["src/shop.ts:discount"] }));
+    assert_eq!(grown["why"][0]["reasons"][0]["why"], "start");
+    assert_eq!(edit(json!([[9, 9]]))["allowed"], true);
+
+    // After a command: what it changed in the lane outside its scope, and
+    // what it wrote in this directory, which only follows.
+    let since = now();
+    write(&work, "README.md", "# The shop\n");
+    let report = call(&laptop, "after_shell", json!({ "since_ms": since, "lanes": ["lane/1"] }));
+    let told = report["message"].as_str().unwrap();
+    assert!(told.contains("lane/1 (alice) has changes outside what it declared: README.md"), "{told}");
+    assert!(!told.contains("main directory"), "{told}");
+    // (`kito connect` brings the files of the main lane to the directory.)
+    call(&laptop, "attach", json!({ "lane": "main" }));
+    assert_eq!(read(&laptop, "README.md"), "# Shop\n");
+    write(&laptop, "README.md", "# Written where it only follows\n");
+    let report = call(&laptop, "after_shell", json!({ "since_ms": since, "lanes": [] }));
+    let told = report["message"].as_str().unwrap();
+    assert!(
+        told.starts_with("Kito: files of the main directory were changed: README.md. This directory follows"),
+        "{told}"
+    );
+    // An hour later it is no news.
+    let later = call(&laptop, "after_shell", json!({ "since_ms": now() + 3_600_000, "lanes": [] }));
+    assert!(!later["message"].as_str().unwrap_or_default().contains("main directory"), "{later}");
+
+    // Before the integration: nothing the lane replaced is news to it.
+    fs::write(work.join("README.md"), "# Shop\n").unwrap();
+    assert_eq!(call(&laptop, "reasons_behind", json!({ "lane": "lane/1" }))["reasons"], json!([]));
+    assert_eq!(integrate(&laptop, "lane/1")["result"], "integrated");
+
+    // Somebody who may only read may ask, and is answered: the main
+    // directory is not theirs to edit either. What tells a lane is not for them.
+    ok(&world.dir, &["user", "role", "bob", "read"]);
+    let desk = world.connect("desk", &bob);
+    assert_eq!(call(&desk, "before_edit", json!({ "path": "README.md" }))["kind"], "main");
+    let no = refused(&desk, "reasons_behind", json!({ "lane": "lane/1" }));
+    assert!(no.contains("read"), "{no}");
+}

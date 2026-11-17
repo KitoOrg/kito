@@ -1386,7 +1386,8 @@ from the command line; the rules for agents brought up to date.
   server**: with a shell there the protection can be turned off, and
   `.kito/` edited.
 - **The checks run on the server as the server's user**, on code a lane
-  wrote, with no sandbox: phase 10.
+  wrote, with no sandbox: that comes with the agents started from the
+  server (phase 12 now).
 - **Approval is one person integrating.** No comments on a lane, no number
   of approvals, and the owner learns that their lane went in from the
   board and the events.
@@ -1402,7 +1403,8 @@ from the command line; the rules for agents brought up to date.
 
 Not in the first plan: asked for after phase 9, so that the agents of a
 team can find out why code is the way it is before they change it. (The
-plan's phase 10, agents started from the server, becomes phase 11.)
+plan's phase 10, agents started from the server, moved to phase 11 then,
+and is phase 12 now.)
 
 Kito already records a reason with everything: the intent a lane declares,
 the lane, the agent, the person it works for, the integration, the checks.
@@ -1537,6 +1539,176 @@ through a server, for somebody who may only read, with who let a lane in.
   on.
 - The prompt an intent may carry is not shown.
 
+## Phase 11 · the rules as behaviour — done
+
+Not in the first plan either: asked for right after phase 10. The why
+graph was there to be asked, and the rules told agents to ask; whether
+they did was up to each model. Now it is not. (Agents started from the
+server become phase 12.)
+
+Three rules hold for every agent: work in a lane, change what the lane
+declared, know why code is the way it is before changing it. Each is
+checked at the moment it matters, by something that runs whatever the
+model decided.
+
+### What is there
+
+- **The why comes with the scope** (`kitod/src/guard.rs`). The answers of
+  `open_lane` and `extend_scope` carry `why`: for each function and file
+  declared, its last five reasons (the words, the task, who, for whom,
+  the lane, the checkpoint) and up to eight of its users. Declaring is
+  mandatory, so every agent on every model has the reasons before its
+  first edit. A directory is not told file by file: a note says so.
+  `kito lane open` and `kito lane scope --add` print the same.
+- **What a lane was told is remembered** with the lane
+  (`.kito/lanes/<n>/told.json`): by a declaration, by a held edit, by a
+  held integration, or because its agent asked `why` for its lane. Nothing
+  is told twice, a restart of the daemon included.
+- **`before_edit`**, a request to the daemon: may this edit be made? Not
+  in the main directory (unless Kito ignores the file); not in a lane that
+  is not open; not outside what the lane declared, down to the function
+  the lines are in; and, on lines written for reasons the lane was not
+  told, not until it was: the edit is refused once with the reasons, which
+  are then counted as told. The lines are found through the history of the
+  file, as `kito why file:line` finds them; the lane's own work is no news
+  to it.
+- **`reasons_behind`**: the reasons behind the lines a lane replaced or
+  removed since it started, that it was not told. `kito-mcp` asks it
+  before `request_integration`: if there are any, the tool answers
+  `read_first` with them and starts nothing; asked again, the integration
+  goes ahead. This is the net under everything else: a change made through
+  a shell, or by an agent that has no hooks.
+- **`after_shell`**: what changed since a command started where it should
+  not have: files of the main directory written by hand (put back, on a
+  protected main lane, or recorded), and lanes with changes outside their
+  scope.
+- **Hooks for Claude Code** (`kito hook`, `kito-cli/src/hook.rs`), written
+  into `.claude/settings.json` by `kito init`, `import` and `claude`:
+  `before-edit` before `Edit|Write|MultiEdit|NotebookEdit` (it finds the
+  lines an edit replaces, asks `before_edit`, and answers `deny` with the
+  words for the model); `after-shell` after `Bash`; `session-start` (the
+  three rules, and the lanes open now). The settings of a project that
+  already has hooks keep them; a second run changes nothing.
+  `kito hook before-edit --file F --lines A-B` is the same question for
+  any other tool: words, and exit code 2.
+- **From a connected directory** the daemon passes the questions on to the
+  server, after sending it what was saved (the file is judged as it is
+  here). The directory's own files follow the main lane: what a command
+  wrote in them is told by the local daemon. Somebody who may only read
+  may ask `before_edit`.
+- **`[agents] why = false`** in a repository's configuration: the reasons
+  are told at the declaration, and nothing is held.
+- **Events**: `edit_refused`, for an edit in the main directory or outside
+  the scope, for whoever watches (`kito watch`).
+- The rules in `CLAUDE.md` say what is enforced (older rules are brought
+  up to date), and the instructions of the MCP server too.
+
+### Demo
+
+```bash
+cargo build --release -p kitod -p kito-cli -p kito-mcp
+```
+
+```bash
+scripts/demo-phase11.sh
+```
+
+The demo runs the hooks by hand, with what Claude Code says to them: no
+agent is needed. Output: [`docs/demo/phase11-demo.txt`](demo/phase11-demo.txt).
+An excerpt:
+
+```text
+(agent) Edit .kito/lanes/3/work/src/shop.py:          result += round(price * 100)  ->          result += int(price * 100)
+  [NOT MADE]
+  Kito: src/shop.py:total is outside what lane/3 declared (src/shop.py:discount), so this edit
+  was not made. Declare it first: call the extend_scope tool with lane "lane/3" and scope
+  ["src/shop.py:total"]. Its answer tells why that code is the way it is and who else is on it.
+  Then make this edit again.
+
+$ kito lane scope 3 --add src/shop.py:total
+Why it is the way it is:
+  src/shop.py:total
+    "prices in cents" (task #7): agent-a for ada, lane/1, checkpoint ckpt#2
+    "a shop that adds up prices": ada, checkpoint ckpt#1
+    used by src/billing.py:invoice (line 5)
+```
+
+### A real agent
+
+Claude Code 2.1.326 (`claude -p`), four runs on a small repository with a
+history made through lanes.
+
+1. **No rules in `CLAUDE.md`, a plain request** ("change discount so that
+   the cut is rounded up; make invoice say 'total due: '"). The session
+   started with what the `session-start` hook told it. It opened a lane
+   declaring the two functions, read the reasons in the answer ("whole
+   cents off, never a fraction": rounding up still takes whole cents off,
+   it said in its report), edited, and integrated. Its test run left
+   `__pycache__` files in the lane: the `after-shell` hook told it they
+   were outside its scope, and it removed them before integrating.
+2. **No rules and no `session-start` hook.** The same: the instructions of
+   the MCP server were enough for it to open a lane first.
+3. **Asked to break the rules on purpose**, as a test: edit `total`
+   without declaring it, and edit `README.md` in the main directory. Both
+   edits were refused by the hook and not made; it called `extend_scope`
+   for each, was told why `total` is the way it is and who uses it, made
+   the edits in the lane, and integrated.
+4. **A lane on a whole directory, an edit and a `sed`.** Its `Edit` of
+   `invoice` was held back once with "prices in cents" (task #7); it made
+   the same edit again. Its `sed` on `discount` ran unchecked;
+   `request_integration` answered `read_first` with "whole cents off, never
+   a fraction"; it asked again and the lane was integrated. It quoted both
+   in its report.
+
+A real agent that knows the rules follows them: runs 1 and 2 never met a
+refusal. The hooks are for the times it does not.
+
+### What it costs
+
+On the repository of 20,000 files and 500,000 operations of phase 10:
+`kito hook before-edit` on a file of a lane takes 21 to 25 ms, held or
+not, and 3 ms for a file of the main directory; `after-shell` about 90 ms,
+60 of which it waits for the save to be recorded; `session-start` 100 to
+130 ms. Opening a lane on one function, with its reasons, takes 0.4 s
+(0.7 s for a directory, which lists more files); the first question after
+the daemon starts still reads the log once (1.3 s).
+
+### Tests
+
+317 tests in all. New: the guard on a team's history
+(`kitod/tests/guard.rs`: the why of what is declared, the main directory,
+the scope down to the function, an edit held once and not again after a
+restart, a lane that asked why, the reasons behind what was replaced
+before an integration, what a command changed); the hooks from the command
+line, fed what Claude Code sends them; the settings written and kept
+(`claude.rs`); the tools (`why` on declaring, `read_first`); and from a
+connected directory, through a server.
+
+### Known limitations
+
+- **A shell command is checked after it ran**, not before: what it wrote
+  in a lane outside the scope is told and stops the integration; what it
+  replaced is told before the integration. Nothing is undone.
+- **Hooks are Claude Code's.** Other agents get the reasons when they
+  declare and before they integrate, and may call `kito hook before-edit
+  --file`; nothing makes them.
+- **Only the agent is held, and only through the tools.** `kito integrate`
+  from a shell holds nothing: it is the command of people. An agent that
+  runs it skips the reasons, not the scope.
+- **A hook that cannot reach the daemon lets the edit through.**
+- **An agent can edit the hooks out of `.claude/settings.json`**, in a
+  lane, like any other file: it shows in the lane and in what is
+  integrated, and is not prevented.
+- **Being told is not agreeing.** An edit goes through the second time
+  whatever the reasons say. Whether a change that undoes a reason should
+  land is for whoever integrates.
+- **A new function in a file where another was declared** is found
+  outside the scope when the lane is integrated, not at the edit.
+- **In a connected directory, a new file written in the directory itself**
+  is not reported after a command (a changed one is).
+- **Reasons are as good as what was declared**, as before.
+
+## After phase 5
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

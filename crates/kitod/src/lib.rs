@@ -9,6 +9,7 @@ pub mod connected;
 pub mod error;
 pub mod files;
 pub mod fsinfo;
+pub mod guard;
 pub mod identity;
 pub mod ignore;
 pub mod integrate;

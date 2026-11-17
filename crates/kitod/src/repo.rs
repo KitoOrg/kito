@@ -551,6 +551,10 @@ pub struct Repo {
     /// The last checkpoint pushed to the git remote, and why the last push
     /// failed.
     pub(crate) pushed: (Option<String>, Option<String>),
+    /// The reasons each lane was told, so that none is told twice.
+    pub(crate) reasons_told: HashMap<LaneId, BTreeSet<String>>,
+    /// The last direct edits of the main directory, put back or not.
+    pub(crate) direct: Vec<crate::guard::Direct>,
     /// From reasons to what they touched: built when somebody first asks
     /// why, kept up to date from then on.
     pub(crate) why_index: Option<crate::why::WhyIndex>,
@@ -638,6 +642,8 @@ impl Repo {
             main_open: false,
             refused: Vec::new(),
             refusals: (0, None),
+            reasons_told: HashMap::new(),
+            direct: Vec::new(),
             pushed: (None, None),
             why_index: None,
             recorded: Vec::new(),
@@ -1126,7 +1132,20 @@ impl Repo {
         for blob in &symbolic.blobs {
             self.store.put_blob(blob)?;
         }
+        // What changed in the main directory without an integration
+        // writing there was changed by hand.
+        let by_hand: Vec<String> = match work.lane.is_main() && !self.main_open {
+            true => {
+                file_ops.iter().flat_map(|op| op.paths()).map(|path| path.display().to_string()).collect()
+            }
+            false => Vec::new(),
+        };
         let ops = self.record_work(work, file_ops.into_iter().chain(symbolic.ops), intent)?;
+        if !by_hand.is_empty() && !ops.is_empty() {
+            let at_ms =
+                SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+            self.note_direct(crate::guard::Direct { at_ms, paths: by_hand, put_back: false, kept: None });
+        }
         if !ops.is_empty() {
             self.store.commit()?;
             self.counters.captures += 1;
@@ -1167,6 +1186,12 @@ impl Repo {
             paths.push(rel.display().to_string());
         }
         let refusal = Refusal { at_ms, paths, kept: kept.then_some(aside) };
+        self.note_direct(crate::guard::Direct {
+            at_ms,
+            paths: refusal.paths.clone(),
+            put_back: true,
+            kept: refusal.kept.clone(),
+        });
         self.refusals = (self.refusals.0 + 1, Some(refusal.clone()));
         self.refused.push(refusal);
         if self.refused.len() > 256 {

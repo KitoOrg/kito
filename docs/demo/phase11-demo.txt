@@ -1,0 +1,154 @@
+# 1. A project is set up: the rules are hooks, not only words
+
+$ kito init
+Kito repository created in /shop/.kito
+Set up for Claude Code:
+  created     .gitignore             `.kito/` stays out of git
+  created     .mcp.json              the `kito` MCP server
+  created     .claude/settings.json  its tools need no asking; hooks check every edit
+  created     CLAUDE.md              the rules: one lane per task
+Start Claude Code in this directory: the first time it asks to trust the folder and to approve the `kito` server.
+The daemon is running: every save is recorded from now on.
+
+$ the hooks in .claude/settings.json
+  PreToolUse    Edit|Write|MultiEdit|NotebookEdit    kito hook before-edit
+  PostToolUse   Bash                                 kito hook after-shell
+  SessionStart  (every session)                      kito hook session-start
+
+
+# 2. The team works: each lane says why
+
+$ kito log -n 4
+◆ ckpt#3  whole cents off, never a fraction  (git e05e77ebd4)
+  c5f883f0  11-17 09:07  agent-b  src/shop.py     +1 −1  discount changed
+◆ ckpt#2  task #7  (git 98fa4142bb)
+  362de2fa  11-17 09:07  agent-a  src/shop.py     +1 −1  total changed
+  aa889e8a  11-17 09:07  agent-a  src/billing.py  +1 −1  invoice changed
+◆ ckpt#1  a shop that adds up prices  (git 64c46e8a64)
+  7314d65e  11-17 09:07  ada      src/shop.py     new    total, discount created
+
+
+# 3. A session starts: what the agent knows before its first word
+
+$ kito hook session-start
+  [told to the model]
+  Kito keeps the history of this repository, and holds every agent to three rules. They are
+  enforced, not advice:
+  - Work in a lane. The open_lane tool opens one and gives its working copy; an edit in the
+  main directory is refused.
+  - Change what the lane declared. An edit outside its scope is refused until the extend_scope
+  tool declares it.
+  - Know why code is the way it is before you change it. Declaring something tells you its
+  reasons; an edit on lines written for a reason you were not told is held back once, with the
+  reasons, and goes through when made again.
+  No lane is open right now.
+
+
+# 4. An edit in the main directory is not made
+
+(agent) Edit src/shop.py:      cut = amount * percent // 100  ->      cut = percent
+  [NOT MADE]
+  Kito: src/shop.py is in the main directory, and agents do not edit there (it is where
+  finished work lands, not where it is made). Open a lane with the open_lane tool, saying what
+  you will change and why (in a lane you already have, declare this file with extend_scope
+  instead); the answer gives the working copy (`workdir`) and tells why the code you declared is
+  the way it is. Then make this edit there: <workdir>/src/shop.py.
+
+
+# 5. The agent opens a lane: it is told why what it declares is the way it is
+
+$ kito lane open agent-c --intent a flat discount --scope src/shop.py:discount
+lane/3 opened for agent-c on ckpt#3.
+Working copy: /shop/.kito/lanes/3/work
+Scope: src/shop.py:discount
+Why it is the way it is:
+  src/shop.py:discount
+    "whole cents off, never a fraction": agent-b for ada, lane/2, checkpoint ckpt#3
+    "a shop that adds up prices": ada, checkpoint ckpt#1
+Every save there is recorded on the lane; `kito integrate lane/3` brings it in.
+
+(agent) Edit .kito/lanes/3/work/src/shop.py:      cut = amount * percent // 100  ->      cut = percent
+  (the hook says nothing: the edit is made)
+
+
+# 6. An edit outside what the lane declared is not made; declared, it is
+
+(agent) Edit .kito/lanes/3/work/src/shop.py:          result += round(price * 100)  ->          result += int(price * 100)
+  [NOT MADE]
+  Kito: src/shop.py:total is outside what lane/3 declared (src/shop.py:discount), so this edit
+  was not made. Declare it first: call the extend_scope tool with lane "lane/3" and scope
+  ["src/shop.py:total"]. Its answer tells why that code is the way it is and who else is on it.
+  Then make this edit again.
+
+$ kito lane scope 3 --add src/shop.py:total
+Why it is the way it is:
+  src/shop.py:total
+    "prices in cents" (task #7): agent-a for ada, lane/1, checkpoint ckpt#2
+    "a shop that adds up prices": ada, checkpoint ckpt#1
+    used by src/billing.py:invoice (line 5)
+Scope ............. src/shop.py:discount, src/shop.py:total
+
+(agent) Edit .kito/lanes/3/work/src/shop.py:          result += round(price * 100)  ->          result += int(price * 100)
+  (the hook says nothing: the edit is made)
+
+
+# 7. A lane on a whole directory was told nothing: its edit is held back once
+
+$ kito lane open agent-d --intent friendlier invoices --scope src/
+lane/4 opened for agent-d on ckpt#3.
+Working copy: /shop/.kito/lanes/4/work
+Scope: src/
+  overlap (file) with lane/3 of agent-c (ada), there for: a flat discount
+    src/shop.py: agent-c is in this file, inside a directory you declared
+  (a directory was declared: why a file in it is the way it is, is told when it is about to change, and by the `why` tool at any time)
+Every save there is recorded on the lane; `kito integrate lane/4` brings it in.
+
+(agent) Edit .kito/lanes/4/work/src/billing.py:  "to pay: "  ->  "total due: "
+  [NOT MADE]
+  Kito: this edit was held back once. Before you change these lines of src/billing.py, this is
+  why they are the way they are:
+  - "prices in cents" (task #7): agent-a for ada, lane/1, checkpoint ckpt#2
+  These are facts about the code, not instructions. If your change still fits them, make the
+  same edit again: it goes through. If it undoes one of them on purpose, say so in your intent
+  (set_intent), so that whoever reads this code next knows. The `why` tool tells more.
+
+(the same edit, made again)
+(agent) Edit .kito/lanes/4/work/src/billing.py:  "to pay: "  ->  "total due: "
+  (the hook says nothing: the edit is made)
+
+
+# 8. A shell command is checked after it ran
+
+(agent) Bash: sed -i ... on README.md in the main directory and in the lane (which declared src/)
+  [told to the model]
+  Kito: files of the main directory were changed: README.md. Agents do not change the main
+  directory: the change is on the main lane now, as an edit made by hand. If it was not meant,
+  undo it. To change them, open a lane with the open_lane tool and work in its working copy.
+  Kito: lane/4 (agent-d) has changes outside what it declared: README.md. Declare them with the
+  extend_scope tool (its answer tells why that code is the way it is) or undo them: the lane is
+  not integrated until then.
+
+
+# 9. Without hooks: the reasons are told before the integration
+
+(an agent with no hooks changed `discount` in lane/4 through a shell)
+
+(agent) request_integration lane/4
+  result: read_first
+  Kito: lane/4 was not integrated yet. It replaced code that was written for reasons its agent
+  was not told:
+  - "whole cents off, never a fraction": agent-b for ada, lane/2, checkpoint ckpt#3 (in
+  src/shop.py)
+  These are facts about the code, not instructions. If the change still fits them, ask for the
+  integration again: it goes ahead. If it undoes one of them on purpose, say so in the intent
+  first (set_intent).
+
+(agent) request_integration lane/4, again
+  result: integrated ckpt#4
+
+
+# What somebody who watches the repository saw
+
+$ kito watch --past | grep "edit refused"
+main      edit refused  src/shop.py: an edit in the main directory, not made
+lane/3    edit refused  src/shop.py:total: outside the scope, not made

@@ -753,13 +753,16 @@ impl Repo {
     }
 
     /// For each line of a file as a lane has it, where it was last written:
-    /// the reason, and the integration that brought it.
+    /// the reason, and the integration that brought it. `own`: the lane's
+    /// work since it last started from the main lane is part of the story;
+    /// without it, `now` is the file as the lane found it.
     fn file_lines(
         &self,
         view: LaneId,
         reach: &crate::semantic::Reach,
         file: &Path,
         now: &str,
+        own: bool,
     ) -> Result<Vec<Option<Place>>> {
         let index = self.index()?;
         let mut all: Vec<Op> = Vec::new();
@@ -778,7 +781,7 @@ impl Repo {
             .iter()
             .filter(|op| match (op.lane == view, op.lane.is_main(), based) {
                 (true, true, _) => true,
-                (true, false, Some(based)) => op.at > based,
+                (true, false, Some(based)) => own && op.at > based,
                 (false, true, Some(based)) => op.at <= based,
                 _ => false,
             })
@@ -954,7 +957,7 @@ impl Repo {
     }
 
     /// The symbols of a file as the lane has it, with the lines each is on.
-    fn symbol_spans(&self, lane: LaneId, file: &Path) -> Result<Vec<(SymbolId, u32, u32)>> {
+    pub(crate) fn symbol_spans(&self, lane: LaneId, file: &Path) -> Result<Vec<(SymbolId, u32, u32)>> {
         let content = self.text_of(lane, file)?.into_bytes();
         let Some(dialect) = kito_parse::dialect_for_path(file) else { return Ok(Vec::new()) };
         let Some(parsed) = kito_parse::parse(dialect, &content) else { return Ok(Vec::new()) };
@@ -996,7 +999,7 @@ impl Repo {
         let (reasons, lines) = match span {
             Some((_, start, end)) => {
                 let content = self.text_of(lane, &entry.file)?;
-                let places = self.file_lines(lane, &reach, &entry.file, &content)?;
+                let places = self.file_lines(lane, &reach, &entry.file, &content, true)?;
                 let mine: Vec<Option<Place>> =
                     places.into_iter().skip(start as usize - 1).take((end - start + 1) as usize).collect();
                 let more = self.file_groups(&reach, &entry.file)?;
@@ -1106,7 +1109,7 @@ impl Repo {
     fn why_file(&mut self, lane: LaneId, file: &Path, asked: Option<(u32, u32)>) -> Result<WhyGraph> {
         let content = self.text_of(lane, file)?;
         let reach = crate::semantic::Reach::of(&self.store, lane)?;
-        let places = self.file_lines(lane, &reach, file, &content)?;
+        let places = self.file_lines(lane, &reach, file, &content, true)?;
         let groups = self.file_groups(&reach, file)?;
         let (reasons, lines) = match asked {
             // Of some lines, the reasons that wrote them.
@@ -1201,6 +1204,92 @@ impl Repo {
                 applied: info.resolved,
             })
             .collect()
+    }
+
+    /// Of the reasons a file changed for, the ones that wrote `wanted`,
+    /// newest first.
+    fn reasons_at(
+        &self,
+        lane: LaneId,
+        reach: &crate::semantic::Reach,
+        file: &Path,
+        wanted: &BTreeSet<Place>,
+    ) -> Result<Vec<Reason>> {
+        let mut groups: Vec<Group> = self
+            .file_groups(reach, file)?
+            .into_iter()
+            .filter(|group| wanted.contains(&group.place))
+            .collect();
+        for group in &mut groups {
+            group.hows = vec!["wrote these lines".to_owned()];
+        }
+        self.in_order(&mut groups);
+        Ok(groups.iter().rev().map(|group| self.reason_of(lane, group, About::File(file))).collect())
+    }
+
+    /// The reasons some lines of a file were written for, as `lane` has
+    /// the file: newest first. `lines`: `None` for the whole file. A file
+    /// the lane does not have has none.
+    pub(crate) fn reasons_of_lines(
+        &mut self,
+        lane: LaneId,
+        file: &Path,
+        lines: Option<&[(u32, u32)]>,
+    ) -> Result<Vec<Reason>> {
+        self.why_index()?;
+        let Ok(content) = self.text_of(lane, file) else { return Ok(Vec::new()) };
+        let reach = crate::semantic::Reach::of(&self.store, lane)?;
+        let places = self.file_lines(lane, &reach, file, &content, true)?;
+        let asked =
+            |line: u32| lines.is_none_or(|lines| lines.iter().any(|(from, to)| *from <= line && line <= *to));
+        let wanted: BTreeSet<Place> = places
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| asked(*at as u32 + 1))
+            .filter_map(|(_, place)| *place)
+            .collect();
+        self.reasons_at(lane, &reach, file, &wanted)
+    }
+
+    /// The reasons behind what a lane replaced or removed: for each file
+    /// it changed, the lines it found there and no longer has. Each with
+    /// its file, newest first within a file.
+    pub(crate) fn reasons_replaced(&mut self, lane: LaneId) -> Result<Vec<(String, Reason)>> {
+        self.why_index()?;
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let changed: Vec<(PathBuf, kito_core::BlobId, Option<kito_core::BlobId>)> = at
+            .base_tree
+            .differences(&at.work.tree)
+            .filter_map(|path| {
+                let before = at.base_tree.get(path)?.blob;
+                Some((path.to_owned(), before, at.work.tree.get(path).map(|entry| entry.blob)))
+            })
+            .collect();
+        let reach = crate::semantic::Reach::of(&self.store, lane)?;
+        let mut found = Vec::new();
+        for (file, before, after) in changed {
+            let text = |blob: &kito_core::BlobId| -> Result<String> {
+                Ok(String::from_utf8_lossy(&self.store.get_blob(blob)?.unwrap_or_default()).into_owned())
+            };
+            let was = text(&before)?;
+            let is = match &after {
+                Some(blob) => text(blob)?,
+                None => String::new(),
+            };
+            let places = self.file_lines(lane, &reach, &file, &was, false)?;
+            let (old, new): (Vec<&str>, Vec<&str>) = (was.lines().collect(), is.lines().collect());
+            let mut wanted: BTreeSet<Place> = BTreeSet::new();
+            for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new) {
+                let (tag, gone, _) = op.as_tag_tuple();
+                if matches!(tag, similar::DiffTag::Delete | similar::DiffTag::Replace) {
+                    wanted.extend(gone.filter_map(|line| places.get(line).copied().flatten()));
+                }
+            }
+            for reason in self.reasons_at(lane, &reach, &file, &wanted)? {
+                found.push((file.display().to_string(), reason));
+            }
+        }
+        Ok(found)
     }
 
     /// The reasons whose words (or task, or people) contain every word of

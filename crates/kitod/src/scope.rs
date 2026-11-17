@@ -663,6 +663,57 @@ impl Repo {
         Ok(self.claims(lane)?.out_of_scope.clone())
     }
 
+    /// What an edit about to be made in a lane would change outside what
+    /// the lane declared: nothing, functions (`src/shop.py:discount`) or
+    /// the file. `lines`: the lines of the file that will be replaced.
+    /// With none, the file is judged as a whole: a lane that declared
+    /// something in it may write it, and what it changed is judged when
+    /// it is integrated.
+    pub(crate) fn outside_scope(
+        &self,
+        lane: LaneId,
+        path: &Path,
+        lines: &[(u32, u32)],
+    ) -> Result<Vec<String>> {
+        let at = self.lane_at(lane)?;
+        let items: Vec<&ScopeItem> = at.record.scope.iter().map(|entry| &entry.item).collect();
+        let allowed = crate::ignore::IgnoreRules::new(&at.work.root, &self.config.scope.always_allowed);
+        if self.always_allowed(&allowed, path) || covers_file(&items, path) {
+            return Ok(Vec::new());
+        }
+        if !items.iter().any(|item| matches!(item, ScopeItem::Symbol { file, .. } if file == path)) {
+            return Ok(vec![path.display().to_string()]);
+        }
+        if lines.is_empty() || !at.work.tree.contains(path) {
+            return Ok(Vec::new());
+        }
+        // Functions of the file were declared: the lines say which ones
+        // the edit is in. The text around them may change with them.
+        let tables = [&at.work.symbols, &at.base_symbols];
+        let spans = self.symbol_spans(lane, path)?;
+        let mut outside = Vec::new();
+        for (from, to) in lines {
+            let on: Vec<&(SymbolId, u32, u32)> =
+                spans.iter().filter(|(_, start, end)| start <= to && from <= end).collect();
+            for (id, start, end) in &on {
+                // The innermost ones: nothing inside them is on these lines too.
+                let has_inner = on.iter().any(|(other, inner_start, inner_end)| {
+                    other != id && start <= inner_start && inner_end <= end
+                });
+                if has_inner {
+                    continue;
+                }
+                let name = at.work.symbols.qualified_name(*id).unwrap_or_default();
+                if !covers_symbol(&items, tables, Some(*id), path, &name) {
+                    outside.push(format!("{}:{name}", path.display()));
+                }
+            }
+        }
+        outside.sort();
+        outside.dedup();
+        Ok(outside)
+    }
+
     /// The scope of a lane, as it declared it.
     pub fn lane_scope(&self, lane: LaneId) -> Result<Vec<Declared>> {
         Ok(self

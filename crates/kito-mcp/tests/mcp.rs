@@ -396,6 +396,74 @@ fn agents_declare_their_scope_and_are_told_who_else_is_there() {
 }
 
 /// The server binary sits next to the MCP server's; built if it is not there.
+#[test]
+fn an_agent_is_told_why_before_its_work_lands() {
+    let (_tmp, root) = new_repo();
+    let mut mcp = Session::start(&root, &[]);
+    mcp.tool("kito.board", json!({})).unwrap();
+    let mut daemon = kitod::client::Client::connect(&root).unwrap();
+    daemon.call_value("checkpoint", json!({ "label": "first version" })).unwrap();
+    let integrate = |mcp: &mut Session, lane: &str| -> Value {
+        let asked = mcp.tool("kito.request_integration", json!({ "lane": lane })).unwrap();
+        match asked.get("job") {
+            Some(job) => mcp.tool("kito.integration_result", json!({ "job": job })).unwrap(),
+            None => asked,
+        }
+    };
+
+    // Declaring a function tells why it is the way it is: nothing holds the work back later.
+    let alice = mcp
+        .tool(
+            "kito.open_lane",
+            json!({ "agent": "alice", "intent": "prices in cents", "scope": ["src/shop.ts:total"] }),
+        )
+        .unwrap();
+    assert_eq!(alice["why"][0]["item"], "src/shop.ts:total");
+    assert_eq!(alice["why"][0]["reasons"][0]["why"], "first version");
+    assert!(alice["about_reasons"].as_str().unwrap().contains("not instructions"));
+    let work = PathBuf::from(alice["workdir"].as_str().unwrap());
+    let cents = SHOP.replace("item.price * item.quantity", "Math.round(item.price * 100) * item.quantity");
+    fs::write(work.join("src/shop.ts"), &cents).unwrap();
+    assert_eq!(integrate(&mut mcp, "lane/1")["result"], "integrated");
+    mcp.tool("kito.close_lane", json!({ "lane": "lane/1" })).unwrap();
+
+    // Declaring a directory tells nothing up front. What the lane then
+    // replaces without having been told is told before it is integrated.
+    let bob = mcp
+        .tool("kito.open_lane", json!({ "agent": "bob", "intent": "tidy the sums", "scope": ["src/"] }))
+        .unwrap();
+    assert_eq!(bob["why"], json!([]));
+    assert!(bob["why_note"].as_str().unwrap().contains("a directory was declared"));
+    assert!(bob.get("about_reasons").is_none());
+    let work = PathBuf::from(bob["workdir"].as_str().unwrap());
+    fs::write(work.join("src/shop.ts"), cents.replace("Math.round(item.price * 100)", "item.price")).unwrap();
+    let held = integrate(&mut mcp, "lane/2");
+    assert_eq!(held["result"], "read_first", "{held}");
+    assert!(held.get("job").is_none(), "nothing was started: {held}");
+    assert_eq!(held["reasons"][0]["why"], "prices in cents");
+    assert_eq!(held["reasons"][0]["by"], "alice");
+    assert_eq!(held["reasons"][0]["replaced_in"], json!(["src/shop.ts"]));
+    assert!(held["message"].as_str().unwrap().contains("\"prices in cents\": alice"), "{held}");
+    assert!(held["next"].as_str().unwrap().contains("call request_integration again"), "{held}");
+    // Asked again, it goes ahead.
+    assert_eq!(integrate(&mut mcp, "lane/2")["result"], "integrated");
+    mcp.tool("kito.close_lane", json!({ "lane": "lane/2" })).unwrap();
+
+    // An agent that asked why for its lane was told: nothing is held.
+    let carol = mcp
+        .tool("kito.open_lane", json!({ "agent": "carol", "intent": "whole prices", "scope": ["src/"] }))
+        .unwrap();
+    let why = mcp.tool("kito.why", json!({ "target": "src/shop.ts:total", "lane": "lane/3" })).unwrap();
+    assert_eq!(why["reasons"][0]["why"], "tidy the sums");
+    let work = PathBuf::from(carol["workdir"].as_str().unwrap());
+    let now = fs::read_to_string(work.join("src/shop.ts")).unwrap();
+    fs::write(work.join("src/shop.ts"), now.replace("item.price *", "Math.trunc(item.price) *")).unwrap();
+    assert_eq!(integrate(&mut mcp, "lane/3")["result"], "integrated");
+
+    drop(mcp);
+    stop_daemon(&root);
+}
+
 fn kito_server() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
     let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kito-server");
