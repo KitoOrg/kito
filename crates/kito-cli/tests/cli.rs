@@ -807,6 +807,9 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     let connected = ok(&base, &["connect", &address, "shop", "--token", &token]);
     assert!(connected.contains("is connected to `shop` on") && connected.contains("as ada."), "{connected}");
     let here = base.join("shop");
+    // The directory is the project: the main lane's files are in it.
+    assert!(connected.contains("The main lane is in it (1 file)"), "{connected}");
+    assert_eq!(fs::read_to_string(here.join("src/shop.py")).unwrap(), SHOP_PY);
     assert_eq!(ok(&here, &["repos"]), "shop  (this directory)\n");
     assert!(ok(&here, &["lanes"]).contains("No open lanes"));
 
@@ -834,6 +837,113 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     let init = kito(&here, &["init"]);
     assert!(String::from_utf8_lossy(&init.stderr).contains("is connected to `shop`"));
 
+    // The lane's working copy is on this machine: what is saved in it is
+    // in the lane on the server once `sync` has answered.
+    let there = serverdir.join("repos/shop/.kito/lanes/1/work");
+    let work = here.join(".kito/lanes/1/work");
+    assert!(opened.contains(&format!("Working copy: {}", work.display())), "{opened}");
+    assert_eq!(fs::read_to_string(work.join("src/shop.py")).unwrap(), SHOP_PY);
+    let cents = SHOP_PY.replace("price * quantity", "round(price * 100) * quantity");
+    assert_ne!(cents, SHOP_PY);
+    fs::write(work.join("src/shop.py"), &cents).unwrap();
+    ok(&here, &["sync", "1"]);
+    assert_eq!(fs::read_to_string(there.join("src/shop.py")).unwrap(), cents);
+    let status = ok(&here, &["lane", "status", "1"]);
+    assert!(status.contains(&format!("Working copy ...... {}", work.display())), "{status}");
+    let daemon = ok(&here, &["daemon", "status"]);
+    assert!(
+        daemon.contains("Connected to ...... `shop` on") && daemon.contains("Lanes kept here ... 2"),
+        "{daemon}"
+    );
+    assert!(daemon.contains("lane/main"), "{daemon}");
+    assert!(daemon.contains("lane/1") && daemon.contains("builder") && daemon.contains("writes"), "{daemon}");
+
+    // From another machine the lane is followed: its files are there, and
+    // change as the lane does.
+    ok(&base, &["connect", &address, "shop", "desk", "--token", &token]);
+    let desk = base.join("desk");
+    let status = ok(&desk, &["lane", "status", "1"]);
+    assert!(status.contains("on the server (`kito lane attach lane/1` brings its files here)"), "{status}");
+    let attached = ok(&desk, &["lane", "attach", "1"]);
+    let view = desk.join(".kito/lanes/1/work");
+    assert!(attached.contains(&format!("lane/1 is here: {}", view.display())), "{attached}");
+    assert!(attached.contains("It follows the lane"), "{attached}");
+    assert_eq!(fs::read_to_string(view.join("src/shop.py")).unwrap(), cents);
+    let euros = cents.replace("* 100", "* 100.0");
+    fs::write(work.join("src/shop.py"), &euros).unwrap();
+    ok(&here, &["sync", "1"]);
+    for _ in 0..2000 {
+        if fs::read_to_string(view.join("src/shop.py")).unwrap() == euros {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(fs::read_to_string(view.join("src/shop.py")).unwrap(), euros);
+
+    // A file changed in a copy that only follows is kept, and said; the
+    // server's is taken back with one command.
+    fs::write(view.join("src/shop.py"), "mine\n").unwrap();
+    fs::write(work.join("src/shop.py"), &cents).unwrap();
+    ok(&here, &["sync", "1"]);
+    let mut held = String::new();
+    for _ in 0..2000 {
+        held = ok(&desk, &["daemon", "status"]);
+        if held.contains("this copy only follows") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(held.contains("src/shop.py was changed here and is not sent: this copy only follows"), "{held}");
+    assert!(held.contains("follows"), "{held}");
+    let taken = ok(&desk, &["lane", "take", "1", "src/shop.py", "--theirs"]);
+    assert_eq!(taken, "src/shop.py: the server's is here now\n");
+    assert_eq!(fs::read_to_string(view.join("src/shop.py")).unwrap(), cents);
+    let detached = ok(&desk, &["lane", "detach", "1"]);
+    assert!(detached.contains("This machine's copy of lane/1 is gone"), "{detached}");
+    assert!(!view.exists());
+
+    // It integrates from here as it would on the server.
+    let integrated = ok(&here, &["integrate", "1"]);
+    assert!(integrated.contains("integrated"), "{integrated}");
+    assert_eq!(fs::read_to_string(serverdir.join("repos/shop/src/shop.py")).unwrap(), cents);
+    // Both directories follow the main lane: they have what was integrated.
+    for dir in [&here, &desk] {
+        for _ in 0..2000 {
+            if fs::read_to_string(dir.join("src/shop.py")).unwrap() == cents {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(fs::read_to_string(dir.join("src/shop.py")).unwrap(), cents);
+    }
+    ok(&here, &["lane", "close", "1"]);
+    assert!(!work.exists());
+    let left = ok(&desk, &["lane", "detach", "main"]);
+    assert!(left.contains("no longer follows the main lane; its files stay"), "{left}");
+    assert!(desk.join("src/shop.py").is_file());
+
+    // Copies of lanes are for directories connected to a server.
+    let own = base.join("own");
+    fs::create_dir_all(&own).unwrap();
+    ok(&own, &["init"]);
+    let attach = kito(&own, &["lane", "attach", "1"]);
+    assert!(String::from_utf8_lossy(&attach.stderr).contains("is a repository of its own"));
+    ok(&own, &["daemon", "stop"]);
+
+    // Connected as it is for somebody who did not ask otherwise, the
+    // directory is set up for Claude Code; there is no git to keep out of.
+    let said = kito_as_installed(&base, &["connect", &address, "shop", "claude-dir", "--token", &token]);
+    assert!(
+        said.contains(".mcp.json") && said.contains("CLAUDE.md") && !said.contains(".gitignore"),
+        "{said}"
+    );
+    assert!(base.join("claude-dir/.mcp.json").is_file() && base.join("claude-dir/CLAUDE.md").is_file());
+    assert!(!base.join("claude-dir/.gitignore").exists());
+    assert!(base.join("claude-dir/src/shop.py").is_file(), "the project's files come with it");
+    ok(&base.join("claude-dir"), &["daemon", "stop"]);
+
+    ok(&here, &["daemon", "stop"]);
+    ok(&desk, &["daemon", "stop"]);
     drop(serving);
     ok(&serverdir.join("repos/shop"), &["daemon", "stop"]);
 }

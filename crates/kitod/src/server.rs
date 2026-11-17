@@ -88,7 +88,16 @@ struct Daemon {
     queue: Queue,
     /// What happened lately, for the clients that watch the repository.
     events: Events,
+    /// Which copy on another machine writes in each lane: one at a time.
+    writers: Mutex<std::collections::BTreeMap<LaneId, String>>,
 }
+
+/// How many changed files a `saved` event lists: above, it lists none and
+/// whoever keeps a copy looks at everything.
+const PATHS_TOLD: usize = 500;
+
+/// How much content one `get_blobs` answer carries at most.
+const BLOBS_AT_ONCE: usize = 8 << 20;
 
 /// How many events are kept for a client that asks late.
 const EVENTS_KEPT: usize = 4096;
@@ -103,12 +112,23 @@ struct Events {
 
 impl Events {
     fn emit(&self, kind: &str, lane: Option<String>, by: Option<String>, what: String) {
+        self.emit_with(kind, lane, by, what, Vec::new());
+    }
+
+    fn emit_with(
+        &self,
+        kind: &str,
+        lane: Option<String>,
+        by: Option<String>,
+        what: String,
+        paths: Vec<String>,
+    ) {
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         log.0 += 1;
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as u64);
-        let event = rpc::Event { seq: log.0, at_ms, kind: kind.to_owned(), lane, by, what };
+        let event = rpc::Event { seq: log.0, at_ms, kind: kind.to_owned(), lane, by, what, paths };
         log.1.push_back(event);
         while log.1.len() > EVENTS_KEPT {
             log.1.pop_front();
@@ -134,6 +154,24 @@ impl Events {
 }
 
 impl Daemon {
+    /// A lane has one copy elsewhere that writes in it: the first to
+    /// write, until another claims the lane (`claim_writer`).
+    fn writes(&self, lane: LaneId, writer: Option<&str>) -> Result<()> {
+        let Some(writer) = writer else { return Ok(()) };
+        let mut writers = self.writers.lock().unwrap_or_else(|e| e.into_inner());
+        match writers.get(&lane) {
+            Some(current) if current != writer => Err(Error::NotTheWriter(format!(
+                "{lane} is written from {} now: `kito lane attach {lane} --write` takes it back",
+                current.split(':').next().unwrap_or(current)
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                writers.insert(lane, writer.to_owned());
+                Ok(())
+            }
+        }
+    }
+
     fn with_repo<T>(&self, f: impl FnOnce(&mut Repo) -> Result<T>) -> Result<T> {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
@@ -222,7 +260,12 @@ impl Daemon {
         let id = request.id;
         let params = &request.params;
         let result: std::result::Result<Value, (i64, String)> = (|| {
-            let internal = |e: Error| (rpc::INTERNAL_ERROR, e.to_string());
+            let internal = |e: Error| match e {
+                Error::Refused(why) => (rpc::REFUSED, why),
+                Error::NotTheWriter(why) => (rpc::NOT_THE_WRITER, why),
+                e @ Error::NoSuchLane(_) => (rpc::NO_SUCH_LANE, e.to_string()),
+                e => (rpc::INTERNAL_ERROR, e.to_string()),
+            };
             let to_json = |v: std::result::Result<Value, serde_json::Error>| {
                 v.map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))
             };
@@ -245,6 +288,8 @@ impl Daemon {
                 self.with_repo(|repo| repo.lane_of(spec)).map_err(internal)
             };
             match request.method.as_str() {
+                // Asked by whoever wants to know that the daemon is there.
+                "ping" => Ok(json!({ "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id() })),
                 "status" => to_json(serde_json::to_value(self.status().map_err(internal)?)),
                 "sync" => {
                     let ops = match params.get("lane").and_then(Value::as_str) {
@@ -369,6 +414,86 @@ impl Daemon {
                         self.with_repo(|repo| repo.who_touches(target)).map_err(internal)?,
                     ))
                 }
+                "lane_files" => {
+                    let lane = lane_or_main()?;
+                    let paths: Option<Vec<PathBuf>> = params
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|paths| paths.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
+                    let (files, ops) = self
+                        .with_repo(|repo| {
+                            Ok((repo.lane_files(lane, paths.as_deref())?, repo.lane_ops(lane)?))
+                        })
+                        .map_err(internal)?;
+                    Ok(
+                        json!({ "lane": lane.to_string(), "ops": ops, "files": to_json(serde_json::to_value(files))? }),
+                    )
+                }
+                "get_blobs" => {
+                    let ids: Vec<&str> = params
+                        .get("blobs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    // As many as fit in one answer: the client asks again for the rest.
+                    let mut blobs = serde_json::Map::new();
+                    let mut size = 0;
+                    for id in ids {
+                        let content = self.with_repo(|repo| repo.content(id)).map_err(internal)?;
+                        size += content.len();
+                        blobs.insert(id.to_owned(), json!(rpc::encode(&content)));
+                        if size >= BLOBS_AT_ONCE {
+                            break;
+                        }
+                    }
+                    Ok(json!({ "blobs": blobs }))
+                }
+                "put_file" => {
+                    let lane = lane()?;
+                    let path = text("path")?;
+                    let content = rpc::decode(text("content")?)
+                        .ok_or((rpc::INVALID_PARAMS, "`content` is not base64".to_owned()))?;
+                    let executable = params.get("executable").and_then(Value::as_bool).unwrap_or(false);
+                    let (base, person) = (optional("base"), person_name(params));
+                    let put = self
+                        .with_repo(|repo| {
+                            repo.may_write(lane, person.as_deref())?;
+                            self.writes(lane, optional("writer").as_deref())?;
+                            repo.put_file(lane, path, &content, executable, base.as_deref())
+                        })
+                        .map_err(internal)?;
+                    to_json(serde_json::to_value(put))
+                }
+                "remove_file" => {
+                    let lane = lane()?;
+                    let path = text("path")?;
+                    let (base, person) = (optional("base"), person_name(params));
+                    let put = self
+                        .with_repo(|repo| {
+                            repo.may_write(lane, person.as_deref())?;
+                            self.writes(lane, optional("writer").as_deref())?;
+                            repo.remove_file(lane, path, base.as_deref())
+                        })
+                        .map_err(internal)?;
+                    to_json(serde_json::to_value(put))
+                }
+                "claim_writer" => {
+                    let lane = lane()?;
+                    let writer = text("writer")?.to_owned();
+                    let person = person_name(params);
+                    self.with_repo(|repo| {
+                        if lane.is_main() {
+                            return Err(Error::Refused("the main lane has no writer: open a lane".into()));
+                        }
+                        repo.may_write(lane, person.as_deref())
+                    })
+                    .map_err(internal)?;
+                    let before =
+                        self.writers.lock().unwrap_or_else(|e| e.into_inner()).insert(lane, writer.clone());
+                    Ok(json!({ "lane": lane.to_string(), "writer": writer, "before": before }))
+                }
                 "events" => {
                     let after = params.get("after").and_then(Value::as_u64);
                     let wait = params.get("wait_ms").and_then(Value::as_u64).unwrap_or(25_000).min(60_000);
@@ -383,6 +508,7 @@ impl Daemon {
                 }
                 "close_lane" => {
                     let lane = lane()?;
+                    self.writers.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.close_lane(lane)).map_err(internal)?,
                     ))
@@ -577,12 +703,13 @@ impl Daemon {
                 0 => String::new(),
                 n => format!(" and {n} more"),
             };
-            self.events.emit(
-                "saved",
-                Some(lane.to_string()),
-                Some(author),
-                format!("{}{more}", shown.join(", ")),
-            );
+            let what = format!("{}{more}", shown.join(", "));
+            // The paths themselves, for whoever keeps a copy of the lane.
+            let paths: Vec<String> = match files.len() <= PATHS_TOLD {
+                true => files.into_iter().collect(),
+                false => Vec::new(),
+            };
+            self.events.emit_with("saved", Some(lane.to_string()), Some(author), what, paths);
         }
     }
 
@@ -998,6 +1125,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         shutdown: Notify::new(),
         queue: Queue::new(),
         events: Events::default(),
+        writers: Mutex::default(),
     });
     eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());
     if !watching {
@@ -1073,4 +1201,9 @@ fn person_of(value: &Value) -> Option<kito_core::Author> {
         Some(email) => person.with_email(email),
         None => person,
     })
+}
+
+/// The name of the person a request is made for, when a server said so.
+fn person_name(params: &Value) -> Option<String> {
+    params.get("on_behalf_of").and_then(person_of).map(|person| person.name)
 }

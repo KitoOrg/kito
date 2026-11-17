@@ -321,3 +321,37 @@ lane that is behind: scanning the lane 55–70 ms, merge 10 ms, writing and
 recording the merged files 30 ms, the git commit 10 ms (37–44 ms with the
 index), bringing the lane's 600 files up to date 15–20 ms (45–48 ms one at
 a time).
+
+## Phase 8 · a save, from one machine to another
+
+`cargo test -p kito-server --test mirror a_follower -- --nocapture` writes
+a file a hundred times in the working copy of a lane on a connected
+directory, and times each from the moment the file is on that disk to the
+moment the same content is on the disk of another connected directory
+that follows the lane. Both directories and the server are on one machine
+(loopback); the daemons are debug builds.
+
+| | time |
+| --- | --- |
+| median | 19 ms |
+| 95th percentile | 21 ms |
+| slowest (the first) | 80 ms |
+
+About 10 ms of each is deliberate: a file closed after being written is
+given that long before it is read, so that the temporary files many
+programs write beside the real one are not recorded as saves. The rest is
+four trips to the server: the save, the event, the list of what changed,
+the content.
+
+With release builds, on repositories made of generated TypeScript files:
+
+| | 2,000 files (17 MB) | 20,000 files (87 MB) |
+| --- | --- | --- |
+| `kito lane open`, files brought here | 1.3 s | 3.2 s |
+| `kito sync <lane>`, nothing to send | 80 ms | 190 ms |
+| `kito sync <lane>` after one save | 110 ms | 180 ms |
+| `kito lanes` | 11 ms | 48 ms |
+
+Before `ping` (D-091) every command paid for a whole `status` of the
+repository on the server: `kito sync` took 265 ms and 2.2 s.
+

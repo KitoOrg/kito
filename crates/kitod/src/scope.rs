@@ -105,7 +105,7 @@ fn kind_of(item: &ScopeItem) -> &'static str {
 }
 
 /// A path as the repository names it: relative, with no way out of it.
-fn clean(text: &str) -> Result<PathBuf> {
+pub(crate) fn clean(text: &str) -> Result<PathBuf> {
     let mut text = text.trim();
     while let Some(rest) = text.strip_prefix("./") {
         text = rest;

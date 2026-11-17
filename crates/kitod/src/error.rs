@@ -28,6 +28,12 @@ pub enum Error {
     NothingToCheckpoint,
     #[error("{0}: no such open lane (see `kito lanes`)")]
     NoSuchLane(kito_core::LaneId),
+    /// What a client asked is not done, and asking again will not help.
+    #[error("{0}")]
+    Refused(String),
+    /// The lane is written from another machine now.
+    #[error("{0}")]
+    NotTheWriter(String),
     #[error("{0}")]
     Other(String),
 }

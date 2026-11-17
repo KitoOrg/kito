@@ -821,3 +821,86 @@ instead: the command line and the MCP server did not have to know. The
 file holds the token and is readable by its owner only. It is also where
 the files of a lane will be when lanes can be worked on from another
 machine.
+
+### D-084 · A connected directory has a daemon of its own
+The simplest way to let `kito` and `kito-mcp` work in a connected directory
+was to give it what a repository has: a daemon on a Unix socket. `kitod`
+started where `.kito/remote.toml` is serves the directory instead of a
+store: it forwards requests to the server and keeps the working copies of
+lanes (D-086, D-088). The clients no longer open the connection to the
+server themselves, which also means one place holds the connections, the
+journal and the watchers. The alternative, every command talking to the
+server and a separate program syncing files, would have had two things to
+keep in agreement.
+
+### D-085 · The main lane's files are the connected directory
+An agent started in an empty directory cannot read the code it is asked to
+change, nor declare a scope. `kito connect` therefore brings the main lane
+into the directory itself and follows it, as a clone that keeps itself up
+to date. It is read only in effect: nothing saved there is sent (the main
+lane is not written from elsewhere, D-081), and nothing changed there is
+overwritten; `kito daemon status` lists such files. Mirroring the main
+lane somewhere under `.kito` was the first version, and no agent would
+have looked there.
+
+### D-086 · The server's working copy stays what a lane is made of
+A lane's files are still a working copy on the server, where integration,
+verification and renames already work on them. A machine that writes
+sends each saved file whole, with the ID of the content it started from
+(`put_file`, `remove_file`). The server compares that with what the lane
+has: the same, and the file is written as sent; different, and the two are
+merged as text (three ways, from the content the writer started from);
+not mergeable, and nothing is changed. Before comparing, the server
+records what is on its own disk for that file, so that a change made
+there is never written over. Sending ops instead of files would have
+needed the parsing and the symbol IDs on every client, and two places
+that could disagree about them.
+
+### D-087 · A journal on the writer's machine
+A save is copied into a journal (`.kito/lanes/<n>/journal`, content first,
+then the entry, each made durable and put in place by a rename) before it
+is sent, and removed when the server has answered. What both sides agree
+on is the manifest: for each file, the content last known to be the same
+here and there, kept as a snapshot and a log of changes. A daemon killed
+at any point starts from those: entries are sent again in order (the
+server takes a save it already has as done), and a file that differs from
+the manifest with no entry gets one. Without the journal the last state of
+each file would still arrive; with it every save does, in order, also
+after a time with no server.
+
+### D-088 · Followers fetch what an event names
+A `saved` event carries the paths that changed (up to 500; none means
+"look at everything"). A follower asks for those files and their
+contents, and writes them unless the file here was changed since it was
+last in step: then it is left, and shown. After a lost connection, or
+events that were not kept, a follower compares every file. A writer
+follows too: that is how a merge or a rename made on the server reaches
+the machine that writes.
+
+### D-089 · One writing machine for a lane, taken over explicitly
+The server remembers which copy writes in a lane: the first to send a
+save, or the last to claim it (`kito lane attach --write`). A save from
+any other copy is refused with the name of the machine that has the lane,
+and that copy turns into a follower that keeps its unsent saves. Only the
+lane's owner may claim it. Two copies writing at once would have worked
+most of the time through the merge of D-086, and failed in ways hard to
+explain; several writers on purpose is a later phase.
+
+### D-090 · The barrier refuses instead of integrating less
+`sync`, `request_integration` and `rename_symbol` first send everything
+saved here. If a save did not get to the server, or a file does not
+merge, the request is answered with that, and is not passed on: an
+integration that silently lacks the agent's last edit is worse than one
+that waits. Requests that only read (`log`, `lane_status`) send what they
+can and go on.
+
+### D-091 · Small things found on the way
+`ping` asks a daemon whether it is there; `status`, used for that until
+now, costs in proportion to the repository and was paid by every new
+session of the server. The client daemon keeps up to four connections to
+the server for the next command. A connection found dead is replaced and
+the request sent again only for requests that can be sent twice; before
+one that cannot, a connection idle for more than a second is tried with a
+request that costs nothing. The server reads its configuration again for
+each new connection, so a person added while it runs is known at once.
+

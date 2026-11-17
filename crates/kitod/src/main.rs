@@ -33,6 +33,17 @@ fn main() -> ExitCode {
         eprintln!("usage: kitod --repo <dir>");
         return ExitCode::from(2);
     };
+    // A directory connected to a server has a daemon of another kind: it
+    // keeps the lanes worked on from here, and asks the server the rest.
+    if kitod::client::Remote::load(&repo).is_some() {
+        return match kitod::connected::serve(&repo) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("kitod: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {

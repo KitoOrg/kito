@@ -290,6 +290,11 @@ impl Repo {
         Ok(LaneInfo { workdir: None, ..info })
     }
 
+    /// How many ops a lane has recorded: it grows with every change.
+    pub fn lane_ops(&self, lane: LaneId) -> Result<u64> {
+        Ok(self.work(lane)?.ops)
+    }
+
     /// Says whose lane it is: the person a client was authenticated as.
     pub fn set_lane_owner(&mut self, lane: LaneId, owner: kito_core::Author) -> Result<()> {
         let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;

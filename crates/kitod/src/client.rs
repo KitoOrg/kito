@@ -1,9 +1,11 @@
 //! Client of the daemon, used by the CLI and by the MCP server.
 //!
 //! A repository is either here, with its daemon on a Unix socket, or kept
-//! by a server (`kito-server`): then the directory holds only
-//! `.kito/remote.toml`, which says how the server is reached, and the same
-//! requests travel over TCP or through a command such as `ssh`.
+//! by a server (`kito-server`): then the directory holds
+//! `.kito/remote.toml`, which says how the server is reached, and a daemon
+//! of its own on the same kind of socket, which asks the server over TCP
+//! or through a command such as `ssh` and keeps here the lanes that are
+//! worked on from here.
 
 use crate::rpc::{self, Request, Response, RpcError};
 use serde::de::DeserializeOwned;
@@ -21,6 +23,13 @@ pub const REMOTE_FILE: &str = "remote.toml";
 
 /// Version of the protocol between clients and `kito-server`.
 pub const PROTOCOL: u64 = 1;
+
+/// How long a server is given to accept a connection.
+const CONNECT_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long a server is given to answer: longer than the longest wait a
+/// request can ask for.
+const ANSWER_WITHIN: Duration = Duration::from_secs(120);
 
 /// How a directory reaches a repository kept by a server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +86,8 @@ pub enum ClientError {
     NoRepository,
     #[error("cannot reach the daemon: {0}")]
     Connect(String),
+    #[error("cannot reach the server: {0}")]
+    Server(String),
     #[error("cannot start the daemon: {0}")]
     Spawn(String),
     #[error("communication with the daemon: {0}")]
@@ -120,12 +131,8 @@ impl Drop for Client {
 }
 
 impl Client {
-    /// Connects to the repository's daemon, if it is running; for a
-    /// directory connected to a server, to the server.
+    /// Connects to the directory's daemon, if it is running.
     pub fn connect(root: &Path) -> Result<Client, ClientError> {
-        if let Some(remote) = Remote::load(root) {
-            return Client::remote(&remote, true);
-        }
         let socket = rpc::socket_path(root);
         let stream = UnixStream::connect(&socket)
             .map_err(|e| ClientError::Connect(format!("{}: {e}", socket.display())))?;
@@ -144,9 +151,18 @@ impl Client {
     pub fn remote(remote: &Remote, repo: bool) -> Result<Client, ClientError> {
         let mut client = match (&remote.server, remote.command.as_slice()) {
             (Some(server), _) => {
-                let stream = std::net::TcpStream::connect(server)
-                    .map_err(|e| ClientError::Connect(format!("{server}: {e}")))?;
+                use std::net::ToSocketAddrs;
+                let unreachable = |e: std::io::Error| ClientError::Server(format!("{server}: {e}"));
+                let address = server
+                    .to_socket_addrs()
+                    .map_err(unreachable)?
+                    .next()
+                    .ok_or_else(|| ClientError::Server(format!("{server}: no such address")))?;
+                let stream =
+                    std::net::TcpStream::connect_timeout(&address, CONNECT_WITHIN).map_err(unreachable)?;
                 let _ = stream.set_nodelay(true);
+                // A server that went away without a word is not waited for forever.
+                let _ = stream.set_read_timeout(Some(ANSWER_WITHIN));
                 let writer = stream.try_clone()?;
                 Client {
                     reader: Box::new(BufReader::new(stream)),
@@ -161,9 +177,9 @@ impl Client {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .spawn()
-                    .map_err(|e| ClientError::Connect(format!("{program}: {e}")))?;
+                    .map_err(|e| ClientError::Server(format!("{program}: {e}")))?;
                 let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-                    return Err(ClientError::Connect(format!("{program}: no pipes")));
+                    return Err(ClientError::Server(format!("{program}: no pipes")));
                 };
                 Client {
                     reader: Box::new(BufReader::new(stdout)),
@@ -173,7 +189,7 @@ impl Client {
                 }
             }
             (None, []) => {
-                return Err(ClientError::Connect("the remote names neither a server nor a command".into()))
+                return Err(ClientError::Server("the remote names neither a server nor a command".into()))
             }
         };
         // Who is asking, and about which repository.
@@ -188,10 +204,7 @@ impl Client {
         client.writer.flush()?;
         let mut answer = String::new();
         if client.reader.read_line(&mut answer)? == 0 {
-            return Err(ClientError::Connect(format!(
-                "{}: the server closed the connection",
-                remote.place()
-            )));
+            return Err(ClientError::Server(format!("{}: it closed the connection", remote.place())));
         }
         let answer: Value =
             serde_json::from_str(&answer).map_err(|e| ClientError::Protocol(e.to_string()))?;
@@ -206,16 +219,17 @@ impl Client {
     /// accept the connection even while its process is dying.
     fn connect_alive(root: &Path) -> Result<Client, ClientError> {
         let mut client = Client::connect(root)?;
-        client.call_value("status", Value::Null)?;
-        Ok(client)
+        match client.call_value("ping", Value::Null) {
+            // A daemon of an earlier version: it answers, which is all
+            // that was asked.
+            Err(ClientError::Rpc(error)) if error.code == rpc::METHOD_NOT_FOUND => Ok(client),
+            Err(e) => Err(e),
+            Ok(_) => Ok(client),
+        }
     }
 
     /// Connects to the daemon, starting it if it is not already running.
-    /// A server is not ours to start: it is there or it is not.
     pub fn connect_or_start(root: &Path) -> Result<Client, ClientError> {
-        if Remote::load(root).is_some() {
-            return Client::connect(root);
-        }
         if let Ok(client) = Client::connect_alive(root) {
             return Ok(client);
         }

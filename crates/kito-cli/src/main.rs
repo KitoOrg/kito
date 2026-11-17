@@ -148,6 +148,9 @@ enum Cmd {
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
         #[arg(long)]
         token: Option<String>,
+        /// Do not set the directory up for Claude Code
+        #[arg(long)]
+        no_claude: bool,
     },
     /// The repositories you may use on the server this directory is connected to
     Repos,
@@ -268,6 +271,35 @@ enum LaneCmd {
         /// Functions, files or directories to add to the scope
         #[arg(long, num_args = 1.., value_name = "ITEM")]
         add: Vec<String>,
+    },
+    /// In a directory connected to a server: bring the files of a lane
+    /// here and keep them in step as the lane changes
+    Attach {
+        lane: String,
+        /// Work in the lane from this machine: what is saved here goes to
+        /// the lane. For the lane's owner; takes over from another machine
+        #[arg(long)]
+        write: bool,
+    },
+    /// Remove this machine's copy of a lane; the lane itself stays
+    Detach {
+        lane: String,
+        /// Also when saves made here did not reach the server: they are lost
+        #[arg(long)]
+        discard: bool,
+    },
+    /// Settle a file that was changed here and on the server in ways that
+    /// do not merge
+    Take {
+        lane: String,
+        /// The file, as a path inside the lane
+        path: String,
+        /// Keep this machine's file: it replaces the server's
+        #[arg(long, conflicts_with = "theirs", required_unless_present = "theirs")]
+        mine: bool,
+        /// Keep the server's file: it replaces this machine's
+        #[arg(long)]
+        theirs: bool,
     },
 }
 
@@ -910,6 +942,7 @@ fn cmd_connect(
     repo: &str,
     dir: &Option<PathBuf>,
     token: &Option<String>,
+    no_claude: bool,
 ) -> Outcome {
     let remote = remote_for(server, repo, token)?;
     let dir = dir.clone().unwrap_or_else(|| PathBuf::from(repo));
@@ -922,8 +955,21 @@ fn cmd_connect(
     std::fs::create_dir_all(&dir).map_err(fail)?;
     remote.save(&dir).map_err(fail)?;
     let dir = dir.canonicalize().map_err(fail)?;
+    // The main lane's files come first, so that the directory is the
+    // project; then what Claude Code needs, added to what the project has.
+    let main: Result<Value, String> = Client::connect_or_start(&dir)
+        .and_then(|mut client| client.call("attach", json!({ "lane": "main" })))
+        .map_err(fail);
+    let setup = claude_setup(&dir, no_claude);
     if cli.json {
-        print_json(&json!({ "dir": dir, "repo": repo, "server": remote.place(), "user": me["user"] }));
+        print_json(&json!({
+            "dir": dir,
+            "repo": repo,
+            "server": remote.place(),
+            "user": me["user"],
+            "files": main.as_ref().ok().map(|main| main["files"].clone()),
+            "claude": setup.as_ref().map(claude::Setup::json),
+        }));
     } else {
         println!(
             "{} is connected to `{repo}` on {} as {}.",
@@ -931,9 +977,20 @@ fn cmd_connect(
             remote.place(),
             me["user"].as_str().unwrap_or("?")
         );
-        println!(
-            "In it, `kito board`, `kito lanes` and `kito watch` show the repository as the server has it."
-        );
+        match &main {
+            Ok(main) => println!(
+                "The main lane is in it ({}), kept as the server has it: to change something, open a lane.",
+                count(main["files"].as_u64().unwrap_or(0), "file", "files")
+            ),
+            Err(e) => println!(
+                "The files of the main lane did not get here ({e}): `kito lane attach main` tries again."
+            ),
+        }
+        println!("A lane you open is edited on this machine and recorded on the server;");
+        println!("`kito lane attach <lane>` brings the files of another's lane here, kept in step.");
+        if let Some(setup) = &setup {
+            setup.print();
+        }
     }
     Ok(())
 }
@@ -1072,9 +1129,84 @@ fn cmd_who(cli: &Cli, target: &str) -> Outcome {
     Ok(())
 }
 
+/// The copies of lanes on this machine are a connected directory's.
+fn connected(cli: &Cli) -> Outcome {
+    match Remote::load(&root_of(cli)?) {
+        Some(_) => Ok(()),
+        None => {
+            Err("this directory is a repository of its own: its lanes are here already (`kito lanes`)".into())
+        }
+    }
+}
+
+/// What a copy of a lane on this machine is waiting for, if anything.
+fn print_mirror(mirror: &Value) {
+    let pending = mirror["pending"].as_u64().unwrap_or(0);
+    if pending > 0 {
+        let why = mirror["problem"].as_str().map(|why| format!(": {why}")).unwrap_or_default();
+        println!("    {} not on the server yet{why}", count(pending, "save", "saves"));
+    }
+    if let Some(note) = mirror["note"].as_str() {
+        println!("    {note}");
+    }
+    for path in strings(&mirror["diverged"]) {
+        let lane = mirror["lane"].as_str().unwrap_or_default();
+        println!(
+            "    {path} differs here and on the server: `kito lane take {lane} {path} --mine` or `--theirs`"
+        );
+    }
+    for (path, reason) in mirror["refused"].as_object().into_iter().flatten() {
+        println!("    not sent: {path}: {}", reason.as_str().unwrap_or_default());
+    }
+    for path in strings(&mirror["held"]) {
+        println!("    {path} was changed here and is not sent: this copy only follows");
+    }
+}
+
 fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
+    if matches!(command, LaneCmd::Attach { .. } | LaneCmd::Detach { .. } | LaneCmd::Take { .. }) {
+        connected(cli)?;
+    }
     let mut client = daemon(cli)?;
     match command {
+        LaneCmd::Attach { lane, write } => {
+            let mirror: Value =
+                client.call("attach", json!({ "lane": lane, "write": write })).map_err(fail)?;
+            if cli.json {
+                print_json(&mirror);
+                return Ok(());
+            }
+            let text = |key: &str| mirror[key].as_str().unwrap_or_default();
+            println!("{} is here: {}", text("lane"), text("workdir"));
+            match write {
+                true => println!("What is saved there goes to the lane; what the lane gets on the server comes back."),
+                false => println!("It follows the lane: its files change as the lane's do. What is saved there stays there."),
+            }
+            print_mirror(&mirror);
+        }
+        LaneCmd::Detach { lane, discard } => {
+            let gone: Value =
+                client.call("detach", json!({ "lane": lane, "discard": discard })).map_err(fail)?;
+            if cli.json {
+                print_json(&gone);
+            } else if gone["removed"] == false {
+                println!("This directory no longer follows the main lane; its files stay as they are.");
+            } else {
+                println!(
+                    "This machine's copy of {} is gone; the lane is as it was on the server.",
+                    gone["lane"].as_str().unwrap_or(lane)
+                );
+            }
+        }
+        LaneCmd::Take { lane, path, mine, .. } => {
+            let done: Value =
+                client.call("take", json!({ "lane": lane, "path": path, "mine": mine })).map_err(fail)?;
+            if cli.json {
+                print_json(&done);
+            } else {
+                println!("{}", done["done"].as_str().unwrap_or_default());
+            }
+        }
         LaneCmd::Open { agent, intent, scope, task, base } => {
             let opened: Value = client
                 .call(
@@ -1151,7 +1283,15 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 println!("Intent ............ {}", text("intent"));
             }
             println!("Base .............. {}", text("base"));
-            println!("Working copy ...... {}", text("workdir"));
+            match status["workdir"].as_str() {
+                Some(workdir) => println!("Working copy ...... {workdir}"),
+                // A lane of a repository on a server, not worked on from here.
+                None if status["state"] != "closed" => println!(
+                    "Working copy ...... on the server (`kito lane attach {}` brings its files here)",
+                    text("id")
+                ),
+                None => println!("Working copy ...... -"),
+            }
             println!("Ops since the base  {}", status["ops"].as_u64().unwrap_or(0));
             for file in status["files"].as_array().into_iter().flatten() {
                 println!("  changed  {}", file.as_str().unwrap_or_default());
@@ -1503,7 +1643,44 @@ fn warn_if_events_unreliable(client: &mut Client) {
     }
 }
 
+/// The daemon of a connected directory: the server it asks, and the lanes
+/// it keeps here.
+fn cmd_mirrors(cli: &Cli) -> Outcome {
+    let status: Value = daemon(cli)?.call("mirror_status", json!({})).map_err(fail)?;
+    if cli.json {
+        print_json(&status);
+        return Ok(());
+    }
+    let text = |key: &str| status[key].as_str().unwrap_or("-").to_owned();
+    println!("Directory ......... {}", text("root"));
+    println!("Connected to ...... `{}` on {}", text("repo"), text("connected_to"));
+    println!("Daemon ............ pid {}, version {}", status["pid"], text("version"));
+    let mirrors = status["mirrors"].as_array().cloned().unwrap_or_default();
+    println!("Lanes kept here ... {}", mirrors.len());
+    for mirror in &mirrors {
+        let text = |key: &str| mirror[key].as_str().unwrap_or_default();
+        let role = match (mirror["closed"].as_bool(), mirror["write"].as_bool()) {
+            (Some(true), _) => "closed",
+            (_, Some(true)) => "writes",
+            _ => "follows",
+        };
+        println!(
+            "  {:<10} {:<12} {:<8} {:>8}  {}",
+            text("lane"),
+            text("agent"),
+            role,
+            count(mirror["files"].as_u64().unwrap_or(0), "file", "files"),
+            text("workdir")
+        );
+        print_mirror(mirror);
+    }
+    Ok(())
+}
+
 fn cmd_status(cli: &Cli, with_daemon: bool) -> Outcome {
+    if with_daemon && Remote::load(&root_of(cli)?).is_some() {
+        return cmd_mirrors(cli);
+    }
     let mut client = daemon(cli)?;
     if !with_daemon {
         // The repository status must reflect what is on disk right now.
@@ -1556,7 +1733,9 @@ fn main() -> ExitCode {
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Board => cmd_board(&cli),
-        Cmd::Connect { server, name, dir, token } => cmd_connect(&cli, server, name, dir, token),
+        Cmd::Connect { server, name, dir, token, no_claude } => {
+            cmd_connect(&cli, server, name, dir, token, *no_claude)
+        }
         Cmd::Repos => cmd_repos(&cli),
         Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),
         Cmd::Who { target } => cmd_who(&cli, target),

@@ -9,6 +9,12 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 pub const PARSE_ERROR: i64 = -32700;
+/// What was asked is not done, and asking again will not help.
+pub const REFUSED: i64 = -32020;
+/// The lane is written from another machine now.
+pub const NOT_THE_WRITER: i64 = -32021;
+/// The lane does not exist, or is closed.
+pub const NO_SUCH_LANE: i64 = -32022;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -76,6 +82,48 @@ pub struct Event {
     pub by: Option<String>,
     /// What, in a few words.
     pub what: String,
+    /// For `saved`: the files that changed. Empty when there were too
+    /// many to list: then everything may have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The bytes of a file as text a message can carry: base64, with padding.
+pub fn encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            match i <= chunk.len() {
+                true => out.push(char::from(*BASE64.get(((n >> shift) & 63) as usize).unwrap_or(&b'A'))),
+                false => out.push('='),
+            }
+        }
+    }
+    out
+}
+
+/// The bytes a base64 text stands for; `None` if it is not base64.
+pub fn decode(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(text.len() / 4 * 3 + 3);
+    for chunk in text.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let mut n = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            let value = BASE64.iter().position(|known| known == c)? as u32;
+            n |= value << (18 - 6 * i);
+        }
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(bytes.get(..chunk.len() - 1)?);
+    }
+    Some(out)
 }
 
 /// Path of the socket of a repository's daemon.

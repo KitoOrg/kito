@@ -20,6 +20,7 @@ runnable demo.
 | 5 | Coverage and performance | done |
 | 6 | The intent board: declared scope, overlaps between lanes | done |
 | 7 | One server for several repositories, clients on other machines | done |
+| 8 | Lanes from any machine: one writes, others follow, a journal of saves | done |
 
 ## Crates
 
@@ -34,7 +35,7 @@ runnable demo.
 | `kito-lane` | Working copies of the lanes, cloned copy-on-write where the file system allows |
 | `kito-integrate` | Integration queue, verifier, the result an agent reads |
 | `kito-git` | Export of checkpoints as git commits, import from a git repository |
-| `kitod` | Daemon: watcher, capture on every lane, integration, JSON-RPC socket |
+| `kitod` | Daemon: watcher, capture on every lane, integration, JSON-RPC socket; in a connected directory, the lanes kept in step with a server |
 | `kito-cli` | The `kito` binary |
 | `kito-mcp` | The MCP server agents talk to |
 | `kito-server` | One server for several repositories: who a client is, what they may use |
@@ -282,8 +283,9 @@ hashes to. `--repo <name>` limits a person to some repositories.
 kito-server --dir /srv/kito serve
 ```
 
-A client connects a directory of its own to a repository, and from then on
-`kito` in that directory shows the repository as the server has it:
+A client connects a directory of its own to a repository. The files of the
+main lane come into it and are kept as the server has them, and from then
+on `kito` in that directory works as it does in a repository:
 
 ```bash
 kito connect 127.0.0.1:7421 shop --token kito_...
@@ -312,8 +314,49 @@ its person: `command="kito-server --dir /srv/kito stdio --as ada"`.
 What a client may ask is what lanes are for: seeing them, opening and
 closing them, declaring scope, integrating, deciding conflicts. Stopping a
 daemon, checkpoints of the main lane and rollbacks stay with whoever runs
-the server. A lane's working copy is on the server: editing it from
-another machine is the next phase.
+the server.
+
+### Lanes from any machine
+
+A lane is kept by the server; its working copy is wherever it is worked
+on. Opened from a connected directory, it is edited on that machine:
+
+```bash
+kito lane open agent-a --intent "prices in cents" --scope src/shop.py
+```
+
+The answer names a working copy under the directory. Every save there goes
+to a journal on disk and from it to the server, where it is recorded in the
+lane as the agent's; what the server changes in the lane (an integration, a
+rename) comes back. `kito sync <lane>` returns when everything saved so far
+is on the server, and so do an integration request and a rename; if
+something did not get there they say why instead of going on without it.
+
+Anybody who may use the repository can follow a lane from their own
+machine:
+
+```bash
+kito lane attach 1
+```
+
+Its files are then on that machine too and change as the lane's do, a few
+hundredths of a second after each save. The lane's owner can carry on from
+another machine with `kito lane attach 1 --write`: one machine writes in a
+lane at a time, and the other follows from then on.
+
+```bash
+kito daemon status
+```
+
+shows the lanes kept on this machine, which it writes and which it
+follows, and anything waiting: saves not yet on the server, files that
+were changed here and on the server in ways that do not merge (`kito lane
+take <lane> <file> --mine` or `--theirs` settles one), files changed in a
+copy that only follows. `kito lane detach <lane>` removes this machine's
+copy; the lane stays.
+
+A daemon killed in the middle of the work loses nothing: the journal and
+the files are where it left them, and the next command starts it again.
 
 ## Development
 
@@ -329,12 +372,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p kito-store -p kito-diff
 ```
 
-Phase 7 demo: one server, two repositories, two people; one opens a lane
-and the other sees it.
+Phase 8 demo: an agent works in a lane on one machine while a person
+follows it on another; the daemon is killed, the server goes away, and no
+save is lost.
 
 ```bash
 cargo build --release -p kitod -p kito-cli -p kito-server
 ```
+
+```bash
+scripts/demo-phase8.sh
+```
+
+Phase 7 demo: one server, two repositories, two people; one opens a lane
+and the other sees it.
 
 ```bash
 scripts/demo-phase7.sh

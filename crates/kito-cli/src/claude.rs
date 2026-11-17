@@ -140,19 +140,21 @@ pub fn setup(root: &Path) -> Setup {
         purpose,
         change: change.unwrap_or_else(Change::Left),
     };
-    Setup {
-        steps: vec![
-            step(".gitignore", "`.kito/` stays out of git", ignore(root)),
-            step(".mcp.json", "the `kito` MCP server", server(&root.join(".mcp.json"))),
-            step(
-                ".claude/settings.json",
-                "its tools may be called without asking",
-                permission(&root.join(".claude").join("settings.json")),
-            ),
-            step("CLAUDE.md", "the rules: one lane per task", rules(&root.join("CLAUDE.md"))),
-        ],
-        note: server_note(),
+    let mut steps = vec![
+        step(".mcp.json", "the `kito` MCP server", server(&root.join(".mcp.json"))),
+        step(
+            ".claude/settings.json",
+            "its tools may be called without asking",
+            permission(&root.join(".claude").join("settings.json")),
+        ),
+        step("CLAUDE.md", "the rules: one lane per task", rules(&root.join("CLAUDE.md"))),
+    ];
+    // A directory connected to a server holds no files of the repository:
+    // there is nothing for git to keep out.
+    if !root.join(".kito").join("remote.toml").is_file() {
+        steps.insert(0, step(".gitignore", "`.kito/` stays out of git", ignore(root)));
     }
+    Setup { steps, note: server_note() }
 }
 
 impl Setup {

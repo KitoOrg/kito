@@ -1,0 +1,127 @@
+# 1. The server: one repository, two people
+
+$ kito-server init /tmp/kito-demo/server
+Kito server created in /tmp/kito-demo/server
+Add a repository with `kito-server --dir /tmp/kito-demo/server repo add <name>`,
+a person with `user add <name>`, then run `serve`.
+
+$ kito-server --dir /tmp/kito-demo/server repo add shop --from /tmp/kito-demo/shop-src
+Repository `shop` created in /tmp/kito-demo/server/repos/shop
+
+$ kito-server --dir /tmp/kito-demo/server user add ada; … user add bob
+(two tokens, each shown once)
+
+$ kito-server --dir /tmp/kito-demo/server serve --listen 127.0.0.1:7421 &
+kito-server: listening on 127.0.0.1:7421, 1 repositories
+
+
+# 2. Ada, on her laptop: a lane on the server, its files on her machine
+
+$ kito connect 127.0.0.1:7421 shop laptop --token kito_…
+/tmp/kito-demo/laptop is connected to `shop` on 127.0.0.1:7421 as ada.
+The main lane is in it (2 files), kept as the server has it: to change something, open a lane.
+A lane you open is edited on this machine and recorded on the server;
+`kito lane attach <lane>` brings the files of another's lane here, kept in step.
+
+$ ls . src
+.:
+README.md
+src
+
+src:
+shop.py
+
+$ kito lane open agent-a --intent prices in cents --scope src/ README.md
+lane/1 opened for agent-a on ckpt#1.
+Working copy: /tmp/kito-demo/laptop/.kito/lanes/1/work
+Scope: src/, README.md
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ ls /tmp/kito-demo/laptop/.kito/lanes/1/work /tmp/kito-demo/laptop/.kito/lanes/1/work/src
+/tmp/kito-demo/laptop/.kito/lanes/1/work:
+README.md
+src
+
+/tmp/kito-demo/laptop/.kito/lanes/1/work/src:
+shop.py
+
+
+# 3. Bob, at his desk: he follows her lane
+
+$ kito connect 127.0.0.1:7421 shop desk --token kito_…
+/tmp/kito-demo/desk is connected to `shop` on 127.0.0.1:7421 as bob.
+The main lane is in it (2 files), kept as the server has it: to change something, open a lane.
+A lane you open is edited on this machine and recorded on the server;
+`kito lane attach <lane>` brings the files of another's lane here, kept in step.
+
+$ kito lane attach 1
+lane/1 is here: /tmp/kito-demo/desk/.kito/lanes/1/work
+It follows the lane: its files change as the lane's do. What is saved there stays there.
+
+
+# 4. Twenty saves on the laptop, each timed until it is on the desk's disk
+
+milliseconds from the save to the follower's disk, 20 saves: median 18, slowest 72
+
+$ kito log --lane 1 -n 3
+  2a78ce58  11-17 10:40  agent-a  src/shop.py  +20 −20, 20 saves  total changed  [prices in cents]
+
+
+# 5. Ada's daemon is killed while the agent works
+
+$ kill -9 <pid>    # the daemon of the laptop
+(two more saves, with no daemon to see them)
+
+$ kito sync 1
+Everything is recorded (0 new operations).
+The lane on the server has exactly what is on the laptop.
+
+$ kito daemon status
+Directory ......... /tmp/kito-demo/laptop
+Connected to ...... `shop` on 127.0.0.1:7421
+Daemon ............ pid <pid>, version 0.8.0
+Lanes kept here ... 2
+  lane/1     agent-a      writes    3 files  /tmp/kito-demo/laptop/.kito/lanes/1/work
+  lane/main               follows   2 files  /tmp/kito-demo/laptop
+
+
+# 6. The server goes away; the saves wait, then go
+
+$ kill <pid>    # the server
+
+$ kito sync 1
+kito: 1 save made here did not reach the server yet: cannot reach the server: 127.0.0.1:7421: Connection refused (os error 111)
+(exit status 1)
+
+$ kito daemon status
+Directory ......... /tmp/kito-demo/laptop
+Connected to ...... `shop` on 127.0.0.1:7421
+Daemon ............ pid <pid>, version 0.8.0
+Lanes kept here ... 2
+  lane/1     agent-a      writes    3 files  /tmp/kito-demo/laptop/.kito/lanes/1/work
+    1 save not on the server yet: cannot reach the server: 127.0.0.1:7421: Connection refused (os error 111)
+  lane/main               follows   2 files  /tmp/kito-demo/laptop
+
+$ kito-server --dir /tmp/kito-demo/server serve --listen 127.0.0.1:7421 &
+
+$ kito sync 1
+Everything is recorded (0 new operations).
+The lane on the server has exactly what is on the laptop.
+So has bob, at his desk.
+
+
+# 7. Integrated from the laptop; bob's directory has it
+
+$ kito integrate 1
+lane/1: integrated as ckpt#2 (git 2a783563f0)
+
+$ cat /tmp/kito-demo/desk/src/tax.py
+VAT = 22
+
+$ kito daemon status
+Directory ......... /tmp/kito-demo/desk
+Connected to ...... `shop` on 127.0.0.1:7421
+Daemon ............ pid <pid>, version 0.8.0
+Lanes kept here ... 2
+  lane/1     agent-a      follows   3 files  /tmp/kito-demo/desk/.kito/lanes/1/work
+  lane/main               follows   3 files  /tmp/kito-demo/desk

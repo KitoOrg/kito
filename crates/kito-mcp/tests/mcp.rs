@@ -474,9 +474,29 @@ fn the_tools_reach_a_repository_kept_by_a_server() {
     assert_eq!((lane["id"].as_str(), lane["owner"].as_str()), (Some("lane/1"), Some("ada")));
     let who = mcp.tool("kito.who_touches", json!({ "target": "src/shop.ts:total" })).unwrap();
     assert_eq!(who[0]["agent"], "builder");
+
+    // The working copy the agent is told is on its own machine: it edits
+    // there, and the lane on the server has it when it asks to integrate.
+    let work = PathBuf::from(lane["workdir"].as_str().unwrap());
+    assert!(work.starts_with(&here), "{}", work.display());
+    let text = fs::read_to_string(work.join("src/shop.ts")).unwrap();
+    assert_eq!(text, SHOP);
+    let first = SHOP.lines().find(|line| line.contains("return")).unwrap();
+    fs::write(work.join("src/shop.ts"), SHOP.replacen(first, &format!("{first} // in cents"), 1)).unwrap();
+    let asked = mcp.tool("kito.request_integration", json!({ "lane": "lane/1" })).unwrap();
+    let job = asked["job"].as_str().unwrap().to_owned();
+    let result = mcp.tool("kito.integration_result", json!({ "job": job, "wait_ms": 20000 })).unwrap();
+    assert_eq!(result["result"], "integrated", "{result}");
+    let main = fs::read_to_string(serverdir.join("repos/shop/src/shop.ts")).unwrap();
+    assert!(main.contains("// in cents"), "{main}");
+    let status = mcp.tool("kito.status", json!({ "lane": "lane/1" })).unwrap();
+    assert_eq!(status["workdir"], json!(work));
+
     let closed = mcp.tool("kito.close_lane", json!({ "lane": "lane/1" })).unwrap();
     assert_eq!(closed["state"], "closed");
+    assert!(!work.exists());
     drop(mcp);
+    stop_daemon(&here);
     drop(serving);
     stop_daemon(&serverdir.join("repos/shop"));
 }

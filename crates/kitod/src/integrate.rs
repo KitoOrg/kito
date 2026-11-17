@@ -92,7 +92,7 @@ fn subject_of(conflict: &Conflict) -> Subject {
 }
 
 /// Removes a file of a working directory, and the directories it leaves empty.
-fn remove_in(root: &Path, path: &Path) -> Result<()> {
+pub(crate) fn remove_in(root: &Path, path: &Path) -> Result<()> {
     let abs = root.join(path);
     match fs::remove_file(&abs) {
         Ok(()) => {}

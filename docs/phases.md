@@ -1099,6 +1099,169 @@ a connected directory.
 - One thread for each client, and one connection to a daemon for each
   session: nothing above a handful of clients has been measured.
 
+## Phase 8 · lanes from any machine — done
+
+A lane is still kept by the server; its working copy can now be on any
+machine connected to the repository. One machine writes in a lane, any
+number follow it, and a daemon on each keeps its copy in step with the
+server.
+
+### What is there
+
+- **A daemon for a connected directory** (D-084). `kitod` started in a
+  connected directory answers the same requests as the daemon of a
+  repository, by asking the server, and keeps on this machine the working
+  copies of the lanes worked on or followed from here. The command line
+  and the MCP server did not have to change: they find a socket, as in a
+  repository.
+- **The directory is the project** (D-085). `kito connect` brings the files
+  of the main lane into the directory and keeps them as the server has
+  them, so that a person or an agent can read the code before opening a
+  lane. Changes are made in lanes: what is edited in the directory itself
+  is neither sent nor overwritten.
+- **A lane opened from here is edited here** (D-086). `open_lane` answers
+  with a working copy on this machine. Each save found there is sent to
+  the server with the content it started from, and recorded in the lane as
+  the agent's, for the person the server authenticated. A lane that moved
+  on in the meantime (an integration, a rename made on the server) is
+  merged with the save; when the two do not merge nothing is changed and
+  the file is marked: `kito lane take <lane> <file> --mine | --theirs`
+  settles it.
+- **A journal of saves** (D-087). A save is written to a journal on disk
+  before it is sent, and leaves it when the server has answered. A daemon
+  killed at any moment finds the journal and the files, and carries on; a
+  save sent twice is one save. With the server away the saves wait, and
+  `kito daemon status` says how many.
+- **Followers** (D-088). `kito lane attach <lane>` brings the files of
+  anybody's lane to this machine and keeps them in step: the events of the
+  server now carry the paths that changed, and a follower fetches those. A
+  file changed in a follower's copy is kept, and shown as not sent.
+- **One machine writes in a lane at a time** (D-089), and only for the
+  lane's owner. `kito lane attach <lane> --write` on another machine takes
+  the lane over: the first machine follows from then on, and what is saved
+  on it waits, with the reason, until it takes the lane back.
+- **The barrier** (D-090). Before `sync`, an integration request or a
+  rename, everything saved here is sent; if something did not get there
+  (the server is away, a file does not merge) the request is refused with
+  the reason, instead of integrating a lane that lacks the last edits.
+- On the way: the server learns of people added while it runs; a daemon is
+  asked whether it is there without computing its whole status; a client
+  daemon keeps its connections to the server for the next command; `kito
+  connect` sets the directory up for Claude Code as `kito init` does.
+
+### Demo
+
+```
+scripts/demo-phase8.sh
+```
+
+An agent on one machine, a person following on another
+([output](demo/phase8-demo.txt)). Ada connects a directory and opens a lane
+for her agent; bob connects another and follows it:
+
+```
+$ kito lane open agent-a --intent prices in cents --scope src/ README.md
+lane/1 opened for agent-a on ckpt#1.
+Working copy: /tmp/kito-demo/laptop/.kito/lanes/1/work
+
+$ (bob) kito lane attach 1
+lane/1 is here: /tmp/kito-demo/desk/.kito/lanes/1/work
+It follows the lane: its files change as the lane's do. What is saved there stays there.
+
+milliseconds from the save to the follower's disk, 20 saves: median 18, slowest 72
+```
+
+Ada's daemon is killed while the agent works, and the server goes away
+for a while:
+
+```
+$ kill -9 <pid>    # the daemon of the laptop
+(two more saves, with no daemon to see them)
+$ kito sync 1
+The lane on the server has exactly what is on the laptop.
+
+$ kill <pid>    # the server
+$ kito sync 1
+kito: 1 save made here did not reach the server yet: cannot reach the server: 127.0.0.1:7421: Connection refused (os error 111)
+$ kito-server --dir /tmp/kito-demo/server serve --listen 127.0.0.1:7421 &
+$ kito sync 1
+The lane on the server has exactly what is on the laptop.
+So has bob, at his desk.
+```
+
+### Acceptance targets
+
+**A save is on a follower's disk within 300 ms at the 95th percentile.**
+A hundred saves in a writer's copy, each timed from the moment the file is
+on the writer's disk to the moment the same content is on the follower's:
+median 19 ms, 95th percentile 21 ms, slowest 80 ms (the test fails above
+300 ms). Both machines were one machine: the network between two is not in
+that number. A save crosses it about four times (the save, the event, the
+list of what changed, the content), so a network with a 20 ms round trip
+would add about 80 ms.
+
+**No acknowledged save is lost when the client is killed.** The test kills
+the daemon twelve times at moments it does not choose (before it saw a
+save, while sending, with a journal half sent), keeps saving while no
+daemon runs, and after each restart and barrier compares the lane on the
+server with the files: they are the same every time, and the journal ends
+empty. The same with the server away. The five tests of this phase passed
+25 runs in a row.
+
+**An agent on one machine, a person following on another**: the demo
+above, and a real agent below.
+
+### A real agent
+
+Claude Code 2.1.326, started in a directory that had only `kito connect`
+run for it, was asked in plain words for a change to one function. It read
+the file in the directory, opened a lane with its intent and scope, edited
+the working copy on its own machine, asked for the integration, read the
+result and closed the lane: eight turns. The change was on the server's
+main lane as a git commit, and in the other person's connected directory,
+without anybody copying a file.
+
+### What it costs
+
+On one machine, with a repository of 2,000 files (17 MB) and one of 20,000
+(87 MB): opening a lane with its files brought here takes 1.3 s and 3.2 s;
+the barrier with nothing to send, 80 ms and 190 ms; any other command in
+a connected directory, about 10 ms and 50 ms.
+
+### Tests
+
+286 tests in all. New: the requests for a working copy elsewhere
+(`kitod/tests/files.rs`: reading a lane, a save recorded as the lane's own,
+a save on an older version merged or refused, removals, what is refused);
+the real server with the real daemons of connected directories
+(`kito-server/tests/mirror.rs`: a lane edited from another machine, the
+follower's 300 ms, the kills, a lane that moved on, one writer at a time);
+the new commands from the command line; an agent's whole piece of work
+through the MCP tools from a connected directory.
+
+### Known limitations
+
+- **Two real machines were not available.** Everything was measured and
+  tried over the loopback interface; SSH as the transport is still
+  untried, and the server still encrypts nothing.
+- **Opening a lane brings all its files**, each time: copies on one
+  machine do not share contents, and whole files travel (no differences,
+  one message for each file). Large binary files are costly.
+- **Symbolic links made in a writer's copy are not sent**; `kito daemon
+  status` says so.
+- **Only the lane's owner writes in it**: two people cannot both write in
+  one lane. Which machine writes is kept in the server's memory: after a
+  restart it is the first that sends a save.
+- **A file changed in a copy at the very moment the server's version of it
+  is being written there** can be overwritten: the check and the write are
+  microseconds apart, not one step.
+- **If a repository's daemon restarts while the server keeps running**, a
+  follower can take up to 20 s to notice that it missed events; then it
+  compares everything.
+- The look at a working copy before the barrier is proportional to the
+  number of files (190 ms at 20,000), and so is the periodic one.
+- Verification commands still run on the server.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

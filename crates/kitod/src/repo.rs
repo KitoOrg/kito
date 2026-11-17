@@ -1747,7 +1747,7 @@ pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 
 /// Writes a file of a working directory: to a temporary file, then a
 /// rename, so that readers never see it half-written.
-fn write_file(root: &Path, rel: &Path, mode: FileMode, content: &[u8]) -> Result<()> {
+pub(crate) fn write_file(root: &Path, rel: &Path, mode: FileMode, content: &[u8]) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let abs = root.join(rel);
     if let Some(dir) = abs.parent() {

@@ -5,12 +5,15 @@
 
 pub mod client;
 pub mod config;
+pub mod connected;
 pub mod error;
+pub mod files;
 pub mod fsinfo;
 pub mod identity;
 pub mod ignore;
 pub mod integrate;
 pub mod lanes;
+pub mod mirror;
 pub mod refs;
 pub mod rename;
 pub mod repo;

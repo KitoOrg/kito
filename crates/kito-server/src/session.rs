@@ -32,6 +32,11 @@ const ALLOWED: &[&str] = &[
     "request_integration",
     "integration_result",
     "resolve_conflict",
+    "lane_files",
+    "get_blobs",
+    "put_file",
+    "remove_file",
+    "claim_writer",
 ];
 
 fn send(writer: &mut dyn Write, message: &impl serde::Serialize) -> std::io::Result<()> {
@@ -189,7 +194,14 @@ pub fn serve(server: Server, listen: Option<&str>) -> Result<(), String> {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let server = server.clone();
-        std::thread::spawn(move || serve_client(&server, stream));
+        std::thread::spawn(move || {
+            // People and repositories added since the server started
+            // count for a connection made now.
+            match Server::open(&server.dir) {
+                Ok(now) => serve_client(&now, stream),
+                Err(_) => serve_client(&server, stream),
+            }
+        });
     }
     Ok(())
 }

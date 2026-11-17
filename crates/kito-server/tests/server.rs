@@ -377,9 +377,26 @@ fn the_same_protocol_over_a_command() {
         "there is no repository `site` for bob on this server"
     );
     match Client::remote(&through("nobody", "shop"), true) {
-        Err(ClientError::Connect(reason)) => assert!(reason.contains("closed the connection"), "{reason}"),
+        Err(ClientError::Server(reason)) => assert!(reason.contains("closed the connection"), "{reason}"),
         other => panic!("nobody got in: {:?}", other.err().map(|e| e.to_string())),
     }
     let reply: Value = bob.call_value("server.whoami", json!({})).unwrap();
     assert_eq!(reply["user"], "bob");
+}
+
+#[test]
+fn a_person_added_while_the_server_runs_is_known_at_once() {
+    let mut world = World::new();
+    let address = world.serve();
+    assert!(refusal(Client::remote(&remote(&address, "kito_not_yet", "shop"), true))
+        .contains("not one the server knows"));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "site"]));
+    let mut client = connect(&address, &carol, "site");
+    let me: Value = client.call("server.whoami", json!({})).unwrap();
+    assert_eq!(me["user"], "carol");
+    // And one removed is gone for the connections that follow.
+    ok(&world.dir, &["user", "remove", "carol"]);
+    assert!(
+        refusal(Client::remote(&remote(&address, &carol, "site"), true)).contains("not one the server knows")
+    );
 }
