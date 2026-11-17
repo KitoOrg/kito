@@ -371,7 +371,7 @@ pub(crate) fn last_known_name(store: &Store, id: SymbolId) -> Option<String> {
 /// moves between files of the symbols that contained it at the time (a
 /// method follows its class without a `Move` of its own). With each
 /// inherited op, the container it happened to.
-fn timeline(store: &Store, id: SymbolId, depth: usize) -> Result<Vec<(Op, Option<SymbolId>)>> {
+pub(crate) fn timeline(store: &Store, id: SymbolId, depth: usize) -> Result<Vec<(Op, Option<SymbolId>)>> {
     let own = store.symbol_ops(id)?;
     // Under which container the symbol was, and when.
     let mut periods: Vec<(SymbolId, Hlc, Option<Hlc>)> = Vec::new();
@@ -410,14 +410,14 @@ fn timeline(store: &Store, id: SymbolId, depth: usize) -> Result<Vec<(Op, Option
 
 /// Which ops are part of the history of a lane: all of its own, and of
 /// every other lane those recorded before the point where the two last met.
-struct Reach {
+pub(crate) struct Reach {
     lane: LaneId,
     /// Per other lane: the time of the last of its ops this lane has.
     until: HashMap<LaneId, Hlc>,
 }
 
 impl Reach {
-    fn of(store: &Store, lane: LaneId) -> Result<Reach> {
+    pub(crate) fn of(store: &Store, lane: LaneId) -> Result<Reach> {
         let at = |id: &kito_core::OpId| -> Result<Option<Hlc>> { Ok(store.get_op(id)?.map(|op| op.at)) };
         let mut until = HashMap::new();
         for record in store.lane_records() {
@@ -436,7 +436,7 @@ impl Reach {
         Ok(Reach { lane, until })
     }
 
-    fn includes(&self, op: &Op) -> bool {
+    pub(crate) fn includes(&self, op: &Op) -> bool {
         op.lane == self.lane || self.until.get(&op.lane).is_some_and(|until| op.at <= *until)
     }
 }

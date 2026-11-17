@@ -129,7 +129,7 @@ lane/2: integrated as ckpt#5 (git f285b26a0f)
 $ grep -n percent) / 100 src/shop.ts
 11:  const cut = Math.ceil((amount * percent) / 100);
 
-$ kito why src/shop.ts:discount
+$ kito why --history src/shop.ts:discount
 function discount  (src/shop.ts)  symbol 0#1
   2026-11-14 17:55:22  francesco  function `discount` created in src/shop.ts
   2026-11-14 17:55:22  alice      body changed (+1 −1), on lane/1

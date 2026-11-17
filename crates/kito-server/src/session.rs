@@ -37,6 +37,8 @@ const ALLOWED: &[&str] = &[
     "put_file",
     "remove_file",
     "claim_writer",
+    "why_graph",
+    "reasons",
 ];
 
 /// Of those, what somebody who may only read can ask.
@@ -53,6 +55,8 @@ const READ: &[&str] = &[
     "integration_result",
     "lane_files",
     "get_blobs",
+    "why_graph",
+    "reasons",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
 ];

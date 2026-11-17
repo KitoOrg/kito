@@ -22,6 +22,7 @@ runnable demo.
 | 7 | One server for several repositories, clients on other machines | done |
 | 8 | Lanes from any machine: one writes, others follow, a journal of saves | done |
 | 9 | Protected main and team rules: roles, approval, checks and git push on the server | done |
+| 10 | The why graph: the reasons of every function, file and line, to ask before changing them | done |
 
 ## Crates
 
@@ -90,7 +91,7 @@ renamed, edited or moved to another file. Its whole story, asked by the name
 and the place it has today:
 
 ```bash
-kito why src/users.ts:fetchUser
+kito why --history src/users.ts:fetchUser
 ```
 
 To go back to a checkpoint or to an earlier op (recorded as new ops, so it
@@ -207,7 +208,7 @@ environment).
 
 Then start Claude Code in the project directory. The first time it asks to
 trust the folder and to approve the `kito` server; `/mcp` shows it connected
-with its eleven tools. `kito-mcp` has to be on the `PATH`. Claude Code
+with its tools. `kito-mcp` has to be on the `PATH`. Claude Code
 writes an underscore where a tool's name has a dot (`kito.open_lane` is
 `mcp__kito__kito_open_lane` to it): no `--tool-prefix` is needed. From
 there, a task asked in plain words is done in a lane and integrated.
@@ -258,6 +259,45 @@ Through the MCP server agents have `open_lane` (with `intent` and
 tool that names a lane carries, once, the `notices` that lane has not
 heard yet. What another lane says it is there for is given as information
 about that lane, not as an instruction.
+
+## Why code is the way it is
+
+Every change Kito records has a reason: the intent its lane declared, or
+for what came from git, the commit message. `kito why` puts them together
+for a function, a file, or lines:
+
+```bash
+kito why src/shop.py:total
+```
+
+```bash
+kito why src/shop.py:12-20
+```
+
+```bash
+kito why README.md
+```
+
+The answer lists the reasons the code changed, newest first: what each
+did, which agent made it and for whom, the lane, the checkpoint, the
+checks that passed and who let it in, and what else changed for the same
+reason. Then each line with the number of the reason it was last written
+for, who uses the function and what it uses, the lanes that are on it
+now, and the conflicts that were decided on it. `--lane <lane>` asks about
+the code as a lane has it; `--graph` prints the answer as a Mermaid
+diagram; `--history` prints every step in the life of a symbol, one by
+one, across renames and moves.
+
+Earlier work is found by the words of its reason:
+
+```bash
+kito reasons cents
+```
+
+Agents have both as the tools `why` and `reasons`, and the rules written
+for Claude Code tell them to ask before changing a function or a file
+somebody else wrote. What comes back is what others declared: the tools
+say so, as information and not as instructions.
 
 ## A server for several repositories
 
@@ -422,13 +462,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p kito-store -p kito-diff
 ```
 
-Phase 9 demo: a direct edit to the main lane is refused, a failing test
-stops a lane, one that passes waits for somebody who may integrate, and
-the integration reaches a git remote (needs `python3`).
+Phase 10 demo: a repository with a history in git, a team working on it
+through lanes, and the questions an agent asks before changing a function
+(needs `python3`).
 
 ```bash
 cargo build --release -p kitod -p kito-cli -p kito-server
 ```
+
+```bash
+scripts/demo-phase10.sh
+```
+
+Phase 9 demo: a direct edit to the main lane is refused, a failing test
+stops a lane, one that passes waits for somebody who may integrate, and
+the integration reaches a git remote (needs `python3`).
 
 ```bash
 scripts/demo-phase9.sh

@@ -355,3 +355,27 @@ With release builds, on repositories made of generated TypeScript files:
 Before `ping` (D-091) every command paid for a whole `status` of the
 repository on the server: `kito sync` took 265 ms and 2.2 s.
 
+## Phase 10 · asking why
+
+A repository of 20,000 generated TypeScript files with 480,000 functions,
+recorded as 500,000 operations under one checkpoint; then a lane that
+changes one function and is integrated. Release builds, one machine;
+times are of the whole `kito` command.
+
+| | time |
+| --- | --- |
+| The first `kito why` after the daemon starts (reads the log once) | 1.3 s |
+| `kito why <file>:<function>` after that | 9–37 ms |
+| `kito why <file>` (95 lines of answer) | 9 ms |
+| `kito why <file>:<line>` | 9 ms |
+| `kito why <file>:<function> --uses` (the syntax of 20,000 files read) | 0.3 s |
+| `kito why <file>:<function> --lane <lane>` (the lane looked at first) | 0.1 s |
+| `kito reasons <words>` | 4–6 ms |
+| `kito why` right after an integration (the index is not rebuilt) | 19 ms |
+
+Two things were measured and removed on the way. The first version held
+every operation of the log in memory while it built the index; it now
+reads them one at a time. And it looked at the whole main directory
+before every question, which took 2 s here and tells nothing: what is
+saved there is recorded as it is saved.
+

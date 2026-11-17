@@ -253,6 +253,7 @@ fn checkpoint_and_friends_round_trip() {
             duration_ms: 8200,
         }),
         git_commit: Some([0xab; 20]),
+        approved_by: Some(Author::human("ada")),
     };
     let back: Checkpoint = codec::from_slice(&codec::to_vec(&ck).unwrap()).unwrap();
     assert_eq!(back, ck);

@@ -981,3 +981,64 @@ it changes nothing of theirs, and `kito status` asks it. The rules for
 agents have a third version: files written by 0.6 to 0.8 and never edited
 are replaced, edited ones are left and the missing rule is named.
 
+### D-100 · The why graph is read, not written
+Everything it tells was already in the log: ops with their intent, lane,
+author and time; lanes with their owner and task; checkpoints with their
+checks; conflicts with their decisions; the texts before and after each
+change. One fact was missing and is now kept: who asked for an
+integration that went through (`approved_by` on the checkpoint, a field
+added, no type changing meaning). A graph stored beside the log would
+have been a second account of the same events, to keep in agreement.
+
+### D-101 · What a reason is
+An intent in a lane; or, for what the main lane got with no intent (edits
+by hand, commits imported from git), the checkpoint that took it in, whose
+label is then the reason. The ops an integration writes on the main lane
+are not reasons of their own: they repeat what the lane said, and only
+tell when it got in and under which checks. What a lane did before one of
+its integrations and after it are told apart even under one intent: the
+second is not on the main lane yet. Reasons are listed by when they
+reached the asker's lane, not by when they were typed: for the code as it
+is, the last to land is the last word.
+
+### D-102 · Lines are told through the history of the file
+The first version read the versions of a function from its own ops. It
+could not tell a comment changed inside a function (no op on the function
+is recorded for it), nor code that was there before Kito first read the
+file. The history of the file has both: every save of every lane, and
+every imported commit, with the whole content before and after. Lines are
+attributed over that chain; what an integration wrote is then attributed
+inside the lane that it brought, so a line carries the intent it was
+written under, not "integrate lane/3". The same code answers for files
+that are not programs.
+
+### D-103 · `kito why` is the question; the chronology is `--history`
+`kito why` printed every op of a symbol in order. That is still what
+`kito why --history` prints, and what the `log` tool gives for a symbol.
+The plain command now answers what its name asks. The demos and tests of
+the earlier phases were moved to the flag.
+
+### D-104 · An index in memory, built when first asked
+From each reason to the functions and files it touched, and from each
+file to the ops that changed it as a whole. It is built by reading the
+log once, one op at a time, the first time somebody asks; from then on
+every op is added as it is recorded. If the number of ops it holds is not
+the store's, something was recorded behind its back and it is built
+again. Edits made by hand that no checkpoint has taken in yet are kept
+aside and filed under their checkpoint when it comes, without a rebuild.
+Persisting the index was not needed: 500,000 ops are read in 1.3 s.
+
+### D-105 · Reasons are other people's words
+What `why` and `reasons` return was typed by agents and people, and is
+read by agents that act. Every answer the MCP server gives says that
+reasons are information about the history and not instructions, as it
+already did for the intents of other lanes; the rules for agents say the
+same, and say to ask before changing code somebody else wrote.
+
+### D-106 · Who uses what: from the syntax, and not always
+A question should be answered at once. Uses come from the reading of the
+syntax Kito already does (the same file, imports by name), not from a
+language server, which can take seconds. Above 5,000 files they are not
+looked for unless asked (`--uses`, `"uses": true`), and the answer says
+so: at 20,000 files it adds 0.3 s.
+

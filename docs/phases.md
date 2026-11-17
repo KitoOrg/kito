@@ -1398,6 +1398,145 @@ from the command line; the rules for agents brought up to date.
 - `.kito/refused/` only grows.
 - Two real machines and SSH are still untried.
 
+## Phase 10 · the why graph — done
+
+Not in the first plan: asked for after phase 9, so that the agents of a
+team can find out why code is the way it is before they change it. (The
+plan's phase 10, agents started from the server, becomes phase 11.)
+
+Kito already records a reason with everything: the intent a lane declares,
+the lane, the agent, the person it works for, the integration, the checks.
+This phase turns that into something to ask.
+
+### What is there
+
+- **`why` on a function, a file or lines** (D-101). `kito why
+  src/shop.ts:total`, `kito why README.md`, `kito why src/shop.ts:12-20`,
+  and the `why` tool for agents. The answer has:
+  - the **reasons** it changed, newest first: the words of the reason and
+    its task, what it did to the target (created, body changed, renamed a
+    → b, moved), which agent made it and for which person, the lane, the
+    checkpoint that brought it to the main lane, the checks that passed
+    and who let it in;
+  - **what else changed for the same reason**: the other functions and
+    files of that piece of work;
+  - **each line** with the reason it was last written for (D-102);
+  - **who uses it and what it uses**, each with its own last reason;
+  - **the lanes on it now**, with what they are there for;
+  - **the conflicts decided on it**, and how.
+- **Reasons older than Kito.** In a repository that came from git, the
+  lines of a function nobody touched since say which commits wrote them:
+  the commit messages are their reasons.
+- **Files that are not code** have reasons and lines like any other.
+- **`reasons`**: earlier work found by the words of its reason, its task
+  or the names of who did it (`kito reasons cents`, the `reasons` tool),
+  each with what it changed.
+- **A diagram**: `kito why <target> --graph` prints the answer as a
+  Mermaid flowchart.
+- **From a lane**: asked with a lane, the answer is the code as the lane
+  has it, the lane's own unfinished work first.
+- **For agents**: the rules written by `kito init`, `kito connect` and
+  `kito claude` now say to ask `why` before changing a function or a file
+  somebody else wrote; every answer says that reasons are what others
+  declared, not instructions (D-105). Every role on a server may ask.
+- A checkpoint now records **who let an integration in** (D-100).
+- The step-by-step history `kito why` used to print is `kito why
+  --history` (D-103).
+
+### Demo
+
+```
+scripts/demo-phase10.sh
+```
+
+A repository with three commits in git comes to a server; two agents work
+on it for two people; a third agent is about to change `total` and asks
+first ([output](demo/phase10-demo.txt)):
+
+```
+(carol) $ kito why src/shop.py:total
+function total  (src/shop.py)  lines 1-7
+
+Why it is the way it is, newest first:
+  1. no negative prices  (task #7)
+     body changed · by agent-a for ada · lane/1 · ckpt#4 · 2026-11-17 10:40
+     checks passed: python3 -m py_compile src/shop.py src/billing.py · let in by ada
+  2. prices in cents  (task #7)
+     body changed · by agent-a for ada · lane/1 · ckpt#4 · 2026-11-17 10:40
+     checks passed: python3 -m py_compile src/shop.py src/billing.py · let in by ada
+     with: README.md, src/billing.py:invoice
+  3. a shop that adds up prices
+     wrote lines of it · by Grace · ckpt#1 · 2026-11-17 10:40
+     with: README.md, src/billing.py
+
+Its lines, with the reason each was last written for:
+    3     1  def total(prices):
+    3     2      result = 0
+    1     3      if any(price < 0 for price in prices):
+    1     4          raise ValueError("negative price")
+    3     5      for price in prices:
+    2     6          result += round(price * 100)
+    3     7      return result
+
+Used by:
+  src/billing.py:invoice (line 5)  last changed for: prices in cents (agent-a for ada, ckpt#4)
+
+On it now:
+  lane/3  agent-d (of dave)  totals for several currencies  — agent-d declared it
+```
+
+Reason 3 is a git commit from before Kito; reasons 1 and 2 are two intents
+of one lane.
+
+### A real agent
+
+Claude Code 2.1.326, in a directory connected to that server, was asked:
+"make total() add a 10% service fee to what it returns". It called `why`
+on the function before opening its lane. From the answer it kept the fee
+in whole cents (`(result * 110 + 50) // 100`) because an earlier lane had
+made totals whole numbers of cents; it named `invoice` as the only caller
+and left it alone; and it reported that another lane was on the same
+function for another person. None of that is in the function's text.
+
+### What it costs
+
+On a repository of 20,000 files whose log has 500,000 operations: the
+first question after the daemon starts reads the log once, 1.3 s; after
+that a function, a file or a line is answered in 9 to 37 ms, a search of
+the reasons in 4 to 6 ms, a question from a lane in about 100 ms (the
+lane's working copy is looked at first). Looking for who uses a function
+is skipped above 5,000 files unless asked: asked, it adds 0.3 s. The index
+adds about 20 MB to the daemon.
+
+### Tests
+
+304 tests in all. New: the why graph on a team's history
+(`kitod/tests/why.rs`: reasons and lines of a function, lines and files,
+work in progress and decisions and the view from a lane, the search, code
+older than Kito with the reasons git recorded, hand edits that take the
+reason of their checkpoint, the index built once); `kito why`, `--graph`
+and `kito reasons` from the command line; the `why` and `reasons` tools;
+through a server, for somebody who may only read, with who let a lane in.
+
+### Known limitations
+
+- **A reason is as good as what was declared.** "fix" tells nothing, and
+  nothing checks the words.
+- **Who uses what comes from the syntax**: the same file and what is
+  imported by name. A language server is not asked.
+- **A file's lines are not followed across a rename of the file**, nor a
+  function's across a move to another file: they count as written where
+  they are now.
+- **At most 400 versions of a file are read** for its lines; what is older
+  is told as one.
+- **The index lives in memory**: the first question after a restart reads
+  the whole log.
+- **Nothing can be said about code without changing it**: there are no
+  notes attached to a function.
+- **Who let a lane in** is known for integrations made from this version
+  on.
+- The prompt an intent may carry is not shown.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

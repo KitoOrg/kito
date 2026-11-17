@@ -233,6 +233,7 @@ impl Repo {
                         created_by: self.main.author.clone(),
                         verification: None,
                         git_commit: None,
+                        approved_by: None,
                     };
                     self.store.put_checkpoint(&checkpoint)?;
                     if self.config.git.export_on_checkpoint {

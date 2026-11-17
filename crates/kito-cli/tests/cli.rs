@@ -343,7 +343,7 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
     ok(root, &["sync"]);
 
     // Asked by the name and the place it has today, from a subdirectory.
-    let why = ok(&root.join("src"), &["why", "users.ts:fetchUser"]);
+    let why = ok(&root.join("src"), &["why", "--history", "users.ts:fetchUser"]);
     let lines: Vec<&str> = why.lines().collect();
     assert_eq!(lines.len(), 5, "{why}");
     assert!(lines[0].starts_with("function fetchUser  (src/users.ts)  symbol "), "{why}");
@@ -356,13 +356,13 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
         assert!(line.contains("ada") && line.ends_with(what), "{why}");
     }
 
-    let histories = json(root, &["why", "src/users.ts:fetchUser", "--json"]);
+    let histories = json(root, &["why", "--history", "src/users.ts:fetchUser", "--json"]);
     assert_eq!(histories.as_array().unwrap().len(), 1);
     assert_eq!(histories[0]["steps"].as_array().unwrap().len(), 4);
     assert_eq!(histories[0]["name"], "fetchUser");
     let id = histories[0]["id"].as_str().unwrap().to_owned();
     // The method was never touched: one step, and a different symbol.
-    let method = json(root, &["why", "src/auth.ts:Session.isValid", "--json"]);
+    let method = json(root, &["why", "--history", "src/auth.ts:Session.isValid", "--json"]);
     assert_eq!(method[0]["steps"].as_array().unwrap().len(), 1);
     assert_ne!(method[0]["id"], id);
 
@@ -376,14 +376,14 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
     assert_eq!(json(root, &["status", "--json"])["repo"]["symbols"], 3);
 
     // Where it no longer is, and what does not exist.
-    let gone = kito(root, &["why", "src/auth.ts:fetchUser"]);
+    let gone = kito(root, &["why", "--history", "src/auth.ts:fetchUser"]);
     assert!(!gone.status.success());
     let message = String::from_utf8_lossy(&gone.stderr).into_owned();
     assert!(
         message.contains("no symbol named `fetchUser`") && message.contains("Session.isValid"),
         "{message}"
     );
-    let malformed = kito(root, &["why", "fetchUser"]);
+    let malformed = kito(root, &["why", "--history", "fetchUser"]);
     assert!(!malformed.status.success());
     ok(root, &["daemon", "stop"]);
 }
@@ -456,7 +456,9 @@ fn lanes_integration_and_conflicts_from_the_command_line() {
     assert!(log.contains("src/shop.ts") && log.contains("discount changed"), "{log}");
     let log = ok(root, &["log", "-v", "lane/1"]);
     assert!(log.contains("TextEdit") && log.contains("`discount` body changed"), "{log}");
-    assert!(ok(root, &["why", "src/shop.ts:discount", "--lane", "lane/1"]).contains("body changed"));
+    assert!(
+        ok(root, &["why", "--history", "src/shop.ts:discount", "--lane", "lane/1"]).contains("body changed")
+    );
 
     // Alice goes in. Meanwhile the main lane changes the line Bob changed.
     let done = ok(root, &["integrate", "lane/1"]);
@@ -509,7 +511,9 @@ fn lanes_integration_and_conflicts_from_the_command_line() {
     // An explicit rename on the main lane, and a lane that closes.
     let renamed = ok(root, &["rename", "src/shop.ts:total", "grandTotal"]);
     assert!(renamed.contains("`total` is now `grandTotal` in src/shop.ts"), "{renamed}");
-    assert!(ok(root, &["why", "src/shop.ts:grandTotal"]).contains("renamed `total` → `grandTotal`"));
+    assert!(
+        ok(root, &["why", "--history", "src/shop.ts:grandTotal"]).contains("renamed `total` → `grandTotal`")
+    );
     assert!(ok(root, &["lane", "close", "lane/1"]).contains("lane/1 closed"));
     assert!(!alice_dir.exists());
     let all = ok(root, &["lanes", "--all"]);
@@ -721,6 +725,133 @@ fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
     assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Shop, in cents\n");
     let scope = json(root, &["lane", "scope", "lane/2", "--json"]);
     assert_eq!(scope["scope"], serde_json::json!(["src/shop.py:total", "README.md"]));
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
+fn why_tells_the_reasons_of_code_and_reasons_are_found_by_their_words() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = (amount * percent) / 100;\n  return amount - cut;\n}\n";
+    let billing = "import { total } from \"./shop\";\n\nexport function invoice(prices: number[]): string {\n  return \"to pay: \" + total(prices);\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    fs::write(root.join("src/billing.ts"), billing).unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+
+    // Alice's agent puts the prices in cents, then refuses negative ones:
+    // two reasons in one lane, for one task.
+    ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "alice",
+            "--intent",
+            "prices in cents",
+            "--task",
+            "task #7",
+            "--scope",
+            "src/shop.ts:total",
+            "src/billing.ts",
+        ],
+    );
+    let work = root.join(".kito/lanes/1/work");
+    fs::write(work.join("src/shop.ts"), shop.replace("sum += price;", "sum += Math.round(price * 100);"))
+        .unwrap();
+    fs::write(work.join("src/billing.ts"), billing.replace("total(prices)", "total(prices) / 100")).unwrap();
+    ok(root, &["sync", "1"]);
+    ok(root, &["intent", "no negative prices", "--lane", "1"]);
+    let now = fs::read_to_string(work.join("src/shop.ts")).unwrap();
+    let guarded = now.replace(
+        "  let sum = 0;",
+        "  let sum = 0;\n  if (prices.some((p) => p < 0)) throw new Error(\"negative\");",
+    );
+    fs::write(work.join("src/shop.ts"), guarded).unwrap();
+    assert!(ok(root, &["integrate", "1"]).contains("integrated as ckpt#2"));
+    ok(root, &["lane", "close", "1"]);
+    // Carol's agent is on the same function now.
+    ok(root, &["lane", "open", "carol", "--intent", "taxes on top", "--scope", "src/shop.ts:total"]);
+
+    let why = ok(root, &["why", "src/shop.ts:total"]);
+    assert!(why.starts_with("function total  (src/shop.ts)  lines 1-8\n"), "{why}");
+    assert!(why.contains("Why it is the way it is, newest first:"), "{why}");
+    assert!(
+        why.contains(
+            "  1. no negative prices  (task #7)\n     body changed · by alice for ada · lane/1 · ckpt#2 · "
+        ),
+        "{why}"
+    );
+    assert!(why.contains("  2. prices in cents  (task #7)\n"), "{why}");
+    assert!(why.contains("     with: src/billing.ts:invoice\n"), "{why}");
+    assert!(why.contains("  3. first version\n     created · by ada · ckpt#1 · "), "{why}");
+    // Each line with the number of its reason.
+    assert!(why.contains("    3     1  export function total(prices: number[]): number {\n"), "{why}");
+    assert!(
+        why.contains("    1     3    if (prices.some((p) => p < 0)) throw new Error(\"negative\");\n"),
+        "{why}"
+    );
+    assert!(why.contains("    2     5      sum += Math.round(price * 100);\n"), "{why}");
+    assert!(why.contains("Used by:\n  src/billing.ts:invoice (line 4)  last changed for: prices in cents (alice for ada, ckpt#2)\n"), "{why}");
+    assert!(
+        why.contains("On it now:\n  lane/2  carol (of ada)  taxes on top  — carol declared it\n"),
+        "{why}"
+    );
+
+    // A line says which function it is in; a file, what it contains; from
+    // a directory inside the repository, paths are the ones typed there.
+    let line = ok(root, &["why", "src/shop.ts:11"]);
+    assert!(line.starts_with("function discount  (src/shop.ts)  lines 10-13\n"), "{line}");
+    assert!(
+        line.contains("    1    11    const cut = (amount * percent) / 100;\n")
+            && !line.contains("    1    10  "),
+        "{line}"
+    );
+    let file = ok(&root.join("src"), &["why", "billing.ts"]);
+    assert!(file.starts_with("file src/billing.ts\n"), "{file}");
+    assert!(
+        file.contains("  1. prices in cents  (task #7)\n     changed · by alice for ada · lane/1 · ckpt#2"),
+        "{file}"
+    );
+    assert!(
+        file.contains("It contains:\n  src/billing.ts:invoice (line 3)  last changed for: prices in cents"),
+        "{file}"
+    );
+
+    // As JSON, for tools; as a diagram, for people.
+    let answer = json(root, &["why", "src/shop.ts:total", "--json"]);
+    assert_eq!(answer["reasons"][1]["with"], serde_json::json!(["src/billing.ts:invoice"]));
+    assert_eq!(answer["in_progress"][0]["lane"], "lane/2");
+    let graph = ok(root, &["why", "src/shop.ts:total", "--graph"]);
+    assert!(graph.starts_with("flowchart LR\n  n0[\"src/shop.ts:total\"]\n"), "{graph}");
+    assert!(
+        graph.contains("([\"prices in cents<br/>alice for ada · ckpt#2\"])")
+            && graph.contains("-->|body changed| n0"),
+        "{graph}"
+    );
+    assert!(
+        graph.contains("-.->|uses| n0") && graph.contains("{{\"lane/2 carol: taxes on top\"}}"),
+        "{graph}"
+    );
+
+    // Earlier work, by the words of its reason.
+    let found = ok(root, &["reasons", "cents"]);
+    assert!(
+        found.starts_with("prices in cents  (task #7)\n  by alice for ada · lane/1 · ckpt#2 · "),
+        "{found}"
+    );
+    assert!(found.contains("  changed: src/billing.ts:invoice, src/shop.ts:total\n"), "{found}");
+    assert_eq!(ok(root, &["reasons", "task", "#7"]).matches("task #7").count(), 2);
+    assert!(ok(root, &["reasons", "nothing", "like", "this"]).contains("No reason has those words."));
+    // A lane that has changed nothing yet has given no reason for any code.
+    assert_eq!(ok(root, &["reasons", "-n", "1"]).lines().next(), Some("no negative prices  (task #7)"));
+
+    // What cannot be answered says why.
+    let missing = kito(root, &["why", "src/shop.ts:nothing"]);
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("the file has: discount, total"));
     ok(root, &["daemon", "stop"]);
 }
 

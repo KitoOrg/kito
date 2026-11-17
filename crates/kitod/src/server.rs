@@ -90,9 +90,10 @@ struct Daemon {
     events: Events,
     /// Which copy on another machine writes in each lane: one at a time.
     writers: Mutex<std::collections::BTreeMap<LaneId, String>>,
-    /// Integration requests made by people who may not integrate: the
-    /// merge and the checks are done, and the lane then waits.
-    holds: Mutex<std::collections::BTreeMap<JobId, kito_core::Author>>,
+    /// Who asked for each integration, when a server said so, and whether
+    /// they may integrate. For one who may not, the merge and the checks
+    /// are done and the lane then waits.
+    holds: Mutex<std::collections::BTreeMap<JobId, (kito_core::Author, bool)>>,
     /// Told when a new checkpoint may have to go to the git remote.
     push_wanted: Notify,
 }
@@ -371,6 +372,21 @@ impl Daemon {
                         .map_err(internal)?;
                     to_json(serde_json::to_value(items))
                 }
+                "why_graph" => {
+                    let lane = lane_or_main()?;
+                    let target = text("target")?;
+                    let uses = params.get("uses").and_then(Value::as_bool).unwrap_or(false);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.why_graph(lane, target, uses)).map_err(internal)?,
+                    ))
+                }
+                "reasons" => {
+                    let about = optional("about").unwrap_or_default();
+                    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.reasons(&about, limit)).map_err(internal)?,
+                    ))
+                }
                 "checkpoint" => {
                     let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
@@ -626,14 +642,11 @@ impl Daemon {
                     owned(lane)?;
                     // Asked by somebody who may not integrate, the merge
                     // and the checks are done and the lane then waits.
-                    let hold = match integrates(params) {
-                        true => None,
-                        false => params.get("on_behalf_of").and_then(person_of),
-                    };
+                    let asker = params.get("on_behalf_of").and_then(person_of);
                     let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
                     let job = self.queue.submit(lane);
-                    if let Some(person) = hold {
-                        holds.insert(job, person);
+                    if let Some(person) = asker {
+                        holds.insert(job, (person, integrates(params)));
                     }
                     Ok(json!({ "job": job.to_string(), "lane": lane.to_string() }))
                 }
@@ -979,7 +992,18 @@ async fn rescan_loop(daemon: Arc<Daemon>) {
 
 /// One integration, in its three steps. The repository is held only while
 /// merging and while recording: the verification runs with it free.
-async fn integrate(daemon: &Arc<Daemon>, lane: LaneId, hold: Option<kito_core::Author>) -> IntegrationResult {
+async fn integrate(
+    daemon: &Arc<Daemon>,
+    lane: LaneId,
+    asker: Option<(kito_core::Author, bool)>,
+) -> IntegrationResult {
+    // Who may not integrate has the lane held; who may is named as the
+    // one who let it in.
+    let (hold, approver) = match asker {
+        Some((person, true)) => (None, Some(person)),
+        Some((person, false)) => (Some(person), None),
+        None => (None, None),
+    };
     let failed = |message: String| IntegrationResult::failed(lane.to_string(), message);
     let mut answers: Option<crate::refs::RefAnswers> = None;
     for _ in 0..6 {
@@ -1013,9 +1037,9 @@ async fn integrate(daemon: &Arc<Daemon>, lane: LaneId, hold: Option<kito_core::A
             Some((dir, commands, timeout)) => Some(kito_integrate::verify(&dir, &commands, timeout).await),
             None => None,
         };
-        let (worker, held) = (daemon.clone(), hold.clone());
+        let (worker, held, approved_by) = (daemon.clone(), hold.clone(), approver.clone());
         let finished = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| repo.finish_integration_for(*prepared, report, held))
+            worker.with_repo(|repo| repo.finish_integration_for(*prepared, report, held, approved_by))
         })
         .await;
         match finished {

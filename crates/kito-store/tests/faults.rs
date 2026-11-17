@@ -160,6 +160,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
             created_by: Author::human("fra"),
             verification: None,
             git_commit: None,
+            approved_by: None,
         };
         store.put_checkpoint(&checkpoint).unwrap();
         store
@@ -238,6 +239,7 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
         created_by: Author::human("fra"),
         verification: None,
         git_commit: None,
+        approved_by: None,
     };
     store.put_checkpoint(&ck).unwrap();
     store.close().unwrap();

@@ -53,7 +53,7 @@ pub struct Renamed {
 /// A state of the repository that can be asked about when the repository is
 /// no longer held: the files of the main directory, and what this state has
 /// that differs from them.
-struct Frozen {
+pub(crate) struct Frozen {
     root: PathBuf,
     tree: Tree,
     symbols: SymbolTable,
@@ -70,7 +70,7 @@ impl Files for Frozen {
 }
 
 impl Frozen {
-    fn snapshot(&self) -> Snapshot<'_> {
+    pub(crate) fn snapshot(&self) -> Snapshot<'_> {
         Snapshot {
             root: &self.root,
             tree: &self.tree,
@@ -220,7 +220,7 @@ fn line_of(content: &[u8], at: usize) -> (usize, usize, usize) {
 
 impl Repo {
     /// A state of the repository, for the providers.
-    fn frozen(&self, tree: &Tree, symbols: &SymbolTable) -> Result<Frozen> {
+    pub(crate) fn frozen(&self, tree: &Tree, symbols: &SymbolTable) -> Result<Frozen> {
         let mut overlay = BTreeMap::new();
         for path in tree.differences(&self.main.tree) {
             let content = match tree.get(path) {

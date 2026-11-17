@@ -65,7 +65,7 @@ $ kito log -n 2
       ↳ renamed `getUser` → `fetchUser`  (src/auth.ts)
       ↳ `profile` body changed (+1 −1)
 
-$ kito why src/auth.ts:fetchUser
+$ kito why --history src/auth.ts:fetchUser
 function fetchUser  (src/auth.ts)  symbol 0#0
   2026-11-14 19:16:10  francesco  function `getUser` created in src/auth.ts
   2026-11-14 19:16:11  alice      renamed `getUser` → `fetchUser`, on lane/1

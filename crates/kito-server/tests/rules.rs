@@ -328,6 +328,27 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
     let log = git_out(&world.main(), &["log", "-1", "--format=%an"]);
     assert_eq!(log.trim(), "builder");
 
+    // Why the function is the way it is, asked by somebody who may only
+    // read: the reason bob's agent gave, for whom it worked, the checkpoint,
+    // and who let it in.
+    let why = call(&carol, "why_graph", json!({ "target": "src/shop.ts:total" }));
+    let reason = &why["reasons"][0];
+    assert_eq!(reason["why"], "work from here", "{why}");
+    assert_eq!((reason["by"].as_str(), reason["for"].as_str()), (Some("builder"), Some("bob")));
+    assert_eq!(
+        (reason["checkpoint"].as_str(), reason["approved_by"].as_str()),
+        (Some("ckpt#2"), Some("ada"))
+    );
+    let found = call(&carol, "reasons", json!({ "about": "bob" }));
+    assert_eq!(found[0]["changed"], json!(["src/shop.ts:total"]));
+    // From his own machine bob asks about his lane as it is, a save he
+    // just made included.
+    write(&work, "src/shop.ts", &read(&work, "src/shop.ts").replace("// cents", "// in cents"));
+    let mine = call(&bob, "why_graph", json!({ "target": "src/shop.ts:total", "lane": "1" }));
+    assert_eq!(mine["reasons"][0]["checkpoint"], Value::Null, "{mine}");
+    assert_eq!(mine["reasons"].as_array().unwrap().len(), why["reasons"].as_array().unwrap().len() + 1);
+    write(&work, "src/shop.ts", &read(&work, "src/shop.ts").replace("// in cents", "// cents"));
+
     // What a person may do can change, for one repository too: it holds
     // for the connections made from then on.
     ok(&world.dir, &["user", "role", "bob", "integrate", "--repo", "shop"]);

@@ -48,6 +48,8 @@ const REPEATABLE: &[&str] = &[
     "sync",
     "set_intent",
     "extend_scope",
+    "why_graph",
+    "reasons",
 ];
 
 /// A connection left alone this long is checked before it is trusted with

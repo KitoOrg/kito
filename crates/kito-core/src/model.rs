@@ -535,4 +535,7 @@ pub struct Checkpoint {
     /// after the export
     #[serde(with = "crate::serde_helpers::opt_oid20")]
     pub git_commit: Option<[u8; 20]>,
+    /// The person who let an integration in, when a server knew who asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<Author>,
 }

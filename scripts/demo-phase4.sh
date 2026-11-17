@@ -120,7 +120,7 @@ if command -v typescript-language-server > /dev/null; then
   run kito integrate lane/2
   run cat src/billing.ts
   run kito log -n 2
-  run kito why src/auth.ts:fetchUser
+  run kito why --history src/auth.ts:fetchUser
   run git log --oneline
   kito daemon stop > /dev/null
 else

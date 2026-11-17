@@ -329,6 +329,7 @@ fn checkpoints_are_durable_and_updatable() {
         created_by: Author::human("fra"),
         verification: None,
         git_commit: None,
+        approved_by: None,
     };
     // put_checkpoint confirms the appended ops on its own.
     store.put_checkpoint(&ck).unwrap();
@@ -429,6 +430,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         created_by: Author::human("fra"),
         verification: None,
         git_commit: None,
+        approved_by: None,
     };
     store.put_checkpoint(&checkpoint).unwrap();
 

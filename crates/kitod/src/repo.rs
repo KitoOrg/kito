@@ -551,6 +551,9 @@ pub struct Repo {
     /// The last checkpoint pushed to the git remote, and why the last push
     /// failed.
     pub(crate) pushed: (Option<String>, Option<String>),
+    /// From reasons to what they touched: built when somebody first asks
+    /// why, kept up to date from then on.
+    pub(crate) why_index: Option<crate::why::WhyIndex>,
     /// What was recorded since somebody last asked: for whoever tells the
     /// clients that watch the repository.
     pub(crate) recorded: Vec<Op>,
@@ -636,6 +639,7 @@ impl Repo {
             refused: Vec::new(),
             refusals: (0, None),
             pushed: (None, None),
+            why_index: None,
             recorded: Vec::new(),
         };
         repo.load_state()?;
@@ -1259,7 +1263,12 @@ impl Repo {
             }
             work.tree.apply(&op.kind)?;
             work.symbols.apply(&op.kind)?;
-            self.store.append_op(&op)?;
+            // An op the store has already is not recorded twice, nor counted.
+            if self.store.append_op(&op)? {
+                if let Some(index) = &mut self.why_index {
+                    index.add(&op);
+                }
+            }
             work.head = Some(op.id);
             work.ops += 1;
             ops.push(op);
@@ -1342,6 +1351,7 @@ impl Repo {
             created_by: self.main.author.clone(),
             verification: None,
             git_commit: None,
+            approved_by: None,
         };
         self.store.put_checkpoint(&checkpoint)?;
         self.save_state()?;

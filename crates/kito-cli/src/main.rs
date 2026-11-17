@@ -117,13 +117,35 @@ enum Cmd {
         #[arg(long)]
         global: bool,
     },
-    /// Show the history of a symbol, across renames and moves
+    /// Why a function, a file or some lines are the way they are: the
+    /// reasons they changed, what changed with them, who uses them, who is
+    /// on them now
     Why {
-        /// <file>:<symbol>, for example src/auth.ts:getUser or src/auth.ts:Session.refresh
+        /// <file>:<function> (src/auth.ts:getUser, src/auth.ts:Session.refresh),
+        /// a file, or lines: <file>:<line> or <file>:<line>-<line>
         target: String,
-        /// As this lane knows the symbol (default: the main lane)
+        /// As this lane has it, its own changes included (default: the main lane)
         #[arg(long, value_name = "LANE")]
         lane: Option<String>,
+        /// Every step in the life of a symbol, one by one, across renames
+        /// and moves
+        #[arg(long)]
+        history: bool,
+        /// The answer as a diagram (Mermaid), to paste where diagrams are drawn
+        #[arg(long, conflicts_with = "history")]
+        graph: bool,
+        /// Look for who uses it also in a repository with thousands of files
+        #[arg(long)]
+        uses: bool,
+    },
+    /// Find earlier work by the words of its reason
+    Reasons {
+        /// Words that must all be in the reason, its task, or the names of
+        /// who did it (none: the latest reasons)
+        words: Vec<String>,
+        /// How many at most
+        #[arg(short = 'n', long, default_value_t = 20, value_name = "N")]
+        limit: usize,
     },
     /// Wait until every save has been recorded
     Sync {
@@ -488,7 +510,284 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
     Ok(())
 }
 
-fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>) -> Outcome {
+/// Who did something, and for whom: `alice for ada`.
+fn by_for(value: &Value) -> String {
+    let by = value["by"].as_str().unwrap_or_default();
+    match value["for"].as_str() {
+        Some(person) if person != by => format!("{by} for {person}"),
+        _ => by.to_owned(),
+    }
+}
+
+/// The last reason of a neighbour, after its name.
+fn last_reason(neighbour: &Value) -> String {
+    let last = &neighbour["last"];
+    match last["why"].as_str() {
+        Some(why) => {
+            let checkpoint = last["checkpoint"].as_str().map(|ck| format!(", {ck}")).unwrap_or_default();
+            format!("  last changed for: {why} ({}{checkpoint})", by_for(last))
+        }
+        None => String::new(),
+    }
+}
+
+/// The answer to `why` as a Mermaid diagram: the target, the reasons that
+/// changed it and what changed with them, who uses it, who is on it now.
+fn mermaid(answer: &Value) -> String {
+    let clean = |text: &str| text.replace('"', "'").replace('\n', " ");
+    let mut out = String::from("flowchart LR\n");
+    let mut nodes: Vec<String> = Vec::new();
+    // One node for each thing, however many times it is named.
+    let mut node = |out: &mut String, label: &str, open: &str, close: &str| -> String {
+        let at = nodes.iter().position(|known| known == label).unwrap_or_else(|| {
+            nodes.push(label.to_owned());
+            out.push_str(&format!("  n{}{open}\"{}\"{close}\n", nodes.len() - 1, clean(label)));
+            nodes.len() - 1
+        });
+        format!("n{at}")
+    };
+    let target = &answer["target"];
+    let name = match target["name"].as_str() {
+        Some(name) => format!("{}:{name}", target["file"].as_str().unwrap_or_default()),
+        None => target["file"].as_str().unwrap_or_default().to_owned(),
+    };
+    let me = node(&mut out, &name, "[", "]");
+    for reason in answer["reasons"].as_array().into_iter().flatten() {
+        let checkpoint = reason["checkpoint"].as_str().map(|ck| format!(" · {ck}")).unwrap_or_default();
+        let label =
+            format!("{}<br/>{}{checkpoint}", reason["why"].as_str().unwrap_or_default(), by_for(reason));
+        let why = node(&mut out, &label, "([", "])");
+        out.push_str(&format!("  {why} -->|{}| {me}\n", clean(&strings(&reason["how"]).join(", "))));
+        for other in strings(&reason["with"]) {
+            let other = node(&mut out, other, "[", "]");
+            out.push_str(&format!("  {why} --> {other}\n"));
+        }
+    }
+    for user in answer["used_by"].as_array().into_iter().flatten() {
+        let user = node(&mut out, user["symbol"].as_str().unwrap_or_default(), "[", "]");
+        out.push_str(&format!("  {user} -.->|uses| {me}\n"));
+    }
+    for used in answer["uses"].as_array().into_iter().flatten() {
+        let used = node(&mut out, used["symbol"].as_str().unwrap_or_default(), "[", "]");
+        out.push_str(&format!("  {me} -.->|uses| {used}\n"));
+    }
+    for lane in answer["in_progress"].as_array().into_iter().flatten() {
+        let label = format!(
+            "{} {}: {}",
+            lane["lane"].as_str().unwrap_or_default(),
+            lane["agent"].as_str().unwrap_or_default(),
+            lane["intent"].as_str().unwrap_or_default()
+        );
+        let lane = node(&mut out, &label, "{{", "}}");
+        out.push_str(&format!("  {lane} -.->|on it now| {me}\n"));
+    }
+    out
+}
+
+/// A target as the daemon reads it: the file as the repository names it.
+fn why_target(root: &Path, target: &str, lane: &Option<String>) -> Result<String, String> {
+    let (file, rest) =
+        match target.split_once(':').filter(|(file, rest)| !file.is_empty() && !rest.is_empty()) {
+            Some((file, rest)) => (file, Some(rest)),
+            None => (target, None),
+        };
+    // In a lane, files are named as the lane's working copy has them.
+    let file = match lane {
+        Some(_) => PathBuf::from(file),
+        None => repo_relative(root, Path::new(file))?,
+    };
+    Ok(match rest {
+        Some(rest) => format!("{}:{rest}", file.display()),
+        None => file.display().to_string(),
+    })
+}
+
+fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>, graph: bool, uses: bool) -> Outcome {
+    let root = root_of(cli)?;
+    let target = why_target(&root, target, lane)?;
+    let mut client = daemon(cli)?;
+    let mut params = json!({ "target": target, "uses": uses });
+    if let Some(lane) = lane {
+        params["lane"] = json!(lane);
+    }
+    let answer: Value = client.call("why_graph", params).map_err(fail)?;
+    if cli.json {
+        print_json(&answer);
+        return Ok(());
+    }
+    if graph {
+        print!("{}", mermaid(&answer));
+        return Ok(());
+    }
+    let about = &answer["target"];
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
+    let lines = match (about["lines"][0].as_u64(), about["lines"][1].as_u64()) {
+        (Some(from), Some(to)) if from != to => format!("  lines {from}-{to}"),
+        (Some(from), _) => format!("  line {from}"),
+        _ => String::new(),
+    };
+    match about["name"].as_str() {
+        Some(name) => println!("{} {name}  ({}){lines}", text(about, "kind"), text(about, "file")),
+        None => println!("file {}", text(about, "file")),
+    }
+
+    let reasons = answer["reasons"].as_array().cloned().unwrap_or_default();
+    println!();
+    match reasons.is_empty() {
+        true => println!("No reason is recorded for it."),
+        false => println!("Why it is the way it is, newest first:"),
+    }
+    for (index, reason) in reasons.iter().enumerate() {
+        let task = reason["task"].as_str().map(|task| format!("  ({task})")).unwrap_or_default();
+        println!("  {}. {}{task}", index + 1, text(reason, "why"));
+        let mut facts = vec![strings(&reason["how"]).join(", "), format!("by {}", by_for(reason))];
+        facts.extend(reason["lane"].as_str().map(str::to_owned));
+        match reason["checkpoint"].as_str() {
+            Some(checkpoint) => facts.push(checkpoint.to_owned()),
+            None => facts.push("not on the main lane yet".to_owned()),
+        }
+        facts.push(utc(reason["at_ms"].as_u64().unwrap_or(0)).chars().take(16).collect());
+        println!("     {}", facts.join(" · "));
+        let checks = strings(&reason["checks"]);
+        let approved = reason["approved_by"].as_str().map(|person| format!("let in by {person}"));
+        let passed = (!checks.is_empty()).then(|| format!("checks passed: {}", checks.join("; ")));
+        let said: Vec<String> = passed.into_iter().chain(approved).collect();
+        if !said.is_empty() {
+            println!("     {}", said.join(" · "));
+        }
+        let with = strings(&reason["with"]);
+        if !with.is_empty() {
+            let more = match reason["with_more"].as_u64() {
+                Some(more) if more > 0 => format!(" and {more} more"),
+                _ => String::new(),
+            };
+            println!("     with: {}{more}", with.join(", "));
+        }
+    }
+
+    // Its lines, each with the number of the reason it was last written for.
+    let runs = answer["lines"].as_array().cloned().unwrap_or_default();
+    if !runs.is_empty() {
+        let file = PathBuf::from(text(about, "file"));
+        let place = match lane {
+            None => Some(root.clone()),
+            Some(lane) => client
+                .call::<Value>("lane_status", json!({ "lane": lane }))
+                .ok()
+                .and_then(|status| status["workdir"].as_str().map(PathBuf::from)),
+        };
+        let source = place.and_then(|dir| std::fs::read_to_string(dir.join(&file)).ok());
+        let code: Vec<&str> = source.as_deref().map(|text| text.lines().collect()).unwrap_or_default();
+        println!();
+        println!("Its lines, with the reason each was last written for:");
+        for run in &runs {
+            let (from, to) = (run["from"].as_u64().unwrap_or(0), run["to"].as_u64().unwrap_or(0));
+            let reason = run["reason"].as_u64().map_or("  ?".to_owned(), |index| format!("{:>3}", index + 1));
+            match code.is_empty() {
+                true => println!("  {reason}  {from}-{to}"),
+                false => (from..=to).for_each(|line| {
+                    let text = code.get(line as usize - 1).copied().unwrap_or_default();
+                    println!("  {reason}  {line:>4}  {text}");
+                }),
+            }
+        }
+    }
+
+    let listed = |title: &str, key: &str| {
+        let items = answer[key].as_array().cloned().unwrap_or_default();
+        if !items.is_empty() {
+            println!();
+            println!("{title}");
+        }
+        for item in &items {
+            let line = item["line"].as_u64().map(|line| format!(" (line {line})")).unwrap_or_default();
+            println!("  {}{line}{}", text(item, "symbol"), last_reason(item));
+        }
+    };
+    listed("Used by:", "used_by");
+    listed("Uses:", "uses");
+    listed("It contains:", "contains");
+
+    let lanes = answer["in_progress"].as_array().cloned().unwrap_or_default();
+    if !lanes.is_empty() {
+        println!();
+        println!("On it now:");
+    }
+    for lane in &lanes {
+        let whose = match lane["for"].as_str() {
+            Some(person) if person != text(lane, "agent") => format!(" (of {person})"),
+            _ => String::new(),
+        };
+        println!(
+            "  {}  {}{whose}  {}  — {}",
+            text(lane, "lane"),
+            text(lane, "agent"),
+            text(lane, "intent"),
+            text(lane, "how")
+        );
+    }
+    let decisions = answer["decisions"].as_array().cloned().unwrap_or_default();
+    if !decisions.is_empty() {
+        println!();
+        println!("Decided:");
+    }
+    for decision in &decisions {
+        let decided = match decision["decided"].as_str() {
+            Some("main") => "kept what the main lane had".to_owned(),
+            Some("lane") => "kept what the lane had".to_owned(),
+            Some("text") => "a text written for the occasion".to_owned(),
+            Some(other) => other.to_owned(),
+            None => "not decided yet".to_owned(),
+        };
+        println!(
+            "  {} ({}) with {}: {decided}",
+            text(decision, "conflict"),
+            text(decision, "kind"),
+            text(decision, "lane")
+        );
+    }
+    for note in strings(&answer["notes"]) {
+        println!();
+        println!("Note: {note}");
+    }
+    Ok(())
+}
+
+fn cmd_reasons(cli: &Cli, words: &[String], limit: usize) -> Outcome {
+    let hits: Value =
+        daemon(cli)?.call("reasons", json!({ "about": words.join(" "), "limit": limit })).map_err(fail)?;
+    if cli.json {
+        print_json(&hits);
+        return Ok(());
+    }
+    let hits = hits.as_array().cloned().unwrap_or_default();
+    if hits.is_empty() {
+        println!("No reason has those words.");
+    }
+    for hit in &hits {
+        let text = |key: &str| hit[key].as_str().unwrap_or_default().to_owned();
+        let task = hit["task"].as_str().map(|task| format!("  ({task})")).unwrap_or_default();
+        println!("{}{task}", text("why"));
+        let by = strings(&hit["by"]).join(", ");
+        let who = match hit["for"].as_str() {
+            Some(person) if person != by => format!("{by} for {person}"),
+            _ => by,
+        };
+        let mut facts = vec![format!("by {who}")];
+        facts.extend(hit["lane"].as_str().map(str::to_owned));
+        facts.push(hit["checkpoint"].as_str().map_or("not on the main lane yet".to_owned(), str::to_owned));
+        facts.push(utc(hit["at_ms"].as_u64().unwrap_or(0)).chars().take(16).collect());
+        println!("  {}", facts.join(" · "));
+        let more = match hit["changed_more"].as_u64() {
+            Some(more) if more > 0 => format!(" and {more} more"),
+            _ => String::new(),
+        };
+        println!("  changed: {}{more}", strings(&hit["changed"]).join(", "));
+    }
+    Ok(())
+}
+
+fn cmd_history(cli: &Cli, target: &str, lane: &Option<String>) -> Outcome {
     let root = root_of(cli)?;
     // The file comes first; a symbol may itself contain colons (`Foo::bar`).
     let Some((file, symbol)) = target.split_once(':').filter(|(f, s)| !f.is_empty() && !s.is_empty()) else {
@@ -1824,7 +2123,9 @@ fn main() -> ExitCode {
             };
             cmd_identity(&cli, name, email, kind, *global)
         }
-        Cmd::Why { target, lane } => cmd_why(&cli, target, lane),
+        Cmd::Why { target, lane, history: true, .. } => cmd_history(&cli, target, lane),
+        Cmd::Why { target, lane, graph, uses, .. } => cmd_why(&cli, target, lane, *graph, *uses),
+        Cmd::Reasons { words, limit } => cmd_reasons(&cli, words, *limit),
         Cmd::Sync { lane } => cmd_sync(&cli, lane),
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),

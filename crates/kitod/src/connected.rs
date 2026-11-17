@@ -466,7 +466,7 @@ impl Daemon {
                 }
                 answer
             }
-            method @ ("set_intent" | "lane_status" | "log" | "extend_scope") => {
+            method @ ("set_intent" | "lane_status" | "log" | "extend_scope" | "why_graph") => {
                 self.barrier(up, params, false)?;
                 self.forward(up, method, params)?
             }

@@ -76,6 +76,7 @@ impl Kito {
             created_by: Author::human("Francesco D."),
             verification: None,
             git_commit: None,
+            approved_by: None,
         };
         self.store.put_checkpoint(&ck).unwrap();
         ck.id

@@ -99,7 +99,7 @@ run kito conflicts "$CONFLICT"
 run kito resolve "$CONFLICT" --lane
 run kito integrate lane/2
 run grep -n "percent) / 100" src/shop.ts
-run kito why src/shop.ts:discount
+run kito why --history src/shop.ts:discount
 run kito lane close lane/1
 run kito lane close lane/2
 run kito export-git

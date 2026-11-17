@@ -22,6 +22,7 @@ pub mod scope;
 pub mod semantic;
 pub mod server;
 pub mod simulate;
+pub mod why;
 
 pub use error::{Error, Result};
 pub use repo::Repo;

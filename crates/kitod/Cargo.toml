@@ -28,6 +28,7 @@ kito-git.workspace = true
 ignore.workspace = true
 notify.workspace = true
 serde.workspace = true
+similar.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

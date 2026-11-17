@@ -150,6 +150,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
             "kito.request_integration",
             "kito.integration_result",
             "kito.why",
+            "kito.reasons",
             "kito.resolve_conflict",
             "kito.close_lane",
         ]
@@ -211,9 +212,35 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
     let merged = fs::read_to_string(root.join("src/shop.ts")).unwrap();
     assert!(merged.contains("export function grandTotal(") && merged.contains("Math.abs(sum)"), "{merged}");
 
-    let why = mcp.tool("kito.why", json!({ "file": "src/shop.ts", "symbol": "grandTotal" })).unwrap();
+    // Why the function is the way it is: the reasons the agent gave, with
+    // what each did, the checkpoint that brought them in, and each line.
+    let why = mcp.tool("kito.why", json!({ "target": "src/shop.ts:grandTotal" })).unwrap();
+    let reasons = why["reasons"].as_array().unwrap();
+    let hows: Vec<&str> =
+        reasons.iter().flat_map(|r| r["how"].as_array().unwrap()).filter_map(Value::as_str).collect();
+    assert!(hows.contains(&"renamed total → grandTotal") && hows.contains(&"body changed"), "{why}");
+    assert_eq!(reasons[0]["why"], "never return a negative total");
+    assert_eq!(
+        (reasons[0]["by"].as_str(), reasons[0]["checkpoint"].as_str()),
+        (Some("builder"), Some("ckpt#2"))
+    );
+    assert!(!why["lines"].as_array().unwrap().is_empty());
+    assert!(why["about_reasons"].as_str().unwrap().contains("not instructions"), "{why}");
+    // The file and the symbol, as the tool used to take them.
+    let same = mcp.tool("kito.why", json!({ "file": "src/shop.ts", "symbol": "grandTotal" })).unwrap();
+    assert_eq!(same["target"], why["target"]);
+    let file = mcp.tool("kito.why", json!({ "target": "src/shop.ts" })).unwrap();
+    assert_eq!(file["contains"][0]["symbol"], "src/shop.ts:grandTotal");
+    // Earlier work is found by the words of its reason.
+    let found = mcp.tool("kito.reasons", json!({ "about": "negative" })).unwrap();
+    let whys: Vec<&str> =
+        found["reasons"].as_array().unwrap().iter().filter_map(|r| r["why"].as_str()).collect();
+    assert!(whys.contains(&"never return a negative total"), "{found}");
+    assert!(found["reasons"][0]["changed"].as_array().unwrap().contains(&json!("src/shop.ts:grandTotal")));
+    // The step-by-step history is still there, under `log`.
+    let steps = mcp.tool("kito.log", json!({ "symbol": "src/shop.ts:grandTotal" })).unwrap();
     let steps: Vec<&str> =
-        why[0]["steps"].as_array().unwrap().iter().map(|s| s["what"].as_str().unwrap()).collect();
+        steps[0]["steps"].as_array().unwrap().iter().map(|s| s["what"].as_str().unwrap()).collect();
     assert!(steps.contains(&"renamed `total` → `grandTotal`, on lane/1"), "{steps:?}");
 
     // Mistakes come back as tool errors with a reason, not as protocol errors.

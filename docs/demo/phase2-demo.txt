@@ -25,19 +25,19 @@ $ kito log -n 2
 
 # 4. a method leaves its class for another one: refresh goes from Session to a new class
 
-$ kito why src/users.ts:fetchUser
+$ kito why --history src/users.ts:fetchUser
 function fetchUser  (src/users.ts)  symbol 0#0
   2026-11-14 15:24:52  francesco  function `getUser` created in src/auth.ts
   2026-11-14 15:24:52  francesco  renamed `getUser` → `fetchUser`
   2026-11-14 15:24:52  francesco  moved from src/auth.ts to src/users.ts
   2026-11-14 15:24:52  francesco  body changed (+1 −1)
 
-$ kito why src/auth.ts:Renewal.refresh
+$ kito why --history src/auth.ts:Renewal.refresh
 method Renewal.refresh  (src/auth.ts)  symbol 0#4
   2026-11-14 15:24:52  francesco  method `refresh` created in src/auth.ts
   2026-11-14 15:24:53  francesco  moved into `Renewal` in src/auth.ts
 
-$ kito why src/auth.ts:Session.isValid
+$ kito why --history src/auth.ts:Session.isValid
 method Session.isValid  (src/auth.ts)  symbol 0#3
   2026-11-14 15:24:52  francesco  method `isValid` created in src/auth.ts
 

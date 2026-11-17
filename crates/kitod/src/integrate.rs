@@ -550,17 +550,19 @@ impl Repo {
         prepared: Prepared,
         verification: Option<VerificationReport>,
     ) -> Result<Option<IntegrationResult>> {
-        self.finish_integration_for(prepared, verification, None)
+        self.finish_integration_for(prepared, verification, None, None)
     }
 
-    /// The same, for somebody who may not integrate (`hold`): when the
-    /// merge composed and the checks passed, nothing is written and the
-    /// lane is marked as waiting for somebody who may.
+    /// The same, for a person a server knows. One who may not integrate
+    /// (`hold`): when the merge composed and the checks passed, nothing is
+    /// written and the lane is marked as waiting for somebody who may. One
+    /// who may (`approved_by`): the checkpoint says who let the lane in.
     pub fn finish_integration_for(
         &mut self,
         prepared: Prepared,
         verification: Option<VerificationReport>,
         hold: Option<Author>,
+        approved_by: Option<Author>,
     ) -> Result<Option<IntegrationResult>> {
         let lane = prepared.lane;
         // Nothing may have been saved meanwhile in the files about to be
@@ -676,6 +678,7 @@ impl Repo {
                 duration_ms: report.duration_ms,
             }),
             git_commit: None,
+            approved_by,
         };
         self.store.put_checkpoint(&checkpoint)?;
         for id in &prepared.settled {

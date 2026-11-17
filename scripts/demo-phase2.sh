@@ -79,10 +79,10 @@ PY
 sleep 0.2
 
 # One symbol, one ID, the whole story: asked by the name and the place it has now.
-run kito why src/users.ts:fetchUser
-run kito why src/auth.ts:Renewal.refresh
+run kito why --history src/users.ts:fetchUser
+run kito why --history src/auth.ts:Renewal.refresh
 # The method nobody touched has a one-line story.
-run kito why src/auth.ts:Session.isValid
+run kito why --history src/auth.ts:Session.isValid
 
 run kito log
 # The log of one file: its changes, and the symbols that were in it at the time.
