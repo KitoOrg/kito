@@ -724,6 +724,70 @@ fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
     ok(root, &["daemon", "stop"]);
 }
 
+#[test]
+fn a_protected_main_lane_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.py"), SHOP_PY).unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+    assert!(ok(root, &["status"]).contains("Main lane ......... open"));
+
+    let said = ok(root, &["protect"]);
+    assert!(
+        said.contains("The main lane is protected: it changes only when a lane is integrated."),
+        "{said}"
+    );
+    assert!(ok(root, &["protect"]).contains("was protected already"));
+    let status = ok(root, &["status"]);
+    assert!(status.contains("Main lane ......... protected"), "{status}");
+    assert!(status.contains("Checks ............ none"), "{status}");
+
+    // A file edited in the main directory is put back, and the edit kept.
+    fs::write(root.join("src/shop.py"), "edited where nobody should\n").unwrap();
+    ok(root, &["sync"]);
+    assert_eq!(fs::read_to_string(root.join("src/shop.py")).unwrap(), SHOP_PY);
+    let status = ok(root, &["status"]);
+    assert!(
+        status.contains("1 direct edit put back since the daemon started; the last: src/shop.py, kept in"),
+        "{status}"
+    );
+    let aside = fs::read_dir(root.join(".kito/refused")).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(fs::read_to_string(aside.join("src/shop.py")).unwrap(), "edited where nobody should\n");
+    assert!(json(root, &["status", "--json"])["repo"]["protected"].as_bool().unwrap());
+
+    // What would change the main lane from outside a lane says no.
+    for (args, why) in [
+        (&["rollback", "ckpt#1"][..], "the main lane is protected"),
+        (&["checkpoint", "-m", "by hand"], "every integration is a checkpoint"),
+        (&["claude"], "the set-up writes files in the main directory"),
+    ] {
+        let out = kito(root, args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(why),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // A lane is the way in.
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "src/shop.py:total"]);
+    let cents = SHOP_PY.replace("price * quantity", "round(price * 100) * quantity");
+    fs::write(root.join(".kito/lanes/1/work/src/shop.py"), &cents).unwrap();
+    assert!(ok(root, &["integrate", "1"]).contains("lane/1: integrated as ckpt#2"));
+    assert_eq!(fs::read_to_string(root.join("src/shop.py")).unwrap(), cents);
+
+    // Turned off, the main directory is edited by hand as before.
+    assert!(ok(root, &["protect", "--off"]).contains("The main lane is open again"));
+    fs::write(root.join("src/shop.py"), SHOP_PY).unwrap();
+    assert!(ok(root, &["checkpoint", "-m", "by hand"]).contains("ckpt#3"));
+    ok(root, &["daemon", "stop"]);
+}
+
 /// The server binary sits next to the CLI's; built if it is not there.
 fn kito_server() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
@@ -941,6 +1005,35 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert!(!base.join("claude-dir/.gitignore").exists());
     assert!(base.join("claude-dir/src/shop.py").is_file(), "the project's files come with it");
     ok(&base.join("claude-dir"), &["daemon", "stop"]);
+
+    // The rules of a team. Bob may write and not integrate: his lane is
+    // merged and checked, and waits for ada, who may.
+    let bob = run(&["user", "add", "bob", "--role", "write"]);
+    let bob = bob.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob]);
+    let bobdir = base.join("bob-dir");
+    ok(&bobdir, &["lane", "open", "helper", "--intent", "a note at the end", "--scope", "src/shop.py"]);
+    fs::write(bobdir.join(".kito/lanes/2/work/src/shop.py"), format!("{cents}# prices are in cents\n"))
+        .unwrap();
+    let asked = ok(&bobdir, &["integrate", "2"]);
+    assert!(asked.contains("lane/2: merged and checked; it waits for somebody who may integrate"), "{asked}");
+    assert!(asked.contains("`kito integrate lane/2`"), "{asked}");
+    assert!(ok(&here, &["lanes"]).contains("awaiting approval"));
+    let board = ok(&here, &["board"]);
+    assert!(
+        board.contains("lane/2  helper (of bob)  awaiting approval (asked by bob)  a note at the end"),
+        "{board}"
+    );
+    let brought = ok(&here, &["integrate", "2"]);
+    assert!(brought.contains("lane/2: integrated as"), "{brought}");
+    assert!(fs::read_to_string(serverdir.join("repos/shop/src/shop.py"))
+        .unwrap()
+        .ends_with("# prices are in cents\n"));
+    // The rules of a repository on a server are set on the server.
+    let protect = kito(&here, &["protect"]);
+    assert!(String::from_utf8_lossy(&protect.stderr).contains("kito-server repo set <name> --protect"));
+    ok(&bobdir, &["lane", "close", "2"]);
+    ok(&bobdir, &["daemon", "stop"]);
 
     ok(&here, &["daemon", "stop"]);
     ok(&desk, &["daemon", "stop"]);

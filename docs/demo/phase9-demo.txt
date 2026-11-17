@@ -1,0 +1,126 @@
+# 1. The server: a repository, its check, its git remote, three people
+
+$ kito-server init /tmp/kito-demo/server
+Kito server created in /tmp/kito-demo/server
+Add a repository with `kito-server --dir /tmp/kito-demo/server repo add <name>`,
+a person with `user add <name>`, then run `serve`.
+
+$ kito-server --dir /tmp/kito-demo/server repo add shop --from /tmp/kito-demo/shop-src
+Repository `shop` created in /tmp/kito-demo/server/repos/shop
+Its main lane is protected: it changes only when a lane is integrated.
+
+$ kito-server --dir /tmp/kito-demo/server repo set shop --check python3 tests/test_shop.py --push /tmp/kito-demo/upstream.git
+shop  [main protected, checks: python3 tests/test_shop.py, pushes to /tmp/kito-demo/upstream.git]
+
+$ kito-server --dir /tmp/kito-demo/server user add ada; … user add bob --role write; … user add carol --role read
+(three tokens, each shown once)
+
+$ kito-server --dir /tmp/kito-demo/server user list
+ada: * (integrate)
+bob: * (write)
+carol: * (read)
+
+(each connects a directory of their own: ada, bob, carol)
+
+
+# 2. A direct edit to the main lane is refused
+
+$ echo "def total(price, quantity): return 0" > /tmp/kito-demo/server/repos/shop/src/shop.py    # on the server, by hand
+
+$ cat /tmp/kito-demo/server/repos/shop/src/shop.py
+def total(price, quantity):
+    return price * quantity
+
+$ kito status
+  Main lane ......... protected: it changes only when a lane is integrated
+  1 direct edit put back since the daemon started; the last: src/shop.py, kept in /tmp/kito-demo/server/repos/shop/.kito/refused/2026-11-17T10-40-08.513Z
+
+$ cat /tmp/kito-demo/server/repos/shop/.kito/refused/2026-11-17T10-40-08.513Z/src/shop.py
+def total(price, quantity): return 0
+
+(carol) $ kito watch --past
+10:40:08  lane/main  main edit refused  src/shop.py put back as the main lane has it; the edit is kept in /tmp/kito-demo/server/repos/shop/.kito/refused/2026-11-17T10-40-08.513Z
+
+
+# 3. A failing test stops a lane
+
+(bob) $ kito lane open agent-b --intent prices in cents --scope src/shop.py:total
+lane/1 opened for agent-b on ckpt#1.
+Working copy: /tmp/kito-demo/bob/.kito/lanes/1/work
+Scope: src/shop.py:total
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+(the agent edits its working copy, on bob's machine)
+
+(bob) $ kito integrate 1
+lane/1: verification failed: `python3 tests/test_shop.py`
+  | Traceback (most recent call last):
+  |   File "/tmp/kito-demo/server/repos/shop/.kito/verify/work/tests/test_shop.py", line 5, in <module>
+  |     assert total(2, 3) == 6, "total(2, 3) should be 6, it is %r" % total(2, 3)
+  |            ^^^^^^^^^^^^^^^^
+  | AssertionError: total(2, 3) should be 6, it is 600
+  | (exit code 1)
+  Nothing was integrated: fix it in the lane and integrate again.
+(exit status 1)
+
+$ cat /tmp/kito-demo/server/repos/shop/src/shop.py
+def total(price, quantity):
+    return price * quantity
+
+
+# 4. Fixed, it passes, and waits for somebody who may integrate
+
+(the test is part of the change: the agent declares it, and updates it)
+
+(bob) $ kito lane scope 1 --add tests/test_shop.py
+Scope ............. src/shop.py:total, tests/test_shop.py
+
+(bob) $ kito integrate 1
+lane/1: merged and checked, verified in 0.0 s; it waits for somebody who may integrate
+  They bring it in with `kito integrate lane/1`. Until then the lane is as it is.
+
+(ada) $ kito board
+lane/1  agent-b (of bob)  awaiting approval (asked by bob)  prices in cents
+  scope    src/shop.py:total, tests/test_shop.py
+  changed  src/shop.py:total, tests/test_shop.py (outside its functions)
+
+$ cat /tmp/kito-demo/server/repos/shop/src/shop.py
+def total(price, quantity):
+    return price * quantity
+
+
+# 5. Ada brings it in; the commit is on the git remote
+
+(ada) $ kito integrate 1
+lane/1: integrated as ckpt#2 (git 7ee4b1be89), verified in 0.0 s
+
+$ cat /tmp/kito-demo/server/repos/shop/src/shop.py
+def total(price, quantity):
+    return round(price * 100) * quantity
+
+$ git -C /tmp/kito-demo/upstream.git log --format=%h %an: %s main
+66bf095 agent-b: prices in cents
+635d14b demo: start
+Checks ............ python3 tests/test_shop.py
+Git push .......... /tmp/kito-demo/upstream.git (ckpt#2 is there)
+
+
+# 6. Who may do what
+
+(carol) $ kito lane open agent-c --intent a look around --scope src/
+kito: carol may read this repository, and `open_lane` changes it
+(exit status 1)
+
+(carol) $ kito lane attach 1
+lane/1 is here: /tmp/kito-demo/carol/.kito/lanes/1/work
+It follows the lane: its files change as the lane's do. What is saved there stays there.
+
+(ada) $ kito lane open agent-a --intent a receipt --scope src/receipt.py
+lane/2 opened for agent-a on ckpt#2.
+Working copy: /tmp/kito-demo/ada/.kito/lanes/2/work
+Scope: src/receipt.py
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+(bob) $ kito lane close 2
+kito: lane/2 is ada's: it is changed by its owner, or by somebody who may integrate
+(exit status 1)

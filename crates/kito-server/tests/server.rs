@@ -182,7 +182,11 @@ fn refusal(result: Result<Client, ClientError>) -> String {
 #[test]
 fn people_repositories_and_tokens() {
     let world = World::new();
-    assert_eq!(ok(&world.dir, &["repo", "list"]), "shop\nsite\n");
+    // A repository that came with a history is protected from the start.
+    assert_eq!(
+        ok(&world.dir, &["repo", "list"]),
+        "shop  [main protected, no checks]\nsite  [main protected, no checks]\n"
+    );
     let users = ok(&world.dir, &["user", "list"]);
     assert!(users.contains("ada <ada@example.com>: *") && users.contains("bob: shop"), "{users}");
     // The history of the git repository came along.

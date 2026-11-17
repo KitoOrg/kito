@@ -33,6 +33,12 @@ ignore = []
 # Files larger than this are not captured.
 max_file_bytes = 268435456
 
+[main]
+# With `true` the main lane changes only when a lane is integrated: a file
+# edited in the main directory is put back as it was, and the edit is kept
+# under .kito/refused/. Turned on and off with `kito protect`.
+protected = false
+
 [git]
 # Export every checkpoint as a git commit as soon as it is created.
 export_on_checkpoint = true
@@ -40,6 +46,9 @@ export_on_checkpoint = true
 # branch = "main"
 # Domain of the email addresses of the exported commits.
 email_domain = "kito.invalid"
+# After every integration, push the branch to this git remote: a name the
+# repository's git knows, or a URL. Never forced. Needs `git` installed.
+# push = "origin"
 
 [lanes]
 # Untracked paths of the main working directory that every lane sees
@@ -110,6 +119,7 @@ languages = ["c", "cpp"]
 pub struct Config {
     pub author: AuthorConfig,
     pub capture: CaptureConfig,
+    pub main: MainConfig,
     pub git: GitConfig,
     pub lanes: LanesConfig,
     pub verify: VerifyConfig,
@@ -306,12 +316,55 @@ pub struct GitConfig {
     pub export_on_checkpoint: bool,
     pub branch: Option<String>,
     pub email_domain: String,
+    /// The git remote every integration is pushed to: a name or a URL.
+    pub push: Option<String>,
 }
 
 impl Default for GitConfig {
     fn default() -> Self {
-        GitConfig { export_on_checkpoint: true, branch: None, email_domain: "kito.invalid".into() }
+        GitConfig {
+            export_on_checkpoint: true,
+            branch: None,
+            email_domain: "kito.invalid".into(),
+            push: None,
+        }
     }
+}
+
+/// The rules of the main lane.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MainConfig {
+    /// The main lane changes only when a lane is integrated.
+    pub protected: bool,
+}
+
+/// Sets one value of a table of a configuration file, leaving everything
+/// else as it is written (comments included). `None` removes the key.
+pub fn write_value(
+    store_dir: &Path,
+    table: &str,
+    key: &str,
+    value: Option<toml_edit::Value>,
+) -> Result<(), String> {
+    let path = store_dir.join(CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+    if !doc.contains_key(table) {
+        doc[table] = toml_edit::table();
+    }
+    let entries =
+        doc[table].as_table_mut().ok_or_else(|| format!("{}: `{table}` is not a table", path.display()))?;
+    match value {
+        Some(value) => entries[key] = toml_edit::Item::Value(value),
+        None => drop(entries.remove(key)),
+    }
+    kito_store::fs::atomic_write(&path, doc.to_string().as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 impl Config {

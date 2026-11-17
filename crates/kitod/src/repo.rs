@@ -285,6 +285,63 @@ pub struct Status {
     /// Ops recorded after the last checkpoint.
     pub ops_since_checkpoint: u64,
     pub counters: Counters,
+    /// The main lane changes only when a lane is integrated.
+    #[serde(default)]
+    pub protected: bool,
+    /// The commands that must succeed before a lane is integrated.
+    #[serde(default)]
+    pub checks: Vec<String>,
+    /// The git remote every integration is pushed to.
+    #[serde(default)]
+    pub push: Option<String>,
+    /// Direct edits to a protected main lane put back since the daemon
+    /// started, and the last of them.
+    #[serde(default)]
+    pub refused: u64,
+    #[serde(default)]
+    pub last_refused: Option<Refusal>,
+    /// The last checkpoint known to be on the git remote, and why the last
+    /// push failed, if it did.
+    #[serde(default)]
+    pub pushed: Option<String>,
+    #[serde(default)]
+    pub push_error: Option<String>,
+}
+
+/// A file found changed in the directory of a protected main lane: its
+/// path, and what was written there (`None`: it was removed).
+type DirectEdit = (PathBuf, Option<(Vec<u8>, FileMode)>);
+
+/// A direct edit to a protected main lane, put back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    /// When, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// The files that were put back as the main lane has them.
+    pub paths: Vec<String>,
+    /// Where the edits are kept; `None` when files were only removed.
+    pub kept: Option<PathBuf>,
+}
+
+/// `2026-11-17T06-30-12.123Z`: a moment as the name of a directory.
+fn stamp(ms: u64) -> String {
+    let (secs, millis) = (ms / 1000, ms % 1000);
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    // The civil date of a day counted from 1970-01-01.
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}-{:02}-{:02}.{millis:03}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// One line of `kito log`.
@@ -483,6 +540,17 @@ pub struct Repo {
     pub(crate) claims_cache: crate::scope::ClaimsCache,
     /// What each lane was already told about the other lanes.
     pub(crate) told: BTreeMap<LaneId, std::collections::BTreeSet<String>>,
+    /// While `true`, the main lane may change though it is protected: an
+    /// integration is writing its result.
+    pub(crate) main_open: bool,
+    /// Direct edits to a protected main lane that were put back, since
+    /// somebody last asked.
+    pub(crate) refused: Vec<Refusal>,
+    /// How many there were since the repository was opened, and the last.
+    pub(crate) refusals: (u64, Option<Refusal>),
+    /// The last checkpoint pushed to the git remote, and why the last push
+    /// failed.
+    pub(crate) pushed: (Option<String>, Option<String>),
     /// What was recorded since somebody last asked: for whoever tells the
     /// clients that watch the repository.
     pub(crate) recorded: Vec<Op>,
@@ -564,6 +632,10 @@ impl Repo {
             writing: std::sync::Arc::default(),
             claims_cache: Default::default(),
             told: BTreeMap::new(),
+            main_open: false,
+            refused: Vec::new(),
+            refusals: (0, None),
+            pushed: (None, None),
             recorded: Vec::new(),
         };
         repo.load_state()?;
@@ -957,6 +1029,11 @@ impl Repo {
         // Files an earlier capture found still being written.
         files.extend(std::mem::take(&mut work.deferred));
 
+        // A protected main lane takes no change from its directory: what
+        // differs there is put back, and kept aside.
+        let protected = work.lane.is_main() && self.config.main.protected && !self.main_open;
+        let mut put_back: Vec<DirectEdit> = Vec::new();
+
         // 2. On-disk state of each file.
         let mut changes: BTreeMap<PathBuf, Option<Snapshot>> = BTreeMap::new();
         let mut stats: Vec<(PathBuf, Option<FileStat>)> = Vec::new();
@@ -988,6 +1065,10 @@ impl Repo {
                 Some((content, mode, meta)) => {
                     let blob = BlobId::of(&content);
                     let same = work.tree.get(&rel).is_some_and(|e| e.blob == blob && e.mode == mode);
+                    if !same && protected {
+                        put_back.push((rel, Some((content, mode))));
+                        continue;
+                    }
                     if !same {
                         // A file saved again is stored as what changed
                         // since the version the lane had.
@@ -1004,6 +1085,7 @@ impl Repo {
                         .is_none_or(|age| age < RACY_WINDOW);
                     stats.push((rel, (!fresh).then(|| FileStat::of(&meta))));
                 }
+                None if protected && work.tree.contains(&rel) => put_back.push((rel, None)),
                 None => {
                     if work.tree.contains(&rel) {
                         changes.insert(rel.clone(), None);
@@ -1011,6 +1093,9 @@ impl Repo {
                     stats.push((rel, None));
                 }
             }
+        }
+        if !put_back.is_empty() {
+            self.put_back(work, put_back)?;
         }
 
         // 3. Ops, in an order that can be applied to the tree, chained to the head.
@@ -1055,6 +1140,100 @@ impl Repo {
             };
         }
         Ok(ops)
+    }
+
+    /// Puts files of a protected main lane back as the lane has them. What
+    /// was written in their place is kept under `.kito/refused/`: nothing
+    /// anybody typed is thrown away.
+    fn put_back(&mut self, work: &mut Work, edits: Vec<DirectEdit>) -> Result<()> {
+        let at_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+        let aside = self.root.join(STORE_DIR).join("refused").join(stamp(at_ms));
+        let mut kept = false;
+        let mut paths = Vec::new();
+        for (rel, edit) in edits {
+            if let Some((content, mode)) = &edit {
+                write_file(&aside, &rel, *mode, content)?;
+                kept = true;
+            }
+            match work.tree.get(&rel).copied() {
+                Some(entry) => self.write_file_in(&work.root, &rel, &entry)?,
+                None => crate::integrate::remove_in(&work.root, &rel)?,
+            }
+            work.stat.remove(&rel);
+            paths.push(rel.display().to_string());
+        }
+        let refusal = Refusal { at_ms, paths, kept: kept.then_some(aside) };
+        self.refusals = (self.refusals.0 + 1, Some(refusal.clone()));
+        self.refused.push(refusal);
+        if self.refused.len() > 256 {
+            self.refused.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Turns the protection of the main lane on or off. Turned on, what
+    /// the main directory holds that is in no checkpoint yet gets one: the
+    /// last state anybody put there by hand. Returns `false` if it was
+    /// already so.
+    pub fn protect(&mut self, on: bool) -> Result<bool> {
+        if self.config.main.protected == on {
+            return Ok(false);
+        }
+        if on {
+            self.scan()?;
+            // Only for files: what Kito worked out of them by itself (their
+            // symbols) goes with the next integration.
+            let since = self.status()?.ops_since_checkpoint;
+            let pending = self.store.lane_ops(LaneId::MAIN, self.main.ops - since, since as usize)?;
+            if pending.iter().any(|op| op.kind.symbol().is_none()) {
+                self.checkpoint("before the main lane was protected")?;
+            }
+        }
+        crate::config::write_value(&self.root.join(STORE_DIR), "main", "protected", Some(on.into()))
+            .map_err(Error::Config)?;
+        self.config.main.protected = on;
+        Ok(true)
+    }
+
+    /// Sets the rules a repository applies to integrations: the commands
+    /// that must succeed (`checks`) and the git remote each integration is
+    /// pushed to (`push`, `Some(None)` to stop). What is `None` stays.
+    pub fn configure(&mut self, checks: Option<Vec<String>>, push: Option<Option<String>>) -> Result<()> {
+        let store = self.root.join(STORE_DIR);
+        if let Some(checks) = checks {
+            let checks: Vec<String> =
+                checks.into_iter().map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).collect();
+            let list: toml_edit::Array = checks.iter().map(String::as_str).collect();
+            crate::config::write_value(&store, "verify", "commands", Some(list.into()))
+                .map_err(Error::Config)?;
+            self.config.verify.commands = checks;
+        }
+        if let Some(push) = push {
+            let push = push.map(|remote| remote.trim().to_owned()).filter(|remote| !remote.is_empty());
+            crate::config::write_value(&store, "git", "push", push.as_deref().map(Into::into))
+                .map_err(Error::Config)?;
+            self.config.git.push = push;
+            self.pushed = (None, None);
+        }
+        Ok(())
+    }
+
+    /// What a push to the git remote came to.
+    pub fn set_pushed(&mut self, checkpoint: Option<String>, error: Option<String>) {
+        if error.is_none() {
+            self.pushed.0 = checkpoint;
+        }
+        self.pushed.1 = error;
+    }
+
+    /// Says no to what changes a protected main lane from outside a lane.
+    pub(crate) fn main_is_open_to(&self, what: &str) -> Result<()> {
+        match self.config.main.protected {
+            true => Err(Error::Refused(format!(
+                "the main lane is protected: it changes only when a lane is integrated, and {what} is not                  that. Do it in a lane, or turn the protection off first (`kito protect --off`)"
+            ))),
+            false => Ok(()),
+        }
     }
 
     /// Appends ops to a lane, chained to its head, and applies them to its
@@ -1147,6 +1326,15 @@ impl Repo {
     pub fn checkpoint(&mut self, label: &str) -> Result<CheckpointResult> {
         self.scan()?;
         let head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
+        // On a protected main lane every integration is a checkpoint, and
+        // nothing else changes it.
+        if self.config.main.protected && self.store.checkpoints().last().is_some_and(|last| last.head == head)
+        {
+            return Err(Error::Refused(
+                "the main lane is protected: every integration is a checkpoint, and there is nothing                  else to put in one"
+                    .into(),
+            ));
+        }
         let checkpoint = Checkpoint {
             id: self.store.next_checkpoint_id(),
             head,
@@ -1286,6 +1474,13 @@ impl Repo {
             checkpoints: checkpoints.len(),
             last_checkpoint: last.map(|c| c.id.to_string()),
             unexported: checkpoints.iter().filter(|c| c.git_commit.is_none()).count(),
+            protected: self.config.main.protected,
+            checks: self.config.verify.commands.clone(),
+            push: self.config.git.push.clone(),
+            refused: self.refusals.0,
+            last_refused: self.refusals.1.clone(),
+            pushed: self.pushed.0.clone(),
+            push_error: self.pushed.1.clone(),
             ops_since_checkpoint,
             counters: self.counters.clone(),
         })
@@ -1603,6 +1798,9 @@ impl Repo {
     /// going back is recorded as new ops. This is why a rollback can always
     /// be undone by returning to the point given in `undo`.
     pub fn rollback(&mut self, spec: &str, paths: &[PathBuf], dry_run: bool) -> Result<RollbackResult> {
+        if !dry_run {
+            self.main_is_open_to("a rollback")?;
+        }
         self.scan()?;
         let (k, description) = self.resolve_point(spec)?;
         let target = self.tree_at(k)?;

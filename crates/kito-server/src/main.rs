@@ -26,7 +26,9 @@ mod session;
 mod state;
 
 use clap::{Parser, Subcommand};
-use state::{Server, User};
+use kitod::client::Client;
+use serde_json::{json, Value};
+use state::{Role, Server, User};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -80,9 +82,38 @@ enum RepoCmd {
         /// A git repository to clone and import: a path or a URL
         #[arg(long, value_name = "GIT")]
         from: Option<String>,
+        /// Leave the main lane open to direct edits on the server (a
+        /// repository added with a history is protected otherwise)
+        #[arg(long)]
+        unprotected: bool,
     },
-    /// List the repositories
+    /// List the repositories, with the rules of each
     List,
+    /// Set the rules of a repository: protection, checks, git push
+    Set {
+        name: String,
+        /// The main lane changes only when a lane is integrated
+        #[arg(long, conflicts_with = "unprotect")]
+        protect: bool,
+        /// The main lane may be edited directly on the server again
+        #[arg(long)]
+        unprotect: bool,
+        /// A command that must succeed on the merged result before a lane
+        /// is integrated; once per command, in the order they run. Given at
+        /// all, they replace the ones set before
+        #[arg(long = "check", value_name = "COMMAND")]
+        checks: Vec<String>,
+        /// No command has to succeed
+        #[arg(long, conflicts_with = "checks")]
+        no_checks: bool,
+        /// Push every integration to this git remote: a name the
+        /// repository's git knows, or a URL
+        #[arg(long, value_name = "REMOTE", conflicts_with = "no_push")]
+        push: Option<String>,
+        /// Stop pushing
+        #[arg(long)]
+        no_push: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -95,8 +126,21 @@ enum UserCmd {
         /// A repository the person may use; once per repository (default: all)
         #[arg(long = "repo", value_name = "NAME")]
         repos: Vec<String>,
+        /// What they may do: read (see and follow), write (open lanes and
+        /// work in them; their integrations wait for approval), integrate
+        #[arg(long, value_enum, default_value = "integrate")]
+        role: Role,
     },
-    /// List the people and the repositories each may use
+    /// Change what a person may do: everywhere, or in one repository
+    Role {
+        name: String,
+        #[arg(value_enum)]
+        role: Role,
+        /// Only in this repository
+        #[arg(long, value_name = "NAME")]
+        repo: Option<String>,
+    },
+    /// List the people, the repositories each may use and what they may do
     List,
     /// Remove a person: their token stops working
     Remove { name: String },
@@ -118,10 +162,19 @@ fn run(cli: &Cli) -> Result<(), String> {
             println!("Add a repository with `kito-server --dir {} repo add <name>`,", server.dir.display());
             println!("a person with `user add <name>`, then run `serve`.");
         }
-        Cmd::Repo { command: RepoCmd::Add { name, from } } => {
+        Cmd::Repo { command: RepoCmd::Add { name, from, unprotected } } => {
             let server = Server::open(&dir_of(cli))?;
-            let root = server.add_repo(name, from.as_deref())?;
+            let root = server.add_repo(name, from.as_deref(), !unprotected)?;
             println!("Repository `{name}` created in {}", root.display());
+            match (from, unprotected) {
+                (Some(_), false) => {
+                    println!("Its main lane is protected: it changes only when a lane is integrated.")
+                }
+                (Some(_), true) => {}
+                (None, _) => println!(
+                    "It is empty: put its files there, `kito checkpoint`, then `kito-server repo set {name} --protect`."
+                ),
+            }
         }
         Cmd::Repo { command: RepoCmd::List } => {
             let server = Server::open(&dir_of(cli))?;
@@ -130,14 +183,55 @@ fn run(cli: &Cli) -> Result<(), String> {
                 println!("No repositories. Add one with `kito-server repo add <name>`.");
             }
             for name in repos {
-                println!("{name}");
+                // The rules are the repository's own: read from its
+                // configuration, without waking its daemon.
+                let rules = server
+                    .repo(&name)
+                    .and_then(|root| kitod::config::Config::load(&root.join(kito_store::STORE_DIR)).ok())
+                    .map(|config| {
+                        rules_of(config.main.protected, &config.verify.commands, config.git.push.as_deref())
+                    })
+                    .unwrap_or_default();
+                println!("{name}{rules}");
             }
         }
-        Cmd::User { command: UserCmd::Add { name, email, repos } } => {
+        Cmd::Repo {
+            command: RepoCmd::Set { name, protect, unprotect, checks, no_checks, push, no_push },
+        } => {
+            let server = Server::open(&dir_of(cli))?;
+            let root =
+                server.repo(name).ok_or_else(|| format!("there is no repository `{name}` on this server"))?;
+            // Through the repository's daemon, which holds the rules it applies.
+            let mut daemon = Client::connect_or_start(&root).map_err(|e| e.to_string())?;
+            if *protect || *unprotect {
+                let _: Value =
+                    daemon.call("protect", json!({ "on": *protect })).map_err(|e| e.to_string())?;
+            }
+            let mut rules = json!({});
+            if !checks.is_empty() || *no_checks {
+                rules["checks"] = json!(checks);
+            }
+            if push.is_some() || *no_push {
+                rules["push"] = json!(push);
+            }
+            let now: Value = daemon.call("configure", rules).map_err(|e| e.to_string())?;
+            let checks: Vec<String> = serde_json::from_value(now["checks"].clone()).unwrap_or_default();
+            let rules = rules_of(now["protected"].as_bool().unwrap_or(false), &checks, now["push"].as_str());
+            println!("{name}{rules}");
+        }
+        Cmd::User { command: UserCmd::Add { name, email, repos, role } } => {
             let mut server = Server::open(&dir_of(cli))?;
-            let token = server.add_user(name, email.clone(), repos)?;
+            let token = server.add_user(name, email.clone(), repos, *role)?;
             println!("{name} added. Their token, shown this once:");
             println!("{token}");
+        }
+        Cmd::User { command: UserCmd::Role { name, role, repo } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            server.set_role(name, *role, repo.as_deref())?;
+            match repo {
+                Some(repo) => println!("{name} may {} in `{repo}`.", role.word()),
+                None => println!("{name} may {}.", role.word()),
+            }
         }
         Cmd::User { command: UserCmd::List } => {
             let server = Server::open(&dir_of(cli))?;
@@ -146,7 +240,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             }
             for (name, user) in &server.config.users {
                 let email = user.email.as_deref().map(|email| format!(" <{email}>")).unwrap_or_default();
-                println!("{name}{email}: {}", user.repos.join(", "));
+                // What they may do where: the repositories they may use,
+                // then the ones where it is something else.
+                let mut places: Vec<String> =
+                    user.repos.iter().map(|repo| format!("{repo} ({})", user.role_in(repo).word())).collect();
+                let named = user.roles.iter().filter(|(repo, _)| !user.repos.contains(*repo));
+                places.extend(named.map(|(repo, role)| format!("{repo} ({})", role.word())));
+                println!("{name}{email}: {}", places.join(", "));
             }
         }
         Cmd::User { command: UserCmd::Remove { name } } => {
@@ -176,6 +276,22 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The rules of a repository, after its name on a line.
+fn rules_of(protected: bool, checks: &[String], push: Option<&str>) -> String {
+    let mut rules = vec![match protected {
+        true => "main protected".to_owned(),
+        false => "main open to direct edits".to_owned(),
+    }];
+    match checks.is_empty() {
+        true => rules.push("no checks".to_owned()),
+        false => rules.push(format!("checks: {}", checks.join("; "))),
+    }
+    if let Some(push) = push {
+        rules.push(format!("pushes to {push}"));
+    }
+    format!("  [{}]", rules.join(", "))
 }
 
 fn main() -> ExitCode {

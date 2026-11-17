@@ -90,6 +90,11 @@ struct Daemon {
     events: Events,
     /// Which copy on another machine writes in each lane: one at a time.
     writers: Mutex<std::collections::BTreeMap<LaneId, String>>,
+    /// Integration requests made by people who may not integrate: the
+    /// merge and the checks are done, and the lane then waits.
+    holds: Mutex<std::collections::BTreeMap<JobId, kito_core::Author>>,
+    /// Told when a new checkpoint may have to go to the git remote.
+    push_wanted: Notify,
 }
 
 /// How many changed files a `saved` event lists: above, it lists none and
@@ -179,8 +184,23 @@ impl Daemon {
                 let result = f(repo);
                 // Whatever was recorded on the way, the watchers are told.
                 let recorded = std::mem::take(&mut repo.recorded);
+                let refused = std::mem::take(&mut repo.refused);
                 drop(guard);
                 self.saved(&recorded);
+                for refusal in refused {
+                    let kept = match &refusal.kept {
+                        Some(dir) => format!("; the edit is kept in {}", dir.display()),
+                        None => String::new(),
+                    };
+                    let what = format!("{} put back as the main lane has it{kept}", refusal.paths.join(", "));
+                    self.events.emit_with(
+                        "main_edit_refused",
+                        Some(LaneId::MAIN.to_string()),
+                        None,
+                        what,
+                        refusal.paths,
+                    );
+                }
                 result
             }
             None => Err(Error::Other("the daemon is shutting down".into())),
@@ -276,6 +296,17 @@ impl Daemon {
                     .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
             };
             let optional = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+            // A lane is changed by its owner, or by somebody who may
+            // integrate: asked of requests a server passed on for a person.
+            let owned = |lane: LaneId| -> std::result::Result<(), (i64, String)> {
+                if lane.is_main() {
+                    return Ok(());
+                }
+                self.with_repo(|repo| {
+                    repo.may_change(lane, person_name(params).as_deref(), integrates(params))
+                })
+                .map_err(internal)
+            };
             // The lane a request is about: the main one unless it says otherwise.
             let lane_or_main = || -> std::result::Result<LaneId, (i64, String)> {
                 match params.get("lane").and_then(Value::as_str) {
@@ -288,6 +319,33 @@ impl Daemon {
                 self.with_repo(|repo| repo.lane_of(spec)).map_err(internal)
             };
             match request.method.as_str() {
+                "configure" => {
+                    let checks: Option<Vec<String>> =
+                        params.get("checks").and_then(|checks| serde_json::from_value(checks.clone()).ok());
+                    let push = params.get("push").map(|remote| remote.as_str().map(str::to_owned));
+                    let now = self
+                        .with_repo(|repo| {
+                            repo.configure(checks, push)?;
+                            repo.status()
+                        })
+                        .map_err(internal)?;
+                    // A remote just named gets what is already there.
+                    self.push_wanted.notify_one();
+                    Ok(json!({ "protected": now.protected, "checks": now.checks, "push": now.push }))
+                }
+                "protect" => {
+                    let on = params.get("on").and_then(Value::as_bool).unwrap_or(true);
+                    let changed = self.with_repo(|repo| repo.protect(on)).map_err(internal)?;
+                    if changed {
+                        let what = if on {
+                            "the main lane is protected"
+                        } else {
+                            "the main lane is no longer protected"
+                        };
+                        self.events.emit("protection", Some(LaneId::MAIN.to_string()), None, what.to_owned());
+                    }
+                    Ok(json!({ "protected": on, "changed": changed }))
+                }
                 // Asked by whoever wants to know that the daemon is there.
                 "ping" => Ok(json!({ "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id() })),
                 "status" => to_json(serde_json::to_value(self.status().map_err(internal)?)),
@@ -316,6 +374,7 @@ impl Daemon {
                 "checkpoint" => {
                     let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
+                    self.push_wanted.notify_one();
                     to_json(serde_json::to_value(done))
                 }
                 "import_scip" => {
@@ -387,6 +446,7 @@ impl Daemon {
                 }
                 "extend_scope" => {
                     let lane = lane()?;
+                    owned(lane)?;
                     let scope = scope_of(params);
                     let (declared, overlaps) = self
                         .with_repo(|repo| Ok((repo.extend_scope(lane, &scope)?, repo.take_notices(lane)?)))
@@ -508,6 +568,7 @@ impl Daemon {
                 }
                 "close_lane" => {
                     let lane = lane()?;
+                    owned(lane)?;
                     self.writers.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.close_lane(lane)).map_err(internal)?,
@@ -530,6 +591,7 @@ impl Daemon {
                 }
                 "set_intent" => {
                     let lane = lane_or_main()?;
+                    owned(lane)?;
                     let summary = text("summary")?;
                     let (task, prompt) = (optional("task"), optional("prompt"));
                     let intent = self
@@ -539,6 +601,7 @@ impl Daemon {
                 }
                 "rename_symbol" => {
                     let lane = lane_or_main()?;
+                    owned(lane)?;
                     let (symbol, new_name) = (text("symbol")?, text("new_name")?);
                     // Who uses the symbol is asked without holding the
                     // repository: a language server takes its time.
@@ -560,7 +623,18 @@ impl Daemon {
                             "the main lane is what lanes are integrated into".into(),
                         ));
                     }
+                    owned(lane)?;
+                    // Asked by somebody who may not integrate, the merge
+                    // and the checks are done and the lane then waits.
+                    let hold = match integrates(params) {
+                        true => None,
+                        false => params.get("on_behalf_of").and_then(person_of),
+                    };
+                    let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
                     let job = self.queue.submit(lane);
+                    if let Some(person) = hold {
+                        holds.insert(job, person);
+                    }
                     Ok(json!({ "job": job.to_string(), "lane": lane.to_string() }))
                 }
                 "integration_result" => {
@@ -589,6 +663,9 @@ impl Daemon {
                     let id: ConflictId = text("conflict")?.parse().map_err(|_| {
                         (rpc::INVALID_PARAMS, "`conflict` must be like conflict#7".to_owned())
                     })?;
+                    if let Some(lane) = self.with_repo(|repo| Ok(repo.conflict_lane(id))).map_err(internal)? {
+                        owned(lane)?;
+                    }
                     let decision = match (params.get("choice").and_then(Value::as_str), optional("text")) {
                         (_, Some(text)) => Decision::Text(text),
                         (Some("main"), None) => Decision::Main,
@@ -902,7 +979,7 @@ async fn rescan_loop(daemon: Arc<Daemon>) {
 
 /// One integration, in its three steps. The repository is held only while
 /// merging and while recording: the verification runs with it free.
-async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
+async fn integrate(daemon: &Arc<Daemon>, lane: LaneId, hold: Option<kito_core::Author>) -> IntegrationResult {
     let failed = |message: String| IntegrationResult::failed(lane.to_string(), message);
     let mut answers: Option<crate::refs::RefAnswers> = None;
     for _ in 0..6 {
@@ -936,9 +1013,9 @@ async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
             Some((dir, commands, timeout)) => Some(kito_integrate::verify(&dir, &commands, timeout).await),
             None => None,
         };
-        let worker = daemon.clone();
+        let (worker, held) = (daemon.clone(), hold.clone());
         let finished = tokio::task::spawn_blocking(move || {
-            worker.with_repo(|repo| repo.finish_integration(*prepared, report))
+            worker.with_repo(|repo| repo.finish_integration_for(*prepared, report, held))
         })
         .await;
         match finished {
@@ -952,12 +1029,82 @@ async fn integrate(daemon: &Arc<Daemon>, lane: LaneId) -> IntegrationResult {
     failed("the lanes keep changing: ask again when they are quiet".to_owned())
 }
 
+/// How long a push to the git remote is given.
+const PUSH_WITHIN: Duration = Duration::from_secs(120);
+
+/// Pushes the branch to the git remote the repository names, each time a
+/// checkpoint was made: never forced, off the path of whoever asked for
+/// the checkpoint. What fails is said, and goes with the next push.
+async fn push_loop(daemon: Arc<Daemon>) {
+    loop {
+        daemon.push_wanted.notified().await;
+        let worker = daemon.clone();
+        let asked = tokio::task::spawn_blocking(move || {
+            worker.with_repo(|repo| {
+                let git = &repo.config().git;
+                Ok((git.push.clone(), git.branch.clone(), repo.status()?.last_checkpoint))
+            })
+        })
+        .await;
+        let Ok(Ok((Some(remote), branch, checkpoint))) = asked else { continue };
+        // The branch Kito advances: the one named, or the one HEAD is on.
+        let what = branch.map_or_else(|| "HEAD".to_owned(), |branch| format!("refs/heads/{branch}"));
+        let pushing = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&daemon.root)
+            .args(["push", "--quiet", &remote, &what])
+            // Nobody is there to type a password.
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let error = match tokio::time::timeout(PUSH_WITHIN, pushing).await {
+            Ok(Ok(output)) if output.status.success() => None,
+            Ok(Ok(output)) => {
+                let said = String::from_utf8_lossy(&output.stderr);
+                Some(
+                    said.lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .unwrap_or("git push failed")
+                        .trim()
+                        .to_owned(),
+                )
+            }
+            Ok(Err(e)) => Some(format!("git: {e}")),
+            Err(_) => Some(format!("no answer from {remote} in {} s", PUSH_WITHIN.as_secs())),
+        };
+        let main = Some(LaneId::MAIN.to_string());
+        match &error {
+            None => {
+                let what = format!("{} to {remote}", checkpoint.clone().unwrap_or_default());
+                daemon.events.emit("pushed", main, None, what)
+            }
+            Some(why) => {
+                eprintln!("kitod: git push to {remote}: {why}");
+                daemon.events.emit("push_failed", main, None, format!("{remote}: {why}"))
+            }
+        }
+        let worker = daemon.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            worker.with_repo(|repo| {
+                repo.set_pushed(checkpoint, error);
+                Ok(())
+            })
+        })
+        .await;
+    }
+}
+
 /// Serves the integration requests, one at a time, in order.
 async fn integration_loop(daemon: Arc<Daemon>) {
     loop {
         let (job, lane) = daemon.queue.next().await;
-        let result = integrate(&daemon, lane).await;
+        let hold = daemon.holds.lock().unwrap_or_else(|e| e.into_inner()).remove(&job);
+        let result = integrate(&daemon, lane, hold).await;
         daemon.integration_ended(&result);
+        if result.result == kito_integrate::Outcome::Integrated {
+            daemon.push_wanted.notify_one();
+        }
         daemon.queue.finish(job, result);
         // The lane has its answer: now git's index, left behind by the
         // export of the integration, is brought up to the commit.
@@ -1126,6 +1273,8 @@ pub async fn serve(root: &Path) -> Result<()> {
         queue: Queue::new(),
         events: Events::default(),
         writers: Mutex::default(),
+        holds: Mutex::default(),
+        push_wanted: Notify::new(),
     });
     eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());
     if !watching {
@@ -1140,6 +1289,7 @@ pub async fn serve(root: &Path) -> Result<()> {
     let debouncer = tokio::spawn(debounce_loop(daemon.clone(), rx));
     let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
     let integrator = tokio::spawn(integration_loop(daemon.clone()));
+    let pusher = tokio::spawn(push_loop(daemon.clone()));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| Error::Other(format!("signal handling: {e}")))?;
 
@@ -1165,6 +1315,7 @@ pub async fn serve(root: &Path) -> Result<()> {
     debouncer.abort();
     rescanner.abort();
     integrator.abort();
+    pusher.abort();
     // Last scan and clean shutdown: state saved, indexes durable.
     let repo = daemon.repo.lock().unwrap_or_else(|e| e.into_inner()).take();
     let closed = match repo {
@@ -1206,4 +1357,16 @@ fn person_of(value: &Value) -> Option<kito_core::Author> {
 /// The name of the person a request is made for, when a server said so.
 fn person_name(params: &Value) -> Option<String> {
     params.get("on_behalf_of").and_then(person_of).map(|person| person.name)
+}
+
+/// What the person a request is made for may do, when a server said so:
+/// `read`, `write` or `integrate`.
+fn role_of(params: &Value) -> Option<&str> {
+    params.get("on_behalf_of")?.get("role")?.as_str()
+}
+
+/// `true` unless a server said the person may not integrate. On the
+/// machine of the repository whoever can reach it may.
+fn integrates(params: &Value) -> bool {
+    role_of(params).is_none_or(|role| role == "integrate")
 }

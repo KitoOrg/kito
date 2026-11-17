@@ -19,8 +19,8 @@ use crate::error::{Error, Result};
 use crate::refs::{RefAnswers, Side};
 use crate::repo::{Repo, Unsettled};
 use kito_core::{
-    BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId, Resolution,
-    SymbolId, SymbolTable, Tree, TreeEntry, Verification,
+    Author, BlobId, Checkpoint, Conflict, ConflictId, ConflictKind, Intent, LaneId, LaneState, OpId,
+    Resolution, SymbolId, SymbolTable, Tree, TreeEntry, Verification,
 };
 use kito_integrate::{AutoResolution, ConflictInfo, IntegrationResult, Outcome, VerificationReport};
 use kito_merge::{Choice, Found, Subject};
@@ -139,6 +139,11 @@ impl Repo {
 
     /// The conflicts waiting for a decision or for the integration that
     /// applies it; with `all`, the settled ones too.
+    /// The lane that has a conflict to decide.
+    pub fn conflict_lane(&self, id: ConflictId) -> Option<LaneId> {
+        self.store.conflict(id).and_then(|conflict| conflict.assigned_to)
+    }
+
     pub fn conflicts(&self, all: bool) -> Vec<ConflictInfo> {
         self.store
             .conflicts()
@@ -545,6 +550,18 @@ impl Repo {
         prepared: Prepared,
         verification: Option<VerificationReport>,
     ) -> Result<Option<IntegrationResult>> {
+        self.finish_integration_for(prepared, verification, None)
+    }
+
+    /// The same, for somebody who may not integrate (`hold`): when the
+    /// merge composed and the checks passed, nothing is written and the
+    /// lane is marked as waiting for somebody who may.
+    pub fn finish_integration_for(
+        &mut self,
+        prepared: Prepared,
+        verification: Option<VerificationReport>,
+        hold: Option<Author>,
+    ) -> Result<Option<IntegrationResult>> {
         let lane = prepared.lane;
         // Nothing may have been saved meanwhile in the files about to be
         // written: on the main lane those of the merge, in the lane's
@@ -571,6 +588,22 @@ impl Repo {
                 result.verification = verification;
                 return Ok(Some(result));
             }
+        }
+        if let Some(by) = hold {
+            let at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64);
+            let (ops, state) = (at.work.ops, at.record.state);
+            let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
+            at.record.proposed = Some(kito_core::Proposal { by, at_ms, ops });
+            self.put_lane_state(lane, state)?;
+            self.store.commit()?;
+            result.result = Outcome::AwaitingApproval;
+            result.message = Some(format!(
+                "the merge composes and the checks pass, but integrating is not for who asked: the lane                  waits for somebody who may (`kito integrate {lane}`)"
+            ));
+            result.verification = verification;
+            return Ok(Some(result));
         }
         let (agent, lane_head) = (at.record.agent.clone(), at.work.head);
         let what = at.record.task.clone().or_else(|| {
@@ -621,7 +654,10 @@ impl Repo {
         let ops = self.with(LaneId::MAIN, |repo, work| {
             let human = std::mem::replace(&mut work.author, signer);
             work.merge_parent = lane_head;
+            // This is the one way into a protected main lane.
+            repo.main_open = true;
             let recorded = repo.capture_work(work, paths, Some(intent.id), &identities, Unsettled::Trust);
+            repo.main_open = false;
             work.merge_parent = None;
             work.author = human;
             recorded
@@ -726,6 +762,7 @@ impl Repo {
         at.record.base = base;
         at.record.base_head = main_head;
         at.record.since = at.work.ops;
+        at.record.proposed = None;
         // The saved state of the lane is written when the repository is
         // closed: until then the log has everything.
         self.put_lane_state(lane, LaneState::Active)

@@ -84,6 +84,10 @@ pub struct LaneInfo {
     /// The person the lane was opened for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// Who asked for the lane to be integrated, when it waits for somebody
+    /// who may do it (its `state` is then `awaiting_approval`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
 }
 
 fn state_word(state: LaneState) -> &'static str {
@@ -266,6 +270,7 @@ impl Repo {
             scope,
             // Whoever runs the repository, until told otherwise.
             owner: Some(self.identity.author()),
+            proposed: None,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -370,7 +375,10 @@ impl Repo {
             task: record.task.clone(),
             intent: record.intent.and_then(|id| self.store.intent(&id)).map(|intent| intent.summary.clone()),
             base: record.base.to_string(),
-            state: state_word(record.state).to_owned(),
+            state: match &record.proposed {
+                Some(_) => "awaiting_approval".to_owned(),
+                None => state_word(record.state).to_owned(),
+            },
             workdir,
             ops,
             files,
@@ -386,6 +394,21 @@ impl Repo {
                 false => Vec::new(),
             },
             owner: record.owner.as_ref().map(|owner| owner.name.clone()),
+            proposed_by: record.proposed.as_ref().map(|proposal| proposal.by.name.clone()),
+        }
+    }
+
+    /// A lane is changed by the person it was opened for, or by somebody
+    /// who may integrate. `person`: who asks, when a server established it;
+    /// on the machine of the repository, whoever can reach it.
+    pub fn may_change(&self, lane: LaneId, person: Option<&str>, integrator: bool) -> Result<()> {
+        let (Some(person), false) = (person, integrator) else { return Ok(()) };
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        match at.record.owner.as_ref().map(|owner| owner.name.as_str()) {
+            Some(owner) if owner != person => Err(Error::Refused(format!(
+                "{lane} is {owner}'s: it is changed by its owner, or by somebody who may integrate"
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -393,6 +416,8 @@ impl Repo {
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let mut record = at.record.clone();
         record.intent = at.work.intent;
+        // What was approved for waiting is the lane as it was then.
+        record.proposed = record.proposed.filter(|proposal| proposal.ops == at.work.ops);
         let mut files: BTreeSet<&Path> = BTreeSet::new();
         for (path, entry) in at.work.tree.iter() {
             if at.base_tree.get(path) != Some(entry) {

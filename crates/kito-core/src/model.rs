@@ -424,6 +424,22 @@ pub struct Lane {
     /// The person the lane was opened for: whose agent works in it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<Author>,
+    /// Set when the lane passed the merge and the checks at the request of
+    /// somebody who may not integrate, and waits for somebody who may.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<Proposal>,
+}
+
+/// A lane that waits to be integrated by somebody who may.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// Who asked.
+    pub by: Author,
+    /// When, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// How many ops the lane had then: with more, it changed since and
+    /// what was checked is no longer what it holds.
+    pub ops: u64,
 }
 
 /// Something a lane declares it will change, before it changes it.

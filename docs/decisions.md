@@ -904,3 +904,80 @@ one that cannot, a connection idle for more than a second is tried with a
 request that costs nothing. The server reads its configuration again for
 each new connection, so a person added while it runs is known at once.
 
+### D-092 · A protected main lane puts edits back, and keeps them
+"Refused" has to mean something for a file somebody already saved. The
+choices were: make the files read-only (stops honest programs at the
+source, but not root, nor anything that changes permissions, and every
+integration would have to lift it); leave the edit and not record it (the
+directory then differs from the main lane, and nobody knows which is
+true); put the file back. Kito puts it back: the main directory is the
+main lane again within milliseconds, and the edit is written first to
+`.kito/refused/<when>/`, so nothing typed is lost. It happens where saves
+are captured, so every way a save is noticed (events, scans, the look
+before a merge) is covered by one rule. Off by default in a repository
+made with `kito init`, where editing the main directory by hand is how a
+person works alone; on for a repository a server adds with its history.
+
+### D-093 · What still changes a protected main lane
+An integration, which opens it for the moment it writes the merged
+result. What Kito works out by itself from files already there (their
+symbols) is not a change to them and is recorded as before. Turning the
+protection on puts what the directory holds in a checkpoint first, if
+files changed since the last one: the last state put there by hand has a
+name in the history. Turning it off is a request only the repository's
+machine can make, and is an event.
+
+### D-094 · Three roles, kept by the server, applied in two places
+`read`, `write`, `integrate`, each including the one before. A person has
+one, and may have another in a named repository. The default is
+`integrate`: what everybody could do before roles existed, so that a
+server set up with 0.8 behaves the same. What a reader may ask is a list
+at the server's door, as the list of what any client may ask already was
+(D-081); who may integrate and whose lane it is are decided by the
+repository's daemon, which gets the role with every request beside the
+person (`on_behalf_of`). A repository with no server in front has no
+roles: whoever reaches its socket runs it.
+
+### D-095 · Asking to integrate without the right to
+The request is not refused: the lane is merged with the main lane and
+the checks run, so that its owner hears of conflicts and failing checks
+at once, when they can fix them. Only the last step is held. The lane
+records who asked and how many operations it had (`proposed`, a field
+added to the lane; no type changes meaning, so no ADR). With more
+operations than that the approval is stale and the lane shows as active
+again. Approving is integrating: the person who may does `kito integrate
+<lane>`, and the merge and the checks run again on the main lane as it is
+by then. A separate "approve" that reused the earlier check would have let
+in a lane checked against a main lane that no longer exists.
+
+### D-096 · The rules of a repository are set through its daemon
+Protection, checks and the git remote live in the repository's
+`config.toml`. `kito-server repo set` changes them by asking the
+repository's daemon (`protect`, `configure`), which writes the file and
+applies them from the next request, with no restart; neither request is
+on the list of what a client may ask. `repo list` reads the files.
+
+### D-097 · The push is `git push`, after the answer, never forced
+gix does not push yet, so the daemon runs `git push <remote> <branch>`,
+with no terminal to ask a password on and two minutes to finish. It runs
+after the lane has its answer: a slow remote delays nobody. A failure is
+an event and a line of `kito status`, and the commits go with the next
+push. A remote with commits of its own makes every push fail until a
+person reconciles them: Kito does not pull, because what a pull brings
+would reach the main lane without a lane.
+
+### D-098 · A lane is changed by its owner, or by somebody who may integrate
+Until now anybody who could use a repository could close anybody's lane.
+The owner is the person the server authenticated when the lane was
+opened; closing, scope, intent, renames, the request to integrate and the
+decisions on its conflicts are theirs. Somebody who may integrate may do
+all of these on any lane: that is the person a team turns to when an
+owner is away. Writing files in a lane stays the owner's alone (D-089).
+
+### D-099 · Small things found on the way
+`kito` no longer reports a failure when whoever was reading its output
+stops reading (`kito log | head`). `sync` is something a reader may ask:
+it changes nothing of theirs, and `kito status` asks it. The rules for
+agents have a third version: files written by 0.6 to 0.8 and never edited
+are replaced, edited ones are left and the missing rule is named.
+

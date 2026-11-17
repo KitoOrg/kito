@@ -17,6 +17,9 @@ pub enum Outcome {
     /// The lane changed things outside the scope it declared: nothing was
     /// merged (see `out_of_scope`).
     OutOfScope,
+    /// The merge composed and the checks passed, but who asked may not
+    /// integrate: the lane waits for somebody who may.
+    AwaitingApproval,
     /// The integration could not be carried out (see `message`).
     Failed,
 }

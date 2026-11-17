@@ -130,6 +130,9 @@ impl Repo {
         if !is_identifier(new_name) {
             return Err(Error::Other(format!("{new_name:?} is not a name a symbol can have")));
         }
+        if lane.is_main() {
+            self.main_is_open_to("a rename made there")?;
+        }
         self.scan_lane(lane)?;
         let id = self.symbol_of(lane, symbol)?;
         let work = self.work(lane)?;

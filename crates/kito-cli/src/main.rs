@@ -231,6 +231,13 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Protect the main lane: from then on it changes only when a lane is
+    /// integrated, and a file edited in the main directory is put back
+    Protect {
+        /// Let the main directory be edited by hand again
+        #[arg(long)]
+        off: bool,
+    },
     /// Repository status
     Status,
     /// Manage the daemon
@@ -375,7 +382,19 @@ fn claude_setup(root: &Path, no_claude: bool) -> Option<claude::Setup> {
 }
 
 fn cmd_claude(cli: &Cli) -> Outcome {
-    let setup = claude::setup(&root_of(cli)?);
+    let root = root_of(cli)?;
+    // On a protected main lane the files would be put back as soon as
+    // they are written: said before, not found out after.
+    if Remote::load(&root).is_none() {
+        let status: DaemonStatus = daemon(cli)?.call("status", json!({})).map_err(fail)?;
+        if status.repo.protected {
+            return Err("the main lane is protected, and the set-up writes files in the main directory: \
+                        `kito protect --off`, `kito claude`, `kito checkpoint -m \"set up for Claude Code\"`, \
+                        then `kito protect`"
+                .into());
+        }
+    }
+    let setup = claude::setup(&root);
     if cli.json {
         print_json(&setup.json());
     } else {
@@ -829,7 +848,7 @@ fn lane_line(lane: &LaneInfo) -> String {
         "{:<8} {:<12} {:<11} base {:<8} {:>7}  {:>8}",
         lane.id,
         lane.agent,
-        lane.state,
+        lane.state.replace('_', " "),
         lane.base,
         count(lane.ops, "op", "ops"),
         count(lane.files.len() as u64, "file", "files")
@@ -1077,7 +1096,11 @@ fn cmd_board(cli: &Cli) -> Outcome {
             Some(owner) if owner != text("agent") => format!(" (of {owner})"),
             _ => String::new(),
         };
-        println!("{}  {}{whose}  {}  {}", text("id"), text("agent"), text("state"), text("intent"));
+        let state = match (text("state"), lane["proposed_by"].as_str()) {
+            ("awaiting_approval", Some(by)) => format!("awaiting approval (asked by {by})"),
+            (state, _) => state.replace('_', " "),
+        };
+        println!("{}  {}{whose}  {state}  {}", text("id"), text("agent"), text("intent"));
         let scope: Vec<&str> =
             lane["scope"].as_array().into_iter().flatten().filter_map(|item| item["item"].as_str()).collect();
         let broad = match lane["broad"].as_bool() {
@@ -1374,6 +1397,16 @@ fn print_integration(result: &IntegrationResult) {
             println!("  Nothing was integrated: fix it in the lane and integrate again.");
         }
         Integration::Failed => println!("{}: {}", result.lane, result.message.clone().unwrap_or_default()),
+        Integration::AwaitingApproval => {
+            println!(
+                "{}: merged and checked{verified}; it waits for somebody who may integrate",
+                result.lane
+            );
+            println!(
+                "  They bring it in with `kito integrate {}`. Until then the lane is as it is.",
+                result.lane
+            );
+        }
         Integration::OutOfScope => {
             println!("{}: not integrated, it changed things outside its scope", result.lane);
             for item in &result.out_of_scope {
@@ -1409,10 +1442,12 @@ fn cmd_integrate(cli: &Cli, lanes: &[String]) -> Outcome {
     if cli.json {
         print_json(&results);
     }
-    match results
-        .iter()
-        .all(|r| matches!(r.result, Integration::Integrated | Integration::NothingToIntegrate))
-    {
+    // A lane that waits for approval got as far as its asker could take it.
+    let done = |outcome: Integration| {
+        use Integration::{AwaitingApproval, Integrated, NothingToIntegrate};
+        matches!(outcome, Integrated | NothingToIntegrate | AwaitingApproval)
+    };
+    match results.iter().all(|r| done(r.result)) {
         true => Ok(()),
         // The details are already printed; the exit code says it did not all go through.
         false => Err(String::new()),
@@ -1565,6 +1600,30 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
             (None, _) => String::new(),
         }
     );
+    match repo.protected {
+        true => println!("Main lane ......... protected: it changes only when a lane is integrated"),
+        false => println!("Main lane ......... open: what is saved in the main directory is recorded"),
+    }
+    if let Some(last) = repo.last_refused.as_ref().filter(|_| repo.protected) {
+        let kept = last.kept.as_ref().map(|dir| format!(", kept in {}", dir.display())).unwrap_or_default();
+        println!(
+            "                    {} put back since the daemon started; the last: {}{kept}",
+            count(repo.refused, "direct edit", "direct edits"),
+            last.paths.join(", ")
+        );
+    }
+    match repo.checks.is_empty() {
+        true => println!("Checks ............ none: a lane is integrated as soon as it merges"),
+        false => println!("Checks ............ {}", repo.checks.join("; ")),
+    }
+    if let Some(remote) = &repo.push {
+        let state = match (&repo.push_error, &repo.pushed) {
+            (Some(error), _) => format!("the last push failed: {error}"),
+            (None, Some(checkpoint)) => format!("{checkpoint} is there"),
+            (None, None) => "nothing pushed yet by this daemon".to_owned(),
+        };
+        println!("Git push .......... {remote} ({state})");
+    }
     if with_daemon {
         let w = &status.watcher;
         let ms = |v: Option<f64>| v.map_or("—".to_owned(), |v| format!("{v:.1} ms"));
@@ -1643,6 +1702,34 @@ fn warn_if_events_unreliable(client: &mut Client) {
     }
 }
 
+fn cmd_protect(cli: &Cli, on: bool) -> Outcome {
+    if Remote::load(&root_of(cli)?).is_some() {
+        return Err(
+            "the rules of a repository on a server are set there: `kito-server repo set <name> --protect`"
+                .into(),
+        );
+    }
+    let done: Value = daemon(cli)?.call("protect", json!({ "on": on })).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+        return Ok(());
+    }
+    match (on, done["changed"].as_bool().unwrap_or(false)) {
+        (true, true) => {
+            println!("The main lane is protected: it changes only when a lane is integrated.");
+            println!(
+                "A file edited in the main directory is put back, and the edit kept under .kito/refused/."
+            );
+        }
+        (true, false) => println!("The main lane was protected already."),
+        (false, true) => {
+            println!("The main lane is open again: what is saved in the main directory is recorded.")
+        }
+        (false, false) => println!("The main lane was not protected."),
+    }
+    Ok(())
+}
+
 /// The daemon of a connected directory: the server it asks, and the lanes
 /// it keeps here.
 fn cmd_mirrors(cli: &Cli) -> Outcome {
@@ -1708,6 +1795,15 @@ fn cmd_daemon_stop(cli: &Cli) -> Outcome {
 }
 
 fn main() -> ExitCode {
+    // `kito log | head`: whoever was reading stopped, which is no failure
+    // of ours and needs no report.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        if panic.to_string().contains("failed printing to stdout") {
+            std::process::exit(0);
+        }
+        report(panic);
+    }));
     let cli = Cli::parse();
     let outcome = match &cli.command {
         Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
@@ -1747,6 +1843,7 @@ fn main() -> ExitCode {
         }
         Cmd::Rename { symbol, new_name, lane } => cmd_rename(&cli, symbol, new_name, lane),
         Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
+        Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),
         Cmd::Daemon { command: DaemonCmd::Start } => daemon(&cli).map(|_| {

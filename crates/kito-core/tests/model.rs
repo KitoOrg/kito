@@ -278,6 +278,7 @@ fn checkpoint_and_friends_round_trip() {
         next_symbol: 0,
         scope: Vec::new(),
         owner: None,
+        proposed: None,
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 

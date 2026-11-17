@@ -21,6 +21,7 @@ runnable demo.
 | 6 | The intent board: declared scope, overlaps between lanes | done |
 | 7 | One server for several repositories, clients on other machines | done |
 | 8 | Lanes from any machine: one writes, others follow, a journal of saves | done |
+| 9 | Protected main and team rules: roles, approval, checks and git push on the server | done |
 
 ## Crates
 
@@ -277,7 +278,8 @@ kito-server --dir /srv/kito user add ada --email ada@example.com
 ```
 
 `user add` prints the person's token once; the server keeps only what it
-hashes to. `--repo <name>` limits a person to some repositories.
+hashes to. `--repo <name>` limits a person to some repositories, and
+`--role` says what they may do there (see "The rules of a team").
 
 ```bash
 kito-server --dir /srv/kito serve
@@ -358,6 +360,54 @@ copy; the lane stays.
 A daemon killed in the middle of the work loses nothing: the journal and
 the files are where it left them, and the next command starts it again.
 
+### The rules of a team
+
+A repository added with its history is protected: its main lane changes
+only when a lane is integrated. A file edited in the main directory on
+the server is put back, the edit is kept under `.kito/refused/`, and
+`kito watch` shows it. The checks every lane must pass, and the git remote
+that gets every integration, are set on the server:
+
+```bash
+kito-server --dir /srv/kito repo set shop --check "npm test" --push origin
+```
+
+```bash
+kito-server --dir /srv/kito repo list
+```
+
+People have roles. `read` sees and follows; `write` opens lanes and works
+in them; `integrate` brings lanes into the main lane:
+
+```bash
+kito-server --dir /srv/kito user add bob --role write
+```
+
+```bash
+kito-server --dir /srv/kito user role bob integrate --repo shop
+```
+
+When somebody who may write asks for a lane to be integrated, it is
+merged and checked as for anybody, so conflicts and failing checks come
+back at once; if all is well it waits (`awaiting approval` on the board)
+until somebody who may integrate runs `kito integrate <lane>`, which
+merges and checks again. A lane is changed only by its owner or by
+somebody who may integrate.
+
+The same protection is there for a repository with no server:
+
+```bash
+kito protect
+```
+
+```bash
+kito protect --off
+```
+
+What the protection does not do is listed in
+[`docs/phases.md`](docs/phases.md): it undoes an edit within milliseconds
+rather than preventing it, and whoever runs the server can lift it.
+
 ## Development
 
 ```bash
@@ -372,13 +422,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p kito-store -p kito-diff
 ```
 
-Phase 8 demo: an agent works in a lane on one machine while a person
-follows it on another; the daemon is killed, the server goes away, and no
-save is lost.
+Phase 9 demo: a direct edit to the main lane is refused, a failing test
+stops a lane, one that passes waits for somebody who may integrate, and
+the integration reaches a git remote (needs `python3`).
 
 ```bash
 cargo build --release -p kitod -p kito-cli -p kito-server
 ```
+
+```bash
+scripts/demo-phase9.sh
+```
+
+Phase 8 demo: an agent works in a lane on one machine while a person
+follows it on another; the daemon is killed, the server goes away, and no
+save is lost.
 
 ```bash
 scripts/demo-phase8.sh

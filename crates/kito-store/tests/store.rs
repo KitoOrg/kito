@@ -447,6 +447,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         next_symbol: 0,
         scope: Vec::new(),
         owner: None,
+        proposed: None,
     };
     store.put_lane(&lane).unwrap();
     assert_eq!(store.next_lane_id(), LaneId(2));

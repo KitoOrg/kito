@@ -1,7 +1,7 @@
 //! A client's session: who it is, which repository it is about, and its
 //! requests passed on to that repository's daemon.
 
-use crate::state::{Server, User};
+use crate::state::{Role, Server, User};
 use kitod::client::{Client, ClientError, PROTOCOL};
 use kitod::rpc::{self, Request, Response};
 use serde_json::{json, Value};
@@ -37,6 +37,24 @@ const ALLOWED: &[&str] = &[
     "put_file",
     "remove_file",
     "claim_writer",
+];
+
+/// Of those, what somebody who may only read can ask.
+const READ: &[&str] = &[
+    "status",
+    "log",
+    "why",
+    "lanes",
+    "lane_status",
+    "board",
+    "who_touches",
+    "events",
+    "conflicts",
+    "integration_result",
+    "lane_files",
+    "get_blobs",
+    // Asks that what is already saved be recorded: no change of theirs.
+    "sync",
 ];
 
 fn send(writer: &mut dyn Write, message: &impl serde::Serialize) -> std::io::Result<()> {
@@ -91,7 +109,10 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
         return;
     }
 
-    let person = json!({ "name": name, "email": user.email });
+    // What the person may do in the repository goes with every request:
+    // the repository's daemon applies it.
+    let role = repo.as_ref().map(|(repo, _)| user.role_in(repo));
+    let person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
     // The connection to the repository's daemon, made when first needed.
     let mut daemon: Option<Client> = None;
     let mut line = String::new();
@@ -111,11 +132,19 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                         server.repos().into_iter().filter(|repo| user.may_use(repo)).collect();
                     Response::ok(request.id, json!(mine))
                 }
-                "server.whoami" => Response::ok(request.id, json!({ "user": name, "email": user.email })),
+                "server.whoami" => Response::ok(
+                    request.id,
+                    json!({ "user": name, "email": user.email, "role": role.map(Role::word) }),
+                ),
                 method if !ALLOWED.contains(&method) => Response::err(
                     request.id,
                     rpc::METHOD_NOT_FOUND,
                     format!("`{method}` is not something a client can ask through the server"),
+                ),
+                method if role == Some(Role::Read) && !READ.contains(&method) => Response::err(
+                    request.id,
+                    rpc::REFUSED,
+                    format!("{name} may read this repository, and `{method}` changes it"),
                 ),
                 method => match &repo {
                     None => Response::err(

@@ -1262,6 +1262,142 @@ through the MCP tools from a connected directory.
   number of files (190 ms at 20,000), and so is the periodic one.
 - Verification commands still run on the server.
 
+## Phase 9 · protected main and team rules — done
+
+The main lane changes only when a lane is integrated, the checks every
+lane must pass run where the repository is, people have roles, and each
+integration goes to a git remote.
+
+### What is there
+
+- **A protected main lane** (D-092). With `kito protect`, or from the start
+  for a repository a server added with its history, nothing saved in the
+  main directory is recorded: the file is put back as the main lane has
+  it, the edit is kept under `.kito/refused/<when>/`, and whoever watches
+  is told. A checkpoint by hand, a rollback and a rename made directly on
+  the main lane say no. An integration is the one way in; `kito protect
+  --off` opens the main lane again, and says so in the events.
+- **Roles** (D-094): `read` sees the lanes, the board and the history and
+  follows lanes; `write` also opens lanes and works in them; `integrate`
+  also brings lanes into the main lane. One role for each person, which
+  can differ in one repository: `kito-server user add bob --role write`,
+  `kito-server user role bob integrate --repo shop`.
+- **A lane is its owner's** (D-098): closing it, extending its scope,
+  changing its intent, renaming in it, asking for its integration and
+  deciding its conflicts are for the person it was opened for, or for
+  somebody who may integrate.
+- **Waiting for approval** (D-095). A lane whose owner may not integrate
+  is still merged with the main lane and checked when they ask; if that
+  goes well it is marked `awaiting_approval`, with who asked, and nothing
+  is written. Somebody who may integrate brings it in with `kito integrate
+  <lane>`: the merge and the checks run again on the main lane as it is
+  then. A lane that changes after it was checked has to ask again.
+- **The checks are the repository's** (D-096): `kito-server repo set shop
+  --check "npm test"` on the server; no client can change them, and a
+  failing one stops a lane whoever asks.
+- **Every integration is pushed** (D-097) to the git remote the repository
+  names (`repo set shop --push <remote>`): never forced, after the lane
+  has its answer; a push that fails is said in the events and in `kito
+  status`, and goes with the next one.
+- For agents: the rules `kito init`, `kito connect` and `kito claude`
+  write now cover `awaiting_approval` (leave the lane open, say that it
+  waits); rules written by 0.6 to 0.8 are brought up to date if nobody
+  edited them.
+
+### Demo
+
+```
+scripts/demo-phase9.sh
+```
+
+A server, a repository whose test is its check, three people
+([output](demo/phase9-demo.txt)). **A direct edit to main is refused:**
+
+```
+$ echo "def total(price, quantity): return 0" > /tmp/kito-demo/server/repos/shop/src/shop.py    # on the server, by hand
+$ cat /tmp/kito-demo/server/repos/shop/src/shop.py
+def total(price, quantity):
+    return price * quantity
+(carol) $ kito watch --past
+10:40:08  lane/main  main edit refused  src/shop.py put back as the main lane has it; the edit is kept in …/.kito/refused/2026-11-17T10-40-08.513Z
+```
+
+**A failing test stops a lane**, and one that passes waits for somebody
+who may integrate:
+
+```
+(bob) $ kito integrate 1
+lane/1: verification failed: `python3 tests/test_shop.py`
+  | AssertionError: total(2, 3) should be 6, it is 600
+  Nothing was integrated: fix it in the lane and integrate again.
+
+(bob) $ kito integrate 1
+lane/1: merged and checked, verified in 0.0 s; it waits for somebody who may integrate
+
+(ada) $ kito board
+lane/1  agent-b (of bob)  awaiting approval (asked by bob)  prices in cents
+
+(ada) $ kito integrate 1
+lane/1: integrated as ckpt#2 (git 7ee4b1be89), verified in 0.0 s
+
+$ git -C /tmp/kito-demo/upstream.git log --format=%h %an: %s main
+66bf095 agent-b: prices in cents
+635d14b demo: start
+```
+
+### Acceptance target
+
+**No change reaches main without the merge and the checks.** On a
+protected main lane the ways in were each tried and each refused or
+undone: a file changed, created or removed in the main directory (put
+back; 5 ms at the median over 50 edits, 7 ms the slowest); a checkpoint by
+hand; a rollback; a rename made on the main lane; an integration asked by
+somebody who may not integrate (held); a lane that fails a check (stopped,
+for whoever asks); a client changing the checks (not a request a client
+can make). What does change it: an integration by somebody who may, which
+merges and checks; and whoever runs the repository turning the protection
+off, which is recorded.
+
+### A real agent
+
+Claude Code 2.1.326, working for a person who may write and not integrate,
+on a repository whose check is its test: it declared the function and the
+test, changed both in its lane, asked for the integration, read
+`awaiting_approval`, left the lane open and reported that it waits for
+somebody who may integrate, with the command. Brought in afterwards by the
+person who may, the commit carries the agent's name.
+
+### Tests
+
+294 tests in all. New: the protected main lane (`kitod/tests/protect.rs`:
+edits put back and kept, a lane as the way in, what is refused and how the
+protection is lifted); the team's rules against the real server
+(`kito-server/tests/rules.rs`: the three roles and approval, checks on the
+server, the main lane on the server, the push to a git remote, one that
+moved on by itself included); `kito protect` and the wait for approval
+from the command line; the rules for agents brought up to date.
+
+### Known limitations
+
+- **The protection undoes, it does not prevent.** A file edited in the
+  main directory is that way for a few milliseconds, and for as long as no
+  daemon runs; a program that reads it then sees the edit.
+- **It guards against mistakes and agents, not against whoever runs the
+  server**: with a shell there the protection can be turned off, and
+  `.kito/` edited.
+- **The checks run on the server as the server's user**, on code a lane
+  wrote, with no sandbox: phase 10.
+- **Approval is one person integrating.** No comments on a lane, no number
+  of approvals, and the owner learns that their lane went in from the
+  board and the events.
+- **The push needs `git` on the server and credentials that work with
+  nobody there.** A remote that got commits of its own is not merged:
+  pushes fail, and say so, until somebody reconciles the two by hand.
+- **Roles are a person's.** An agent has the role of the person it works
+  for; a repository on one machine, with no server, has no roles.
+- `.kito/refused/` only grows.
+- Two real machines and SSH are still untried.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

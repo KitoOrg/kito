@@ -42,7 +42,8 @@ When a piece of work is done call request_integration, then integration_result w
 `integrated` means your work is on the main lane under a checkpoint and your working copy has been \
 brought up to it; `conflicts` lists what to decide with resolve_conflict before asking again; \
 `verification_failed` shows the command that failed on the merged result: fix it in your working copy \
-and ask again; `out_of_scope` lists what you changed without declaring it. To rename a function or a \
+and ask again; `out_of_scope` lists what you changed without declaring it; `awaiting_approval` means \
+the merge and the checks passed and somebody else brings the lane in: leave it open and say so. To rename a function or a \
 class use rename_symbol rather than editing its name, so that its history follows it. why tells the \
 history of a symbol; status and log tell what your lane has done. Call close_lane when you are done for \
 good.";
@@ -167,7 +168,8 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
         (
             "integration_result",
             "The result of an integration: integrated (with the new checkpoint), conflicts, \
-             verification_failed or nothing_to_integrate. Waits for it up to wait_ms.",
+             verification_failed, out_of_scope, nothing_to_integrate, or awaiting_approval (merged and \
+             checked; somebody who may integrate brings it in). Waits for it up to wait_ms.",
             json!({
                 "type": "object",
                 "properties": {

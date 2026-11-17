@@ -26,6 +26,35 @@ impl Default for Config {
     }
 }
 
+/// What a person may do in a repository. Each role can do what the ones
+/// before it can.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// See the lanes, the board and the history, and follow lanes.
+    Read,
+    /// Open lanes and work in them. A lane they ask to integrate is merged
+    /// and checked, then waits for somebody who may integrate.
+    Write,
+    /// Integrate lanes, their own and those that wait; decide for any lane.
+    #[default]
+    Integrate,
+}
+
+impl Role {
+    pub fn word(self) -> &'static str {
+        match self {
+            Role::Read => "read",
+            Role::Write => "write",
+            Role::Integrate => "integrate",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Role::default()
+    }
+}
+
 /// A person who may use the server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,11 +65,22 @@ pub struct User {
     pub token: String,
     /// The repositories they may use; `*` is all of them.
     pub repos: Vec<String>,
+    /// What they may do in them.
+    #[serde(skip_serializing_if = "Role::is_default")]
+    pub role: Role,
+    /// What they may do in the repositories where it is something else.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, Role>,
 }
 
 impl User {
     pub fn may_use(&self, repo: &str) -> bool {
         self.repos.iter().any(|allowed| allowed == "*" || allowed == repo)
+    }
+
+    /// What the person may do in a repository.
+    pub fn role_in(&self, repo: &str) -> Role {
+        self.roles.get(repo).copied().unwrap_or(self.role)
     }
 }
 
@@ -128,8 +168,10 @@ impl Server {
         names
     }
 
-    /// Creates a repository: empty, or with the history of a git one.
-    pub fn add_repo(&self, name: &str, from: Option<&str>) -> Result<PathBuf, String> {
+    /// Creates a repository: empty, or with the history of a git one. One
+    /// that comes with a history is protected unless told otherwise: its
+    /// main lane changes only when a lane is integrated.
+    pub fn add_repo(&self, name: &str, from: Option<&str>, protect: bool) -> Result<PathBuf, String> {
         check_name("repository", name)?;
         let root = self.dir.join(REPOS_DIR).join(name);
         if root.exists() {
@@ -158,6 +200,9 @@ impl Server {
                 let mut repo = kitod::Repo::init(&root).map_err(|e| fail(&e))?;
                 repo.import_git().map_err(|e| fail(&e))?;
                 repo.scan().map_err(|e| fail(&e))?;
+                if protect {
+                    repo.protect(true).map_err(|e| fail(&e))?;
+                }
                 repo.close().map_err(|e| fail(&e))?;
             }
             None => {
@@ -174,6 +219,7 @@ impl Server {
         name: &str,
         email: Option<String>,
         repos: &[String],
+        role: Role,
     ) -> Result<String, String> {
         check_name("user", name)?;
         if self.config.users.contains_key(name) {
@@ -193,9 +239,27 @@ impl Server {
             true => vec!["*".to_owned()],
             false => repos.to_vec(),
         };
-        self.config.users.insert(name.to_owned(), User { email, token: hash_of(&token), repos });
+        let user = User { email, token: hash_of(&token), repos, role, roles: BTreeMap::new() };
+        self.config.users.insert(name.to_owned(), user);
         self.save()?;
         Ok(token)
+    }
+
+    /// Changes what a person may do: everywhere, or in one repository.
+    pub fn set_role(&mut self, name: &str, role: Role, repo: Option<&str>) -> Result<(), String> {
+        if let Some(repo) = repo.filter(|repo| self.repo(repo).is_none()) {
+            return Err(format!("there is no repository `{repo}` on this server"));
+        }
+        let user =
+            self.config.users.get_mut(name).ok_or_else(|| format!("{name} is not a user of this server"))?;
+        match repo {
+            Some(repo) => drop(user.roles.insert(repo.to_owned(), role)),
+            None => {
+                user.role = role;
+                user.roles.clear();
+            }
+        }
+        self.save()
     }
 
     pub fn remove_user(&mut self, name: &str) -> Result<(), String> {
