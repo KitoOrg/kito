@@ -147,3 +147,32 @@ fn a_result_reads_like_the_one_in_the_plan() {
     assert_eq!(json["your_next_base"], "ckpt#119");
     assert_eq!(serde_json::from_value::<IntegrationResult>(json).unwrap(), result);
 }
+
+#[tokio::test]
+async fn requests_that_wait_are_served_together() {
+    let queue = Arc::new(Queue::new());
+    let lanes: Vec<LaneId> = (1..=4).map(LaneId).collect();
+    let jobs: Vec<JobId> = lanes.iter().map(|lane| queue.submit(*lane)).collect();
+    // Up to three at a time, in the order they were asked.
+    let batch = queue.next_batch(3, Duration::ZERO).await;
+    assert_eq!(batch, [(jobs[0], lanes[0]), (jobs[1], lanes[1]), (jobs[2], lanes[2])]);
+    for job in &jobs[..3] {
+        assert!(matches!(queue.state(*job), Some(JobState::Running { .. })));
+    }
+    // The one that waits has three ahead of it.
+    assert!(matches!(queue.state(jobs[3]), Some(JobState::Queued { ahead: 3, .. })));
+    queue.finish(jobs[1], IntegrationResult::new("lane/2", Outcome::Integrated));
+    assert!(matches!(queue.state(jobs[1]), Some(JobState::Done { .. })));
+    assert!(matches!(queue.state(jobs[3]), Some(JobState::Queued { ahead: 2, .. })));
+
+    // A request made a moment after the first is taken with it.
+    let queue = Arc::new(Queue::new());
+    let first = queue.submit(LaneId(1));
+    let late = queue.clone();
+    let second = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        late.submit(LaneId(2))
+    });
+    let batch = queue.next_batch(8, Duration::from_millis(60)).await;
+    assert_eq!(batch, [(first, LaneId(1)), (second.await.unwrap(), LaneId(2))]);
+}

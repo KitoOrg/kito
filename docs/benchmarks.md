@@ -419,3 +419,23 @@ Neither shows at this grain. The policy of a confined command is made
 for each run (the siblings of what is hidden are listed again), which is
 what the 7 ms of `kito lane run` over a bare shell mostly are, with the
 start of two programs.
+
+## Phase 13 · waiting at the checks
+
+Ten agents, each on a file of its own, ask to be integrated at the same
+instant; the check of the repository takes 2 s (`sleep 2`). One machine.
+The wait of an agent is from its request to its answer.
+
+| | median wait | longest wait | runs of the check |
+| --- | --- | --- | --- |
+| One lane at a time (`batch = 1`) | 11.2 s | 20.3 s | 10 |
+| Together (`batch = 8`, the default) | 2.1 s | 4.2 s | 2 |
+
+The ten are two runs because a run takes at most eight lanes. The first
+figure is the one of phase 3 (11.6 s there, with a real type check).
+Lanes that write the same file are not checked together: for them the
+first row still holds.
+
+The first version of this measure wrote its timings in the repository's
+main directory. Every write moved the main lane under the lane being
+checked, which was then checked again: both rows came out near double.

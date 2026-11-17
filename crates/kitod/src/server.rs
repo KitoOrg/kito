@@ -1206,18 +1206,112 @@ async fn push_loop(daemon: Arc<Daemon>) {
 }
 
 /// Serves the integration requests, one at a time, in order.
+/// How long the first request of a batch waits for others made in the
+/// same breath, when the repository has checks: little next to the checks.
+const GATHER: Duration = Duration::from_millis(15);
+
+/// A request as the queue gave it: the job, the lane, and who asked for
+/// it with whether they may integrate.
+type Asked = (JobId, LaneId, Option<(kito_core::Author, bool)>);
+
+/// The lanes that are integrated together, served by the daemon: the
+/// repository is held only where it is needed, the checks run outside it.
+struct Together {
+    daemon: Arc<Daemon>,
+    runtime: tokio::runtime::Handle,
+    jobs: Vec<Asked>,
+}
+
+impl Together {
+    fn asked(&self, lane: LaneId) -> Option<&Asked> {
+        self.jobs.iter().find(|(_, asked, _)| *asked == lane)
+    }
+}
+
+impl crate::integrate::Bench for Together {
+    fn repo<R>(&self, f: impl FnOnce(&mut Repo) -> Result<R>) -> Result<R> {
+        self.daemon.with_repo(f)
+    }
+
+    fn check(&self, checks: &crate::integrate::Checks) -> kito_integrate::VerificationReport {
+        self.runtime.block_on(checks.run())
+    }
+
+    fn alone(&self, lane: LaneId) -> IntegrationResult {
+        let asker = self.asked(lane).and_then(|(_, _, asker)| asker.clone());
+        self.runtime.block_on(integrate(&self.daemon, lane, asker))
+    }
+
+    fn approver(&self, lane: LaneId) -> Option<kito_core::Author> {
+        let asker = self.asked(lane).and_then(|(_, _, asker)| asker.clone());
+        asker.filter(|(_, may)| *may).map(|(person, _)| person)
+    }
+
+    fn done(&self, lane: LaneId, result: IntegrationResult) {
+        if let Some((job, _, _)) = self.asked(lane) {
+            self.daemon.conclude(*job, result);
+        }
+    }
+}
+
+impl Daemon {
+    /// A lane has its answer: whoever watches is told, and whoever waits.
+    fn conclude(&self, job: JobId, result: IntegrationResult) {
+        self.integration_ended(&result);
+        if result.result == kito_integrate::Outcome::Integrated {
+            self.push_wanted.notify_one();
+        }
+        self.queue.finish(job, result);
+    }
+}
+
 async fn integration_loop(daemon: Arc<Daemon>) {
     loop {
-        let (job, lane) = daemon.queue.next().await;
-        let hold = daemon.holds.lock().unwrap_or_else(|e| e.into_inner()).remove(&job);
-        let result = integrate(&daemon, lane, hold).await;
-        daemon.integration_ended(&result);
-        if result.result == kito_integrate::Outcome::Integrated {
-            daemon.push_wanted.notify_one();
+        // With checks to wait for, the lanes that ask meanwhile are taken
+        // together when their turn comes.
+        let most = daemon.with_repo(|repo| Ok(repo.batch_limit())).unwrap_or(1);
+        let jobs = daemon.queue.next_batch(most, GATHER).await;
+        let asked: Vec<Asked> = {
+            let mut holds = daemon.holds.lock().unwrap_or_else(|e| e.into_inner());
+            jobs.into_iter().map(|(job, lane)| (job, lane, holds.remove(&job))).collect()
+        };
+        // A lane asked for by somebody who may not integrate is merged and
+        // checked, then waits: that is done by itself.
+        let (together, mut alone): (Vec<Asked>, Vec<Asked>) =
+            asked.into_iter().partition(|(_, _, asker)| !matches!(asker, Some((_, false))));
+        match together.len() {
+            0 | 1 => alone.extend(together),
+            _ => {
+                let bench = Together {
+                    daemon: daemon.clone(),
+                    runtime: tokio::runtime::Handle::current(),
+                    jobs: together,
+                };
+                let served = tokio::task::spawn_blocking(move || {
+                    let lanes: Vec<LaneId> = bench.jobs.iter().map(|(_, lane, _)| *lane).collect();
+                    crate::integrate::integrate_batch(&bench, &lanes);
+                    bench
+                })
+                .await;
+                // Whatever happened, nobody is left without an answer.
+                if let Ok(bench) = served {
+                    for (job, lane, _) in &bench.jobs {
+                        if !matches!(daemon.queue.state(*job), Some(kito_integrate::JobState::Done { .. })) {
+                            let failed =
+                                IntegrationResult::failed(lane.to_string(), "the integration did not end");
+                            daemon.conclude(*job, failed);
+                        }
+                    }
+                }
+            }
         }
-        daemon.queue.finish(job, result);
-        // The lane has its answer: now git's index, left behind by the
-        // export of the integration, is brought up to the commit.
+        alone.sort_by_key(|(job, _, _)| *job);
+        for (job, lane, asker) in alone {
+            let result = integrate(&daemon, lane, asker).await;
+            daemon.conclude(job, result);
+        }
+        // The lanes have their answers: now git's index, left behind by
+        // the export of the integrations, is brought up to the commit.
         let worker = daemon.clone();
         let refreshed = tokio::task::spawn_blocking(move || {
             match worker.with_repo(|repo| Ok(repo.take_index_refresh())) {

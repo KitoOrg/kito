@@ -53,7 +53,8 @@ const KEPT: usize = 256;
 struct Inner {
     next: u64,
     waiting: VecDeque<(JobId, LaneId)>,
-    running: Option<(JobId, LaneId)>,
+    /// The requests being served: one, or several checked together.
+    running: Vec<(JobId, LaneId)>,
     done: BTreeMap<JobId, IntegrationResult>,
 }
 
@@ -94,14 +95,32 @@ impl Queue {
 
     /// The next request to serve. Waits until there is one.
     pub async fn next(&self) -> (JobId, LaneId) {
+        self.next_batch(1, std::time::Duration::ZERO).await[0]
+    }
+
+    /// The next requests to serve together: every one that is waiting, in
+    /// the order they were asked, up to `most`. Waits until there is one;
+    /// then, when more than one may be taken, for `gather` more: requests
+    /// made in the same breath (several lanes in one command) are served
+    /// together.
+    pub async fn next_batch(&self, most: usize, gather: std::time::Duration) -> Vec<(JobId, LaneId)> {
+        let mut gathered = most <= 1 || gather.is_zero();
         loop {
             // Registered before looking: a request that arrives in between is not missed.
             let arrived = self.arrived.notified();
+            let waiting = !self.lock().waiting.is_empty();
+            if waiting && !gathered {
+                tokio::time::sleep(gather).await;
+                gathered = true;
+                continue;
+            }
             {
                 let mut inner = self.lock();
-                if let Some(job) = inner.waiting.pop_front() {
-                    inner.running = Some(job);
-                    return job;
+                if !inner.waiting.is_empty() {
+                    let take = inner.waiting.len().min(most.max(1));
+                    let jobs: Vec<(JobId, LaneId)> = inner.waiting.drain(..take).collect();
+                    inner.running.extend(jobs.iter().copied());
+                    return jobs;
                 }
             }
             arrived.await;
@@ -111,9 +130,7 @@ impl Queue {
     /// Records the result of the request being served.
     pub fn finish(&self, job: JobId, result: IntegrationResult) {
         let mut inner = self.lock();
-        if inner.running.is_some_and(|(running, _)| running == job) {
-            inner.running = None;
-        }
+        inner.running.retain(|(running, _)| *running != job);
         inner.done.insert(job, result);
         while inner.done.len() > KEPT {
             inner.done.pop_first();
@@ -128,11 +145,11 @@ impl Queue {
         if let Some(result) = inner.done.get(&job) {
             return Some(JobState::Done { result: Box::new(result.clone()) });
         }
-        if let Some((_, lane)) = inner.running.filter(|(running, _)| *running == job) {
+        if let Some((_, lane)) = inner.running.iter().find(|(running, _)| *running == job) {
             return Some(JobState::Running { lane: lane.to_string() });
         }
         let ahead = inner.waiting.iter().position(|(waiting, _)| *waiting == job)?;
-        let ahead_with_running = ahead + usize::from(inner.running.is_some());
+        let ahead_with_running = ahead + inner.running.len();
         Some(JobState::Queued { lane: inner.waiting[ahead].1.to_string(), ahead: ahead_with_running })
     }
 
@@ -151,6 +168,6 @@ impl Queue {
     /// Requests waiting or being served.
     pub fn pending(&self) -> usize {
         let inner = self.lock();
-        inner.waiting.len() + usize::from(inner.running.is_some())
+        inner.waiting.len() + inner.running.len()
     }
 }

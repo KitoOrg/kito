@@ -74,7 +74,101 @@ pub enum Preparation {
     Ask(Box<crate::refs::RefPlan>),
 }
 
-/// A decision on a conflict, as a client gives it.
+/// What a merge writes on the main lane, as entries of a tree.
+type Written = std::collections::BTreeMap<PathBuf, Option<TreeEntry>>;
+
+/// A lane that is checked together with others.
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub lane: LaneId,
+    /// What its merge writes: what was checked, and what must be written
+    /// when the lane is integrated.
+    written: Written,
+}
+
+/// What to do with lanes that ask to be integrated at the same time.
+#[derive(Default)]
+pub struct BatchPlan {
+    /// The ones that have their answer already.
+    pub ended: Vec<(LaneId, IntegrationResult)>,
+    /// The ones to check together, in the order they asked.
+    pub members: Vec<Member>,
+    /// Their merged results in one copy, ready for the checks. `None`
+    /// when fewer than two can be checked together.
+    pub checks: Option<Checks>,
+    /// The ones that go by themselves.
+    pub alone: Vec<LaneId>,
+}
+
+/// Where lanes are integrated together: the repository, which is held
+/// only for the moments it is needed, and the checks, which are not run
+/// while holding it.
+pub trait Bench {
+    fn repo<R>(&self, f: impl FnOnce(&mut Repo) -> Result<R>) -> Result<R>;
+    /// Runs the checks on the copy they were prepared for.
+    fn check(&self, checks: &Checks) -> VerificationReport;
+    /// Integrates one lane by itself, with checks of its own.
+    fn alone(&self, lane: LaneId) -> IntegrationResult;
+    /// Who lets the lane in, when a person does.
+    fn approver(&self, lane: LaneId) -> Option<Author>;
+    /// A lane has its answer.
+    fn done(&self, lane: LaneId, result: IntegrationResult);
+}
+
+/// Integrates lanes that asked at the same time. The ones that can be
+/// are checked in one run of the commands, on the main lane with all of
+/// them merged in; if the commands pass each is integrated, in the order
+/// they asked. If they fail, the lanes are split in two and each half is
+/// tried again, down to the lane that fails by itself.
+pub fn integrate_batch<B: Bench>(bench: &B, lanes: &[LaneId]) {
+    let mut groups: std::collections::VecDeque<Vec<LaneId>> = std::collections::VecDeque::new();
+    groups.push_back(lanes.to_vec());
+    while let Some(group) = groups.pop_front() {
+        if let [lane] = group[..] {
+            bench.done(lane, bench.alone(lane));
+            continue;
+        }
+        let plan = match bench.repo(|repo| repo.batch_plan(&group)) {
+            Ok(plan) => plan,
+            // Whatever went wrong, each lane is still owed its own answer.
+            Err(_) => {
+                groups.extend(group.into_iter().map(|lane| vec![lane]));
+                continue;
+            }
+        };
+        for (lane, result) in plan.ended {
+            bench.done(lane, result);
+        }
+        if let Some(checks) = &plan.checks {
+            let mut report = bench.check(checks);
+            let together: Vec<LaneId> = plan.members.iter().map(|member| member.lane).collect();
+            match report.passed {
+                true => {
+                    report.batch = together.iter().map(LaneId::to_string).collect();
+                    for member in &plan.members {
+                        let approver = bench.approver(member.lane);
+                        let landed = bench.repo(|repo| repo.land_member(member, report.clone(), approver));
+                        match landed {
+                            Ok(Some(result)) => bench.done(member.lane, result),
+                            // Not what was checked any more: by itself.
+                            _ => bench.done(member.lane, bench.alone(member.lane)),
+                        }
+                    }
+                }
+                // One of them fails the checks, or they fail together:
+                // the first half, then the second.
+                false => {
+                    let (first, second) = together.split_at(together.len() / 2);
+                    groups.push_front(second.to_vec());
+                    groups.push_front(first.to_vec());
+                }
+            }
+        }
+        groups.extend(plan.alone.into_iter().map(|lane| vec![lane]));
+    }
+}
+
+/// A decision on a conflict, as a client gives it./// A decision on a conflict, as a client gives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Main,
@@ -540,6 +634,201 @@ impl Repo {
             tree.apply(&kito_core::OpKind::FileAdd { path, blob: entry.blob, mode: entry.mode })?;
         }
         Ok(tree)
+    }
+
+    /// What a prepared merge writes on the main lane: its files as
+    /// entries of a tree; `None`: the file goes.
+    fn written_by(&mut self, prepared: &Prepared) -> Result<Written> {
+        let mut written = Written::new();
+        for (path, file) in &prepared.outcome.files {
+            let entry = match file {
+                Some(file) => {
+                    let blob = match self.main.tree.get(path) {
+                        Some(before) => self.store.put_blob_like(&file.content, &before.blob)?,
+                        None => self.store.put_blob(&file.content)?,
+                    };
+                    Some(TreeEntry { blob, mode: file.mode })
+                }
+                None => None,
+            };
+            written.insert(path.clone(), entry);
+        }
+        Ok(written)
+    }
+
+    /// `true` if what the lane's merge writes does not depend on what
+    /// other lanes bring: it renamed and moved nothing, and no rename of
+    /// the main lane reached its code. Such a lane can be checked together
+    /// with others that write other files.
+    fn stands_alone(&self, prepared: &Prepared) -> Result<bool> {
+        if !prepared.propagated.is_empty() {
+            return Ok(false);
+        }
+        let at = self.lanes.get(&prepared.lane).ok_or(Error::NoSuchLane(prepared.lane))?;
+        const PAGE: usize = 1024;
+        let mut start = at.record.since;
+        loop {
+            let ops = self.store.lane_ops(prepared.lane, start, PAGE)?;
+            let moves = |kind: &kito_core::OpKind| {
+                matches!(
+                    kind,
+                    kito_core::OpKind::Rename { .. }
+                        | kito_core::OpKind::Move { .. }
+                        | kito_core::OpKind::FileRename { .. }
+                )
+            };
+            if ops.iter().any(|op| moves(&op.kind)) {
+                return Ok(false);
+            }
+            if ops.len() < PAGE {
+                return Ok(true);
+            }
+            start += ops.len() as u64;
+        }
+    }
+
+    /// How many lanes may be checked in one run: 1 when the repository
+    /// has no checks, since nothing is waited for then.
+    pub fn batch_limit(&self) -> usize {
+        match self.config.verify.commands.is_empty() {
+            true => 1,
+            false => self.config.verify.batch.max(1),
+        }
+    }
+
+    /// Looks at lanes that ask to be integrated at the same time. Some
+    /// have their answer at once (nothing to integrate, a conflict, out
+    /// of scope). Of the others, the ones whose merges write different
+    /// files and stand alone are to be checked together: their merged
+    /// results are put in one copy, ready for the checks. The rest go one
+    /// by one.
+    pub fn batch_plan(&mut self, lanes: &[LaneId]) -> Result<BatchPlan> {
+        let mut plan = BatchPlan::default();
+        let mut taken: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        for lane in lanes {
+            let prepared = match self.prepare_integration(*lane, None) {
+                Ok(Preparation::Ready(prepared)) => prepared,
+                Ok(Preparation::Done(result)) => {
+                    plan.ended.push((*lane, *result));
+                    continue;
+                }
+                // Something has to be asked first: by itself.
+                Ok(Preparation::Ask(_)) => {
+                    plan.alone.push(*lane);
+                    continue;
+                }
+                Err(e) => {
+                    plan.ended.push((*lane, IntegrationResult::failed(lane.to_string(), e.to_string())));
+                    continue;
+                }
+            };
+            let written = self.written_by(&prepared)?;
+            let free = written.keys().all(|path| !taken.contains(path));
+            match free && self.stands_alone(&prepared)? {
+                true => {
+                    taken.extend(written.keys().cloned());
+                    plan.members.push(Member { lane: *lane, written });
+                }
+                false => plan.alone.push(*lane),
+            }
+        }
+        if plan.members.len() < 2 {
+            // Nobody to be checked with.
+            plan.alone.extend(plan.members.drain(..).map(|member| member.lane));
+            plan.alone.sort();
+            return Ok(plan);
+        }
+        // The main lane with what each of them writes.
+        let mut entries: std::collections::BTreeMap<PathBuf, TreeEntry> =
+            self.main.tree.iter().map(|(path, entry)| (path.to_owned(), *entry)).collect();
+        for member in &plan.members {
+            for (path, entry) in &member.written {
+                match entry {
+                    Some(entry) => entries.insert(path.clone(), *entry),
+                    None => entries.remove(path),
+                };
+            }
+        }
+        let mut tree = Tree::new();
+        for (path, entry) in entries {
+            tree.apply(&kito_core::OpKind::FileAdd { path, blob: entry.blob, mode: entry.mode })?;
+        }
+        let confinement = self.confinement()?;
+        self.store.commit()?;
+        let dir = self.root.join(STORE_DIR).join("verify").join("work");
+        self.materialize_tree(&tree, &dir)?;
+        plan.checks = Some(Checks {
+            dir,
+            commands: self.config.verify.commands.clone(),
+            timeout: Duration::from_secs(self.config.verify.timeout_secs.max(1)),
+            confinement,
+        });
+        Ok(plan)
+    }
+
+    /// Integrates a lane that was checked together with others, if what
+    /// its merge writes now, on the main lane as the lanes before it left
+    /// it, is what was checked. `None`: it is not (the lane or the main
+    /// lane moved, or the merge came out otherwise): the lane has to be
+    /// integrated by itself, with checks of its own.
+    pub fn land_member(
+        &mut self,
+        member: &Member,
+        report: VerificationReport,
+        approved_by: Option<Author>,
+    ) -> Result<Option<IntegrationResult>> {
+        let prepared = match self.prepare_integration(member.lane, None)? {
+            Preparation::Ready(prepared) => prepared,
+            _ => return Ok(None),
+        };
+        if self.written_by(&prepared)? != member.written || !self.stands_alone(&prepared)? {
+            return Ok(None);
+        }
+        self.finish_integration_for(*prepared, Some(report), None, approved_by)
+    }
+
+    /// Integrates several lanes at once, with the checks run in place:
+    /// what the daemon does for lanes that ask at the same time. The
+    /// results come in the order the lanes got them.
+    pub fn integrate_together(&mut self, lanes: &[LaneId]) -> Result<Vec<(LaneId, IntegrationResult)>> {
+        struct Here<'a> {
+            repo: std::cell::RefCell<&'a mut Repo>,
+            results: std::cell::RefCell<Vec<(LaneId, IntegrationResult)>>,
+        }
+        impl Bench for Here<'_> {
+            fn repo<R>(&self, f: impl FnOnce(&mut Repo) -> Result<R>) -> Result<R> {
+                f(&mut self.repo.borrow_mut())
+            }
+            fn check(&self, checks: &Checks) -> VerificationReport {
+                match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(runtime) => runtime.block_on(checks.run()),
+                    Err(e) => VerificationReport {
+                        commands: Vec::new(),
+                        passed: false,
+                        duration_ms: 0,
+                        failed_command: None,
+                        output: Some(format!("starting the verifier: {e}")),
+                        confined: false,
+                        batch: Vec::new(),
+                    },
+                }
+            }
+            fn alone(&self, lane: LaneId) -> IntegrationResult {
+                let done = self.repo.borrow_mut().integrate_leaving_index(lane);
+                done.unwrap_or_else(|e| IntegrationResult::failed(lane.to_string(), e.to_string()))
+            }
+            fn approver(&self, _lane: LaneId) -> Option<Author> {
+                None
+            }
+            fn done(&self, lane: LaneId, result: IntegrationResult) {
+                self.results.borrow_mut().push((lane, result));
+            }
+        }
+        let here = Here { repo: std::cell::RefCell::new(self), results: Default::default() };
+        integrate_batch(&here, lanes);
+        let results = here.results.into_inner();
+        here.repo.into_inner().refresh_git_index()?;
+        Ok(results)
     }
 
     /// How the checks of this repository run: confined, unless the

@@ -1096,6 +1096,83 @@ fn a_command_runs_confined_to_its_lane() {
 }
 
 #[test]
+fn lanes_asked_for_together_are_checked_in_one_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("shop");
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    // A check that takes a moment and counts its runs where it may write
+    // even when it is confined: in the cache the checks have for themselves.
+    let config = root.join(".kito/config.toml");
+    let text = fs::read_to_string(&config).unwrap().replace(
+        "# commands = [\"npx tsc --noEmit\", \"npm test\"]",
+        "commands = [\"echo run >> ${XDG_CACHE_HOME:-..}/runs.txt; sleep 0.3; ! grep -rq BROKEN docs\"]",
+    );
+    fs::write(&config, text).unwrap();
+    ok(root, &["daemon", "stop"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
+    for name in ["a", "b", "c", "d"] {
+        fs::write(root.join(format!("docs/{name}.txt")), "one\n").unwrap();
+    }
+    ok(root, &["checkpoint", "-m", "start"]);
+    let runs = || {
+        let confined = root.join(".kito/verify/cache/runs.txt");
+        let plain = root.join(".kito/verify/runs.txt");
+        fs::read_to_string(confined)
+            .or_else(|_| fs::read_to_string(plain))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    for (lane, name) in ["a", "b", "c"].iter().enumerate() {
+        let file = format!("docs/{name}.txt");
+        ok(root, &["lane", "open", name, "--intent", "two", "--scope", &file]);
+        fs::write(root.join(format!(".kito/lanes/{}/work/{file}", lane + 1)), "two\n").unwrap();
+    }
+    // Three lanes in one command: one run of the check, three checkpoints.
+    let done = ok(root, &["integrate", "1", "2", "3"]);
+    assert_eq!(runs(), 1, "{done}");
+    assert!(done.contains("lane/1: integrated as ckpt#2"), "{done}");
+    assert!(done.contains("lane/3: integrated as ckpt#4"), "{done}");
+    assert_eq!(done.matches("together with 2 other lanes").count(), 3, "{done}");
+    for name in ["a", "b", "c"] {
+        assert_eq!(fs::read_to_string(root.join(format!("docs/{name}.txt"))).unwrap(), "two\n");
+    }
+
+    // Asked by three commands at the same time: the first is checked as
+    // it comes, the two that ask while it runs are checked together.
+    for (lane, name) in ["a", "b", "c"].iter().enumerate() {
+        fs::write(root.join(format!(".kito/lanes/{}/work/docs/{name}.txt", lane + 1)), "three\n").unwrap();
+    }
+    let asking: Vec<_> = ["1", "2", "3"]
+        .iter()
+        .map(|lane| {
+            let (root, lane) = (root.to_owned(), (*lane).to_owned());
+            std::thread::spawn(move || ok(&root, &["integrate", &lane]))
+        })
+        .collect();
+    let said: Vec<String> = asking.into_iter().map(|thread| thread.join().unwrap()).collect();
+    assert!(said.iter().all(|out| out.contains("integrated as")), "{said:?}");
+    assert!(runs() <= 3, "at most two more runs for three lanes: {}", runs());
+
+    // One of several fails: it is found, and the others go in.
+    fs::write(root.join(".kito/lanes/1/work/docs/a.txt"), "four\n").unwrap();
+    fs::write(root.join(".kito/lanes/2/work/docs/b.txt"), "BROKEN\n").unwrap();
+    fs::write(root.join(".kito/lanes/3/work/docs/c.txt"), "four\n").unwrap();
+    let mixed = kito(root, &["integrate", "1", "2", "3"]);
+    assert!(!mixed.status.success());
+    let mixed = String::from_utf8_lossy(&mixed.stdout).into_owned();
+    assert!(mixed.contains("lane/1: integrated") && mixed.contains("lane/3: integrated"), "{mixed}");
+    assert!(mixed.contains("lane/2: verification failed"), "{mixed}");
+    assert_eq!(fs::read_to_string(root.join("docs/b.txt")).unwrap(), "three\n");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn a_protected_main_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();

@@ -79,6 +79,10 @@ pub struct VerificationReport {
     /// of the files.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confined: bool,
+    /// The lanes whose merged results were checked together in this run;
+    /// empty when the lane was checked by itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<String>,
 }
 
 /// The structured result of an integration.

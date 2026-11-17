@@ -25,6 +25,7 @@ runnable demo.
 | 10 | The why graph: the reasons of every function, file and line, to ask before changing them | done |
 | 11 | The rules as behaviour: hooks that refuse an edit outside a lane or its scope, and the reasons told before code changes | done |
 | 12 | Encrypted connections and a sandbox per lane: a server known by its certificate; checks and lane commands that write only in their own copy | done |
+| 13 | Integration without waiting in line: lanes that do not depend on each other are checked in one run | done |
 
 ## Crates
 
@@ -552,6 +553,33 @@ What the protection does not do is listed in
 [`docs/phases.md`](docs/phases.md): it undoes an edit within milliseconds
 rather than preventing it, and whoever runs the server can lift it.
 
+### Lanes checked together
+
+With checks that take time, lanes used to wait in line: ten agents that
+finish together waited for ten runs. Now the lanes that ask while a run is
+going are taken together when their turn comes: their merged results are
+put in one copy, the checks run once, and each lane is then integrated
+under a checkpoint of its own, in the order they asked.
+
+```bash
+kito integrate lane/1 lane/2 lane/3
+```
+
+```text
+lane/1: integrated as ckpt#7 (git 8d020c87a9), verified in 2.0 s together with 2 other lanes
+```
+
+Only lanes that do not depend on each other are checked together: their
+merges write different files, and none of them renames or moves anything.
+Two lanes on the same file are still merged function by function, and
+checked one after the other. If a run fails, the lanes are split in two
+and each half is tried again, until the lane that fails is found by
+itself: it is refused, the others go in. A lane that was saved again while
+it was being checked is checked again by itself.
+
+`batch` in `[verify]` says how many lanes a run may take (8 by default;
+1 is one lane at a time, as before).
+
 ### A sandbox per lane
 
 The checks of an integration run code that a lane wrote, as the user that
@@ -609,6 +637,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 13 demo: five agents finish at the same time on a repository whose
+checks take two seconds: one at a time, then together; a lane that breaks
+the checks among four; two lanes on one file (needs `python3`).
+
+```bash
+scripts/demo-phase13.sh
 ```
 
 Phase 12 demo: a server known by its certificate, what somebody between

@@ -1834,6 +1834,93 @@ the `run` tool.
 - **Clients are known by their token**, not by a certificate.
 - **Two real machines were still not tried.**
 
+## Phase 13 · integration without waiting in line — done
+
+Integration was one lane at a time. With a type check on every
+integration, ten agents waited a median of 11.6 s each (phase 3). The
+checks are the wait: so lanes that ask while they run are now checked
+together.
+
+### What is there
+
+- **The queue hands out several requests at once**
+  (`kito-integrate/src/queue.rs`): every one that is waiting, up to
+  `[verify] batch` (8). The first waits 15 ms for others made in the same
+  breath, when the repository has checks.
+- **`batch_plan`** (`kitod/src/integrate.rs`): each lane's merge is
+  prepared against the main lane. The ones with their answer at once (a
+  conflict, out of scope, nothing to integrate) get it. Of the others, the
+  ones that stand alone (no rename, no move, no rename of the main lane
+  that reached their code) and write files nobody before them in the run
+  writes are members; their merged results are put in one copy.
+- **One run of the checks** on that copy. Passed: each member is prepared
+  again on the main lane as the members before it left it, and integrated
+  only if what its merge writes is exactly what was checked; its report
+  names the lanes of the run. Failed: the members are split in two, each
+  half planned and checked again, down to one lane, which fails by itself
+  with its own output.
+- **What does not fit goes by itself**, with checks of its own: a lane on
+  a file another member writes, a lane that renames or moves, a lane whose
+  merge needs a question asked first, a lane asked for by somebody who may
+  not integrate (it is merged, checked and left waiting), and any member
+  that changed while it was being checked.
+- **`kito integrate lane/1 lane/2 ...`** asks for all of them before it
+  waits for the first, so that they are checked together.
+- One driver (`integrate_batch`) for the daemon, which holds the
+  repository only while planning and integrating, and for `Repo` used in
+  place (`integrate_together`).
+
+### Demo
+
+```bash
+scripts/demo-phase13.sh
+```
+
+Output: [`docs/demo/phase13-demo.txt`](demo/phase13-demo.txt). Five lanes
+with a two-second check: 10.3 s one at a time, 2.1 s together.
+
+### Acceptance target
+
+Set before the phase: the median wait of ten agents under half of the
+11.6 s of one lane at a time.
+
+- **Met for lanes that do not depend on each other.** Ten agents, each on
+  a file of its own, a check of 2 s, all asking at once: a median wait of
+  2.1 s and 4.2 s for the last, with 2 runs of the check. One lane at a
+  time on the same machine: 11.2 s and 20.3 s, with 10 runs.
+- **Not met for lanes on the same files.** They are checked one after the
+  other, as before: in the swarm of phase 3, where every agent writes the
+  same shared file in every round, nothing changes. That run was not
+  repeated: no lane of it can be a member of a batch.
+
+### Tests
+
+335 tests in all. New: three lanes in one run, a repository that wants
+one at a time, a failing lane found among four in five runs, lanes on one
+file and a lane that renames going by themselves, a lane saved again after
+it was checked (`kitod/tests/batch.rs`); the queue handing out several
+requests, and gathering one made a moment later; through the real daemon:
+three lanes in one command, three commands at once, a failing lane among
+three.
+
+### Known limitations
+
+- **Lanes on the same file are not checked together**, even on different
+  functions. Checking them together needs the second merge to be made on
+  the result of the first before either is integrated: the merge works on
+  the main lane's recorded history, which the first lane is not part of
+  until it is integrated.
+- **Only the whole run is checked**, not each checkpoint in it: lane 2 of
+  a run lands on a main lane that was checked with lanes 1 to 5 in it, not
+  with 1 and 2 alone. The lanes of a run write different files, so each
+  step is the checked result with files of later lanes as they were.
+- **A failing lane costs runs**: found among four in five runs, where one
+  at a time takes four. With checks that fail often, `batch = 1`.
+- **The order inside a run is the order of asking**, and a lane that goes
+  by itself waits for the run it was left out of.
+- **No priorities**, and no way to take a lane out of a run that started.
+
+## After phase 5
 ## After phase 5
 ## After phase 5
 ## After phase 5

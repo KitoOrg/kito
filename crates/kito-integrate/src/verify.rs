@@ -131,5 +131,6 @@ pub async fn verify(
         failed_command: failure.as_ref().map(|(command, _)| command.clone()),
         output: failure.map(|(_, output)| output),
         confined,
+        batch: Vec::new(),
     }
 }

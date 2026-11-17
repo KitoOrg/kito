@@ -1798,7 +1798,16 @@ fn print_integration(result: &IntegrationResult) {
         .verification
         .as_ref()
         .filter(|v| v.passed && !v.commands.is_empty())
-        .map(|v| format!(", verified in {:.1} s", v.duration_ms as f64 / 1000.0))
+        .map(|v| match v.batch.len() {
+            0 | 1 => format!(", verified in {:.1} s", v.duration_ms as f64 / 1000.0),
+            // The other lanes of the run are named once, on the first line.
+            together => format!(
+                ", verified in {:.1} s together with {} other {}",
+                v.duration_ms as f64 / 1000.0,
+                together - 1,
+                if together == 2 { "lane" } else { "lanes" }
+            ),
+        })
         .unwrap_or_default();
     match result.result {
         Integration::Integrated => {
@@ -1874,9 +1883,14 @@ fn print_integration(result: &IntegrationResult) {
 fn cmd_integrate(cli: &Cli, lanes: &[String]) -> Outcome {
     let mut client = daemon(cli)?;
     let mut results = Vec::new();
+    // Asked all at once: lanes that do not depend on each other are then
+    // checked in one run of the repository's checks.
+    let mut jobs = Vec::new();
     for lane in lanes {
         let asked: Value = client.call("request_integration", json!({ "lane": lane })).map_err(fail)?;
-        let job = asked["job"].as_str().unwrap_or_default().to_owned();
+        jobs.push(asked["job"].as_str().unwrap_or_default().to_owned());
+    }
+    for job in jobs {
         // The verification can take long: ask again until it is done.
         let result = loop {
             let state: JobState =

@@ -1147,3 +1147,37 @@ to command the daemon, as it was already what it took to change its data.
 On macOS and old kernels `auto` runs the checks as before and says so;
 `required` is for a server that must not. Refusing by default would stop
 every local repository that has checks on a system without Landlock.
+
+### D-122 · Checked together only when the result is certain
+Lanes are put in one run only if what each merge writes cannot depend on
+the others: different files, and no rename or move anywhere. The copy
+that is checked is then exactly what the main lane will hold when all of
+them are in. A cleverer rule (different functions of one file) would need
+the merge of the second lane on the result of the first before either is
+integrated, which the merge cannot do today: it reads the main lane's
+recorded history.
+
+### D-123 · Integrated only if it is what was checked
+After a run passes, each lane is prepared again on the main lane as it is
+by then, and what its merge writes is compared with what was in the copy.
+Anything else (the lane was saved again, the main lane moved, the merge
+came out otherwise) sends the lane back to be checked by itself. Nothing
+reaches the main lane on the strength of a check of something else.
+
+### D-124 · A run that fails is halved
+Halving finds one failing lane among n in about 2·log2(n) more runs, and
+lets the halves that pass go in together. With one failing lane among
+four it costs one run more than one at a time; with eight, one less.
+`batch = 1` is there for repositories whose checks fail often.
+
+### D-125 · One checkpoint per lane, as before
+A run of five lanes makes five checkpoints and five git commits, each
+with its lane's reason and author, and each report names the lanes it was
+checked with. One checkpoint for the run would be simpler and would lose
+who did what for which reason, which is what the why graph is made of.
+
+### D-126 · A short wait for requests made together
+When the repository has checks, the first request waits 15 ms before the
+run is made up, so that `kito integrate a b c` and agents that finish in
+the same instant are one run. Next to checks that take seconds it is
+nothing; with no checks there is no wait and no batching.

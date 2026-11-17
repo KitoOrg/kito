@@ -1,0 +1,72 @@
+# The checks of this repository take two seconds
+
+$ grep -A1 ^\[verify\] .kito/config.toml
+[verify]
+commands = ["sleep 2 && python3 -m py_compile src/*.py"]
+
+
+# 1. One lane at a time, as it was
+
+$ kito integrate lane/1 lane/2 lane/3 lane/4 lane/5
+lane/1: integrated as ckpt#2 (git 22b944671a), verified in 2.1 s
+lane/2: integrated as ckpt#3 (git 6162f817ba), verified in 2.0 s
+lane/3: integrated as ckpt#4 (git 0d2066a842), verified in 2.1 s
+lane/4: integrated as ckpt#5 (git d0b577d0a3), verified in 2.0 s
+lane/5: integrated as ckpt#6 (git f6362b71ed), verified in 2.0 s
+(10.3 s in all)
+
+
+# 2. Together: the lanes that do not depend on each other, in one run
+
+$ kito integrate lane/6 lane/7 lane/8 lane/9 lane/a
+lane/6: integrated as ckpt#7 (git 8d020c87a9), verified in 2.0 s together with 4 other lanes
+lane/7: integrated as ckpt#8 (git 9ed2ead555), verified in 2.0 s together with 4 other lanes
+lane/8: integrated as ckpt#9 (git a1664177a8), verified in 2.0 s together with 4 other lanes
+lane/9: integrated as ckpt#10 (git e023d0a70d), verified in 2.0 s together with 4 other lanes
+lane/a: integrated as ckpt#11 (git 396d261be4), verified in 2.0 s together with 4 other lanes
+(2.1 s in all)
+
+$ kito log -n 5
+◆ ckpt#11  work on mail  (git 396d261be4)
+  36014874  11-17 21:10  agent-mail    src/mail.py    +1 −0
+◆ ckpt#10  work on stock  (git e023d0a70d)
+  454de2c5  11-17 21:10  agent-stock   src/stock.py   +1 −0
+◆ ckpt#9  work on taxes  (git a1664177a8)
+  105cf0ed  11-17 21:10  agent-taxes   src/taxes.py   +1 −0
+◆ ckpt#8  work on prices  (git 9ed2ead555)
+  9e6e5e83  11-17 21:10  agent-prices  src/prices.py  +1 −0
+◆ ckpt#7  work on cart  (git 8d020c87a9)
+  d5cf5764  11-17 21:10  agent-cart    src/cart.py    +1 −0
+
+
+# 3. One of four breaks the checks
+
+(the lane on taxes.py now holds a line that is not Python)
+
+$ kito integrate lane/b lane/c lane/d lane/e
+lane/b: integrated as ckpt#12 (git f08c00a43b), verified in 2.0 s together with 1 other lane
+lane/c: integrated as ckpt#13 (git d894c850da), verified in 2.0 s together with 1 other lane
+lane/d: verification failed: `sleep 2 && python3 -m py_compile src/*.py`
+  | File "src/taxes.py", line 6
+  | SyntaxError: invalid syntax
+  | (exit code 1)
+  | (the checks run confined: they write only in their own copy of the files and open no network connection; i
+  Nothing was integrated: fix it in the lane and integrate again.
+lane/e: integrated as ckpt#14 (git 94648dadcd), verified in 2.1 s
+(10.3 s in all)
+
+
+# 4. Two lanes on two functions of one file
+
+$ kito integrate lane/f lane/10
+lane/f: integrated as ckpt#15 (git 783b93ddd8), verified in 2.0 s
+lane/10: integrated as ckpt#16 (git 7e2235d810), verified in 2.0 s
+(4.1 s in all)
+
+$ cat src/shop.py
+def total(prices):
+    return round(sum(prices) * 100)
+
+
+def discount(amount):
+    return amount - 10

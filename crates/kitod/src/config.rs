@@ -96,6 +96,12 @@ broad = "warn"
 # commands = ["npx tsc --noEmit", "npm test"]
 # Seconds after which a command is stopped and counts as failed.
 timeout_secs = 600
+# Lanes that ask to be integrated while the commands are running are
+# checked together when they come up: the commands run once on the result
+# of them all, for up to this many lanes whose changes do not depend on
+# each other. If they fail, the lanes are split until the one that fails
+# is found. 1: each lane is checked by itself.
+batch = 8
 
 # Language servers say who uses a symbol: with one, a rename made in a lane
 # reaches by itself the uses another lane added meanwhile. A server that is
@@ -288,11 +294,14 @@ pub struct VerifyConfig {
     pub commands: Vec<String>,
     /// Time after which a command is stopped and counts as failed.
     pub timeout_secs: u64,
+    /// How many lanes that wait may be checked in one run of the
+    /// commands. 1: each lane by itself.
+    pub batch: usize,
 }
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        VerifyConfig { commands: Vec::new(), timeout_secs: 600 }
+        VerifyConfig { commands: Vec::new(), timeout_secs: 600, batch: 8 }
     }
 }
 
