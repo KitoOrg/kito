@@ -242,7 +242,14 @@ pub fn parse_reusing(dialect: Dialect, source: &[u8], previous: Option<&Parsed>)
         let tree = PARSER.with(|parser| {
             let mut parser = parser.borrow_mut();
             parser.set_language(&compiled.language).ok()?;
-            parser.parse(source, reusable.as_ref())
+            let tree = parser.parse(source, reusable.as_ref())?;
+            // How tree-sitter recovers from a syntax error depends on the
+            // tree it starts from: a file with errors is parsed again from
+            // nothing, so that what is found depends on the text alone.
+            match reusable.is_some() && tree.root_node().has_error() {
+                true => parser.parse(source, None),
+                false => Some(tree),
+            }
         })?;
         let root = tree.root_node();
 

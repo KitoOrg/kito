@@ -730,6 +730,16 @@ mod incremental {
         }
     }
 
+    /// Found by the property above: from a lone `class Box {`, the tree of
+    /// a broken file recovered into a class that a fresh parse does not see.
+    #[test]
+    fn a_broken_file_is_read_the_same_whatever_came_before() {
+        let previous = parse_reusing(Dialect::TypeScript, render(&[3]).as_bytes(), None).unwrap();
+        let source = render(&[1, 3, 0, 0, 4, 3]);
+        let reused = parse_reusing(Dialect::TypeScript, source.as_bytes(), Some(&previous)).unwrap();
+        assert_eq!(reused.file, parse(Dialect::TypeScript, source.as_bytes()).unwrap());
+    }
+
     #[test]
     fn a_tree_of_another_language_is_ignored() {
         let rust = parse_reusing(Dialect::Rust, b"fn main() {}\n", None).unwrap();
