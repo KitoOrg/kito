@@ -28,6 +28,10 @@ const FORMAT: &str = "kito-store 2\n";
 /// The format before blobs could be stored as deltas: read as it is, and
 /// marked as the current one, since from now on it may hold them.
 const FORMAT_WITHOUT_DELTAS: &str = "kito-store 1\n";
+/// The format once a lane with a parent or a target was recorded (ADR
+/// 0001): a binary that knows only `FORMAT` would take every lane for one
+/// on the main lane, and refuses the store instead.
+const FORMAT_LANES_ON_LANES: &str = "kito-store 3\n";
 const LOCK_FILE: &str = "lock";
 /// How long a lock that is held is asked for again before the store is
 /// said to be in use: longer than a fork takes to reach its exec.
@@ -225,6 +229,8 @@ pub struct Store {
     recovery: RecoveryReport,
     index_dirty: bool,
     last_index_sync: Instant,
+    /// The `format` file says `FORMAT_LANES_ON_LANES`.
+    lanes_on_lanes: bool,
 }
 
 impl Store {
@@ -258,8 +264,10 @@ impl Store {
 
     pub fn open_with(dir: &Path, opts: StoreOptions) -> Result<Store> {
         opts.validate()?;
+        let mut lanes_on_lanes = false;
         match fs::read_to_string(dir.join(FORMAT_FILE)) {
             Ok(found) if found == FORMAT => {}
+            Ok(found) if found == FORMAT_LANES_ON_LANES => lanes_on_lanes = true,
             Ok(found) if found == FORMAT_WITHOUT_DELTAS => {
                 let format = dir.join(FORMAT_FILE);
                 atomic_write(&format, FORMAT.as_bytes()).at(&format)?;
@@ -359,6 +367,7 @@ impl Store {
             dir: dir.to_owned(),
             opts,
             _lock: lock,
+            lanes_on_lanes,
             packs,
             oplog,
             checkpoints,
@@ -779,7 +788,19 @@ impl Store {
         if self.checkpoints.get(lane.base).is_none() {
             return Err(StoreError::InvalidOp(format!("{}: unknown checkpoint {}", lane.id, lane.base)));
         }
+        if let Some(parent) = lane.parent.filter(|parent| !parent.is_main()) {
+            if self.lanes.get(parent).is_none() {
+                return Err(StoreError::InvalidOp(format!("{}: unknown parent lane {parent}", lane.id)));
+            }
+        }
         self.commit()?;
+        if lane.is_stacked() && !self.lanes_on_lanes {
+            // Before the lane: an older binary must not read it as a lane
+            // of the main lane.
+            let format = self.dir.join(FORMAT_FILE);
+            atomic_write(&format, FORMAT_LANES_ON_LANES.as_bytes()).at(&format)?;
+            self.lanes_on_lanes = true;
+        }
         let put = self.lanes.put(lane);
         self.guard(put)?;
         self.note_small_logs()

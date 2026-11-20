@@ -421,17 +421,23 @@ impl Reach {
         let at = |id: &kito_core::OpId| -> Result<Option<Hlc>> { Ok(store.get_op(id)?.map(|op| op.at)) };
         let mut until = HashMap::new();
         for record in store.lane_records() {
-            if record.id == lane {
-                // What the main lane had when this lane last started from it.
-                if let Some(time) = at(&record.base_head)? {
-                    until.insert(LaneId::MAIN, time);
-                }
-            } else if record.since > 0 {
+            if record.id != lane && record.since > 0 {
                 // The ops of another lane that were integrated.
                 if let Some(last) = store.lane_ops(record.id, record.since - 1, 1)?.first() {
                     until.insert(record.id, last.at);
                 }
             }
+        }
+        // What its parent had when this lane last started from it, what
+        // the parent's parent had then, and so on down to the main lane
+        // (ADR 0001).
+        let mut below = lane;
+        for _ in 0..64 {
+            let Some(record) = store.lane_record(below).filter(|_| !below.is_main()) else { break };
+            if let Some(time) = at(&record.base_head)? {
+                until.insert(record.parent_lane(), time);
+            }
+            below = record.parent_lane();
         }
         Ok(Reach { lane, until })
     }

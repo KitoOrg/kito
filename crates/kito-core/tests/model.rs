@@ -282,6 +282,8 @@ fn checkpoint_and_friends_round_trip() {
         owner: None,
         proposed: None,
         git_tip: None,
+        parent: None,
+        target: None,
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 

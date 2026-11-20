@@ -88,6 +88,30 @@ pub struct LaneInfo {
     /// who may do it (its `state` is then `awaiting_approval`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
+    /// The lane it started from, when that is not the main lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The lane it lands on, when that is not the main lane or when it was
+    /// said: `lane/2`, `main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// Where a lane starts and where it lands, when not on the main lane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stack {
+    /// The open lane it starts on. None: the main lane.
+    pub on: Option<LaneId>,
+    /// The lane it lands on. None: the one it starts on.
+    pub target: Option<LaneId>,
+}
+
+/// `main` or `lane/2`, for messages.
+pub(crate) fn lane_word(lane: LaneId) -> String {
+    match lane.is_main() {
+        true => "main".to_owned(),
+        false => lane.to_string(),
+    }
 }
 
 fn state_word(state: LaneState) -> &'static str {
@@ -125,8 +149,47 @@ impl Repo {
         }
     }
 
-    /// The state of the main lane right after the op `head`.
+    /// The state right after the op `head`, of whatever lane: the first
+    /// parents of an op lead back through its lane to the op the lane
+    /// started from, and from there through the lanes below it to the main
+    /// lane (ADR 0001). Those of the main lane are its log in order.
     pub(crate) fn state_at(&self, head: OpId) -> Result<(Tree, SymbolTable)> {
+        let mut chain = Vec::new();
+        let mut at = head;
+        let (mut tree, mut symbols) = loop {
+            if self.main.head == Some(at) {
+                break (self.main.tree.clone(), self.main.symbols.clone());
+            }
+            // An open lane that is there already.
+            if let Some(lane) = self.lanes.values().find(|lane| lane.work.head == Some(at)) {
+                break (lane.work.tree.clone(), lane.work.symbols.clone());
+            }
+            if let Some(lane) = self.lanes.values().find(|lane| lane.record.base_head == at) {
+                break (lane.base_tree.clone(), lane.base_symbols.clone());
+            }
+            let op = self
+                .store
+                .get_op(&at)?
+                .ok_or_else(|| Error::Other(format!("the op {at} is not in the log")))?;
+            if op.lane.is_main() {
+                break self.main_state_at(at)?;
+            }
+            let first = op.parents.first().copied();
+            chain.push(op);
+            match first {
+                Some(parent) => at = parent,
+                None => break (Tree::new(), SymbolTable::new()),
+            }
+        };
+        for op in chain.iter().rev() {
+            tree.apply(&op.kind)?;
+            symbols.apply(&op.kind)?;
+        }
+        Ok((tree, symbols))
+    }
+
+    /// The state of the main lane right after its op `head`.
+    fn main_state_at(&self, head: OpId) -> Result<(Tree, SymbolTable)> {
         if self.main.head == Some(head) {
             return Ok((self.main.tree.clone(), self.main.symbols.clone()));
         }
@@ -192,6 +255,96 @@ impl Repo {
         intent: &str,
         scope: &[String],
     ) -> Result<LaneInfo> {
+        self.open_lane_on(agent, task, base, intent, scope, Stack::default())
+    }
+
+    /// The lanes from `lane` down to the main lane: its parent, the parent
+    /// of that, …, the main lane last. `lane` itself is not in it.
+    pub fn ancestors(&self, lane: LaneId) -> Vec<LaneId> {
+        let mut found = Vec::new();
+        let mut at = lane;
+        while !at.is_main() {
+            let parent = match self.lanes.get(&at) {
+                Some(open) => open.record.parent_lane(),
+                None => self.store.lane_record(at).map_or(LaneId::MAIN, |record| record.parent_lane()),
+            };
+            // A lane is never its own ancestor; a broken record does not loop.
+            if found.contains(&parent) || parent == lane {
+                break;
+            }
+            found.push(parent);
+            at = parent;
+        }
+        if found.last() != Some(&LaneId::MAIN) {
+            found.push(LaneId::MAIN);
+        }
+        found
+    }
+
+    /// The open lanes stacked directly on `lane`.
+    pub fn children(&self, lane: LaneId) -> Vec<LaneId> {
+        self.lanes
+            .values()
+            .filter(|open| open.record.parent_lane() == lane)
+            .map(|open| open.record.id)
+            .collect()
+    }
+
+    /// Like [`Repo::open_lane`], on top of another lane or landing on one
+    /// (ADR 0001).
+    pub fn open_lane_on(
+        &mut self,
+        agent: &str,
+        task: Option<String>,
+        base: Option<&str>,
+        intent: &str,
+        scope: &[String],
+        stack: Stack,
+    ) -> Result<LaneInfo> {
+        let parent = stack.on.filter(|lane| !lane.is_main());
+        if let Some(parent) = parent {
+            if !self.lanes.contains_key(&parent) {
+                return Err(Error::Other(format!(
+                    "{parent} is not an open lane: a lane starts on an open one"
+                )));
+            }
+            if base.is_some() {
+                return Err(Error::Other(format!(
+                    "a lane stacked on {parent} starts from it as it is: no checkpoint can be given"
+                )));
+            }
+        }
+        let target = match stack.target {
+            None => None,
+            Some(target) if target == parent.unwrap_or(LaneId::MAIN) => None,
+            Some(target) => {
+                let below = match parent {
+                    Some(parent) => self.ancestors(parent),
+                    None => vec![LaneId::MAIN],
+                };
+                if !below.contains(&target) {
+                    return Err(Error::Other(format!(
+                        "{target} is not below the lane: a lane lands on its parent or on a lane its parent \
+                         started from"
+                    )));
+                }
+                Some(target)
+            }
+        };
+        self.open_lane_with(agent, task, base, intent, scope, parent, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_lane_with(
+        &mut self,
+        agent: &str,
+        task: Option<String>,
+        base: Option<&str>,
+        intent: &str,
+        scope: &[String],
+        parent: Option<LaneId>,
+        target: Option<LaneId>,
+    ) -> Result<LaneInfo> {
         let agent = agent.trim();
         if agent.is_empty() {
             return Err(Error::Other("a lane needs the name of the agent that works in it".into()));
@@ -212,8 +365,15 @@ impl Repo {
         })?;
         // The starting point, and the checkpoint it is filed under.
         let latest = self.store.checkpoints().next_back().map(|checkpoint| checkpoint.id);
-        let (base, base_head) = match base {
-            Some(spec) => {
+        let (base, base_head) = match (parent, base) {
+            // On top of a lane: as it is now, everything it saved included,
+            // filed under the checkpoint the lane is.
+            (Some(parent), _) => {
+                self.scan_lane(parent)?;
+                let at = self.lanes.get(&parent).ok_or(Error::NoSuchLane(parent))?;
+                (at.record.base, at.work.head.unwrap_or(at.record.base_head))
+            }
+            (None, Some(spec)) => {
                 let id: CheckpointId =
                     spec.trim().parse().map_err(|_| Error::Other(format!("{spec:?} is not a checkpoint")))?;
                 let checkpoint = self
@@ -222,7 +382,7 @@ impl Repo {
                     .ok_or_else(|| Error::Other(format!("{id}: this checkpoint does not exist")))?;
                 (id, checkpoint.head)
             }
-            None => match latest {
+            (None, None) => match latest {
                 Some(latest) => (latest, main_head),
                 None => {
                     // A lane is filed under a checkpoint: the first one is made now.
@@ -274,6 +434,8 @@ impl Repo {
             owner: Some(self.identity.author()),
             proposed: None,
             git_tip: None,
+            parent,
+            target,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -288,6 +450,30 @@ impl Repo {
             return Err(Error::Other("the main lane cannot be closed".into()));
         }
         self.scan_lane(lane)?;
+        // The lanes on top of it go where its work went, if it went there.
+        let (onto, children) = match self.lanes.get(&lane) {
+            Some(at) => (at.record.target_lane(), self.children(lane)),
+            None => return Err(Error::NoSuchLane(lane)),
+        };
+        for child in &children {
+            let base_head = self.lanes[child].record.base_head;
+            if !self.lane_holds(onto, base_head)? {
+                return Err(Error::Refused(format!(
+                    "{child} is built on work of {lane} that has not landed on {}: integrate {lane} first, or \
+                     close {child}",
+                    lane_word(onto)
+                )));
+            }
+        }
+        for child in children {
+            let at = self.lanes.get_mut(&child).ok_or(Error::NoSuchLane(child))?;
+            at.record.parent = Some(onto).filter(|onto| !onto.is_main());
+            if at.record.target.is_some_and(|target| target == onto) {
+                at.record.target = None;
+            }
+            let state = at.record.state;
+            self.put_lane_state(child, state)?;
+        }
         self.put_lane_state(lane, LaneState::Closed)?;
         let info = self.lane_info(lane)?;
         self.lanes.remove(&lane);
@@ -399,7 +585,48 @@ impl Repo {
             },
             owner: record.owner.as_ref().map(|owner| owner.name.clone()),
             proposed_by: record.proposed.as_ref().map(|proposal| proposal.by.name.clone()),
+            parent: record.parent.map(|lane| lane.to_string()),
+            target: record.is_stacked().then(|| lane_word(record.target_lane())),
         }
+    }
+
+    /// Whether the lane `lane` already has the op `op` in its history:
+    /// recorded on it, or taken in by one of its ops (through both
+    /// parents). Ops are older than those made on top of them, so the walk
+    /// stops at ops older than `op`.
+    pub(crate) fn lane_holds(&self, lane: LaneId, op: OpId) -> Result<bool> {
+        let Some(head) = self.work(lane)?.head else { return Ok(false) };
+        let wanted = match self.store.get_op(&op)? {
+            Some(found) => found,
+            None => return Ok(false),
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![head];
+        while let Some(at) = todo.pop() {
+            if at == op {
+                return Ok(true);
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            let Some(found) = self.store.get_op(&at)? else { continue };
+            if found.at < wanted.at {
+                continue;
+            }
+            todo.extend(found.parents.iter().copied());
+        }
+        Ok(false)
+    }
+
+    /// Why `lane` cannot land on its target yet: the lane whose work it was
+    /// built on and that the target does not have.
+    pub(crate) fn waits_for(&self, lane: LaneId) -> Result<Option<LaneId>> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let target = at.record.target_lane();
+        if target == at.record.parent_lane() || self.lane_holds(target, at.record.base_head)? {
+            return Ok(None);
+        }
+        Ok(Some(at.record.parent_lane()))
     }
 
     /// A lane is changed by the person it was opened for, or by somebody

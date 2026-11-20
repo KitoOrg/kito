@@ -448,9 +448,17 @@ impl Daemon {
                     let (task, base) = (optional("task"), optional("base"));
                     let intent = optional("intent").unwrap_or_default();
                     let scope = scope_of(params);
+                    let (on, target) = (optional("on"), optional("target"));
                     let (opened, overlaps, (why, why_note)) = self
                         .with_repo(|repo| {
-                            let opened = repo.open_lane(agent, task, base.as_deref(), &intent, &scope)?;
+                            // Building on a lane reads it; landing on it is
+                            // for whoever may change it.
+                            let stack = crate::lanes::Stack {
+                                on: on.as_deref().map(|spec| repo.lane_of(spec)).transpose()?,
+                                target: target.as_deref().map(|spec| repo.lane_of(spec)).transpose()?,
+                            };
+                            let opened =
+                                repo.open_lane_on(agent, task, base.as_deref(), &intent, &scope, stack)?;
                             let lane = repo.lane_of(&opened.id)?;
                             // The person a server authenticated: the lane is theirs.
                             let opened = match params.get("on_behalf_of").and_then(person_of) {
@@ -713,9 +721,25 @@ impl Daemon {
                         ));
                     }
                     owned(lane)?;
+                    let asker = params.get("on_behalf_of").and_then(person_of);
+                    // Landing on another lane waits for no checks, and so
+                    // for no lane landing on the main lane: it is done now,
+                    // by whoever may change that lane (ADR 0001).
+                    let target = self.with_repo(|repo| repo.target_of(lane)).map_err(internal)?;
+                    if !target.is_main() {
+                        let person = person_name(params);
+                        let result = self
+                            .with_repo(|repo| {
+                                repo.may_change(target, person.as_deref(), integrates(params))?;
+                                repo.integrate_leaving_index(lane)
+                            })
+                            .map_err(internal)?;
+                        self.integration_ended(&result);
+                        let job = self.queue.done_now(result);
+                        return Ok(json!({ "job": job.to_string(), "lane": lane.to_string() }));
+                    }
                     // Asked by somebody who may not integrate, the merge
                     // and the checks are done and the lane then waits.
-                    let asker = params.get("on_behalf_of").and_then(person_of);
                     let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
                     let job = self.queue.submit(lane);
                     if let Some(person) = asker {
@@ -897,7 +921,10 @@ impl Daemon {
             .and_then(|kind| kind.as_str().map(str::to_owned))
             .unwrap_or_else(|| "failed".to_owned());
         let what = match result.result {
-            kito_integrate::Outcome::Integrated => result.checkpoint.clone().unwrap_or_default(),
+            kito_integrate::Outcome::Integrated => match &result.landed_on {
+                Some(target) => format!("landed on {target}"),
+                None => result.checkpoint.clone().unwrap_or_default(),
+            },
             kito_integrate::Outcome::Conflicts => format!("{} to decide", result.conflicts.len()),
             kito_integrate::Outcome::OutOfScope => result.out_of_scope.join(", "),
             kito_integrate::Outcome::VerificationFailed => result

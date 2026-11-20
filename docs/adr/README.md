@@ -32,4 +32,5 @@ What changes, with the types or formats affected.
 Compatibility with existing data, migration, what becomes harder.
 ```
 
-No ADRs so far.
+- [0001 · Lanes on lanes: stacked lanes, targets, permanent lanes](0001-lanes-on-lanes.md)
+  (accepted)

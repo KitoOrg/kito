@@ -93,6 +93,22 @@ impl Queue {
         job
     }
 
+    /// Records a request that was served as soon as it was made: a lane
+    /// landing on another lane, which waits for no checks and so for no
+    /// lane landing on the main lane (ADR 0001).
+    pub fn done_now(&self, result: IntegrationResult) -> JobId {
+        let mut inner = self.lock();
+        inner.next += 1;
+        let job = JobId(inner.next);
+        inner.done.insert(job, result);
+        while inner.done.len() > KEPT {
+            inner.done.pop_first();
+        }
+        drop(inner);
+        self.finished.notify_waiters();
+        job
+    }
+
     /// The next request to serve. Waits until there is one.
     pub async fn next(&self) -> (JobId, LaneId) {
         self.next_batch(1, std::time::Duration::ZERO).await[0]

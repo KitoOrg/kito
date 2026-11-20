@@ -1173,6 +1173,67 @@ fn lanes_asked_for_together_are_checked_in_one_run() {
 }
 
 #[test]
+fn lanes_on_lanes_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("app");
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
+    fs::write(root.join("docs/api.txt"), "v1\n").unwrap();
+    fs::write(root.join("docs/ui.txt"), "v1\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+
+    ok(root, &["lane", "open", "alice", "--intent", "the api", "--scope", "docs/api.txt"]);
+    fs::write(root.join(".kito/lanes/1/work/docs/api.txt"), "v2\n").unwrap();
+    let opened =
+        ok(root, &["lane", "open", "bob", "--intent", "the page", "--scope", "docs/ui.txt", "--on", "1"]);
+    assert!(opened.contains("lane/2 opened for bob on lane/1, which it lands on."), "{opened}");
+    assert_eq!(fs::read_to_string(root.join(".kito/lanes/2/work/docs/api.txt")).unwrap(), "v2\n");
+    let late = ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "carol",
+            "--intent",
+            "the tests",
+            "--scope",
+            "docs/t.txt",
+            "--on",
+            "1",
+            "--target",
+            "main",
+        ],
+    );
+    assert!(late.contains("it lands on main once lane/1 has"), "{late}");
+    let lanes = ok(root, &["lanes"]);
+    assert!(lanes.contains("on lane/1, lands on main") && lanes.contains("on lane/1 "), "{lanes}");
+
+    fs::write(root.join(".kito/lanes/2/work/docs/ui.txt"), "v2\n").unwrap();
+    let landed = ok(root, &["integrate", "2"]);
+    assert!(landed.contains("lane/2: landed on lane/1"), "{landed}");
+    assert_eq!(fs::read_to_string(root.join(".kito/lanes/1/work/docs/ui.txt")).unwrap(), "v2\n");
+    assert_eq!(fs::read_to_string(root.join("docs/ui.txt")).unwrap(), "v1\n");
+
+    fs::write(root.join(".kito/lanes/3/work/docs/t.txt"), "cases\n").unwrap();
+    let waits = kito(root, &["integrate", "3"]);
+    assert!(!waits.status.success());
+    let waits = String::from_utf8_lossy(&waits.stdout).into_owned();
+    assert!(waits.contains("integrate lane/1 first"), "{waits}");
+
+    let both = ok(root, &["integrate", "1"]);
+    assert!(both.contains("lane/1: integrated as ckpt#2"), "{both}");
+    assert_eq!(fs::read_to_string(root.join("docs/ui.txt")).unwrap(), "v2\n");
+    let last = ok(root, &["integrate", "3"]);
+    assert!(last.contains("lane/3: integrated as ckpt#3"), "{last}");
+    assert_eq!(fs::read_to_string(root.join("docs/t.txt")).unwrap(), "cases\n");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn commits_made_with_git_are_pulled_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();

@@ -312,8 +312,16 @@ enum LaneCmd {
         #[arg(long)]
         task: Option<String>,
         /// Checkpoint to start from (default: the main lane as it is now)
-        #[arg(long, value_name = "CHECKPOINT")]
+        #[arg(long, value_name = "CHECKPOINT", conflicts_with = "on")]
         base: Option<String>,
+        /// Start on another lane as it is now, before it has landed; the
+        /// new lane lands on it unless --target says otherwise
+        #[arg(long, value_name = "LANE")]
+        on: Option<String>,
+        /// The lane to land on: the one it starts on, or one below it
+        /// (main). It waits until the work it was built on is there
+        #[arg(long, value_name = "LANE")]
+        target: Option<String>,
     },
     /// Record the last changes of a lane and remove its working copy
     Close { lane: String },
@@ -1210,6 +1218,12 @@ fn lane_line(lane: &LaneInfo) -> String {
     if !lane.conflicts.is_empty() {
         line.push_str(&format!("  {}", count(lane.conflicts.len() as u64, "conflict", "conflicts")));
     }
+    match (&lane.parent, &lane.target) {
+        (Some(parent), Some(target)) if parent == target => line.push_str(&format!("  on {parent}")),
+        (Some(parent), Some(target)) => line.push_str(&format!("  on {parent}, lands on {target}")),
+        (None, Some(target)) => line.push_str(&format!("  lands on {target}")),
+        _ => {}
+    }
     if let Some(what) = lane.task.as_ref().or(lane.intent.as_ref()) {
         line.push_str(&format!("  {what}"));
     }
@@ -1702,18 +1716,30 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 println!("{}", done["done"].as_str().unwrap_or_default());
             }
         }
-        LaneCmd::Open { agent, intent, scope, task, base } => {
+        LaneCmd::Open { agent, intent, scope, task, base, on, target } => {
             let opened: Value = client
                 .call(
                     "open_lane",
-                    json!({ "agent": agent, "task": task, "base": base, "intent": intent, "scope": scope }),
+                    json!({
+                        "agent": agent, "task": task, "base": base, "intent": intent, "scope": scope,
+                        "on": on, "target": target,
+                    }),
                 )
                 .map_err(fail)?;
             if cli.json {
                 print_json(&opened);
             } else {
                 let lane: LaneInfo = serde_json::from_value(opened.clone()).map_err(fail)?;
-                println!("{} opened for {} on {}.", lane.id, lane.agent, lane.base);
+                match (&lane.parent, &lane.target) {
+                    (Some(parent), Some(target)) if parent == target => {
+                        println!("{} opened for {} on {parent}, which it lands on.", lane.id, lane.agent)
+                    }
+                    (Some(parent), Some(target)) => println!(
+                        "{} opened for {} on {parent}; it lands on {target} once {parent} has.",
+                        lane.id, lane.agent
+                    ),
+                    _ => println!("{} opened for {} on {}.", lane.id, lane.agent, lane.base),
+                }
                 println!("Working copy: {}", lane.workdir.as_deref().unwrap_or(Path::new("")).display());
                 println!("Scope: {}", lane.scope.join(", "));
                 print_overlaps(&opened["overlaps"]);
@@ -1782,6 +1808,12 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 println!("Intent ............ {}", text("intent"));
             }
             println!("Base .............. {}", text("base"));
+            if status["parent"].is_string() {
+                println!("On ................ {}", text("parent"));
+            }
+            if status["target"].is_string() {
+                println!("Lands on .......... {}", text("target"));
+            }
             match status["workdir"].as_str() {
                 Some(workdir) => println!("Working copy ...... {workdir}"),
                 // A lane of a repository on a server, not worked on from here.
@@ -1841,11 +1873,14 @@ fn print_integration(result: &IntegrationResult) {
                 .as_ref()
                 .map(|c| format!(" (git {})", &c[..10.min(c.len())]))
                 .unwrap_or_default();
-            println!(
-                "{}: integrated as {}{git}{verified}",
-                result.lane,
-                result.checkpoint.clone().unwrap_or_default()
-            );
+            match &result.landed_on {
+                Some(target) => println!("{}: landed on {target}", result.lane),
+                None => println!(
+                    "{}: integrated as {}{git}{verified}",
+                    result.lane,
+                    result.checkpoint.clone().unwrap_or_default()
+                ),
+            }
             for auto in &result.auto_resolutions {
                 match (auto.kind.as_str(), &auto.new_name) {
                     ("rename_propagation", Some(new_name)) => println!(

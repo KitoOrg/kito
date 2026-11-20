@@ -27,6 +27,9 @@ runnable demo.
 | 12 | Encrypted connections and a sandbox per lane: a server known by its certificate; checks and lane commands that write only in their own copy | done |
 | 13 | Integration without waiting in line: lanes that do not depend on each other are checked in one run | done |
 | 14 | Git both ways: commits made with plain git are brought in through a lane, merged and pushed back | done |
+| 15 | Lanes on lanes: a lane opened on work that has not landed, landing on it or further down ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)) | done |
+| 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch, checks and protection | planned |
+| 17 | Review of a lane: diffs, comments and approvals, with a local web view | planned |
 
 ## Crates
 
@@ -167,6 +170,34 @@ kito rename src/auth.ts:getUser fetchUser --lane lane/1
 ```bash
 kito resolve conflict#1 --rewrite
 ```
+
+### Lanes on lanes
+
+An agent can build on another agent's work before it lands: a lane opened
+`--on` another starts from it as it is, and lands on it.
+
+```bash
+kito lane open bob --intent "show the team on the page" --scope src/page.py --on lane/1
+```
+
+Landing on a lane makes no checkpoint and runs no checks: the main lane does
+not move, and the work is checked when it gets there, with the lane it
+landed on. It is not queued behind lanes landing on the main lane. The lane
+landed on takes on the scope of what landed on it, since it brings it
+further, and `kito why` follows each line back to the lane that wrote it.
+
+A lane can also land further down than the lane it starts on, on main for
+instance. It then waits until the work it was built on is there, and brings
+only its own:
+
+```bash
+kito lane open carol --intent "the team is tested" --scope tests/ --on lane/1 --target main
+```
+
+A lane with lanes on it closes once the work they were built on has
+landed; they are then moved to where it went. Lanes stack as deep as
+needed. The design is [ADR 0001](docs/adr/0001-lanes-on-lanes.md);
+permanent lanes such as a `staging` come next.
 
 Agents do all this through the MCP server, `kito-mcp`, which offers
 `kito.open_lane`, `kito.sync`, `kito.status`, `kito.log`, `kito.set_intent`,

@@ -1,0 +1,90 @@
+# 1. A lane on a lane that has not landed
+
+$ kito lane open alice --intent users have a team --scope src/api.py
+lane/1 opened for alice on ckpt#1.
+Working copy: /demo/app/.kito/lanes/1/work
+Scope: src/api.py
+Why it is the way it is:
+  src/api.py
+    "an app with an API and a page": ada, checkpoint ckpt#1
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito lane open bob --intent show the team on the page --scope src/page.py --on 1
+lane/2 opened for bob on lane/1, which it lands on.
+Working copy: /demo/app/.kito/lanes/2/work
+Scope: src/page.py
+Why it is the way it is:
+  src/page.py
+    "an app with an API and a page": ada, checkpoint ckpt#1
+Every save there is recorded on the lane; `kito integrate lane/2` brings it in.
+
+$ grep -c get_team .kito/lanes/2/work/src/api.py     # bob sees alice's work
+1
+
+
+# 2. It lands on the lane it started on
+
+$ kito integrate 2
+lane/2: landed on lane/1
+  it reaches the main lane when lane/1 does
+
+$ grep -c team .kito/lanes/1/work/src/page.py src/page.py
+.kito/lanes/1/work/src/page.py:3
+src/page.py:0
+
+$ kito log -n 2
+◆ ckpt#1  an app with an API and a page  (git 0594923407)
+  fa3be843  11-20 14:18  ada  src/page.py  new  render created
+  94baa937  11-20 14:18  ada  src/api.py   new  get_user created
+
+
+# 3. On alice's lane, landing on main: it waits for her
+
+$ kito lane open carol --intent the team is tested --scope tests/ --on 1 --target main
+lane/3 opened for carol on lane/1; it lands on main once lane/1 has.
+Working copy: /demo/app/.kito/lanes/3/work
+Scope: tests/
+  (a directory was declared: why a file in it is the way it is, is told when it is about to change, and by the `why` tool at any time)
+Every save there is recorded on the lane; `kito integrate lane/3` brings it in.
+
+$ kito lanes
+lane/1   alice        active      base ckpt#1     4 ops   2 files  users have a team
+lane/2   bob          active      base ckpt#1     0 ops   0 files  on lane/1  show the team on the page
+lane/3   carol        active      base ckpt#1     0 ops   0 files  on lane/1, lands on main  the team is tested
+
+$ kito integrate 3
+lane/3: lane/3 is built on lane/1, whose work is not on main yet: integrate lane/1 first
+
+$ kito integrate 1
+lane/1: integrated as ckpt#2 (git 93f4a27184)
+
+$ kito integrate 3
+lane/3: integrated as ckpt#3 (git 0a491c3344)
+
+
+# 4. A lane under others closes once their base has landed
+
+$ kito lane close 1
+lane/1 closed: its working copy is gone. Nothing it did was left out of the main lane.
+
+$ kito lanes
+lane/2   bob          active      base ckpt#1     0 ops   0 files  show the team on the page
+lane/3   carol        active      base ckpt#3     0 ops   0 files  the team is tested
+
+
+# 5. Why the API is the way it is, from bob's lane
+
+$ kito why src/api.py:get_team --lane 2
+function get_team  (src/api.py)  lines 5-6
+
+Why it is the way it is, newest first:
+  1. users have a team
+
+$ kito log -n 4
+◆ ckpt#3  the team is tested  (git 0a491c3344)
+  547a201e  11-20 14:18  carol  tests/test_team.py  new    test_team created
+◆ ckpt#2  users have a team  (git 93f4a27184)
+  65c771f8  11-20 14:18  alice  src/page.py         +3 −2  render changed
+  4fae7297  11-20 14:18  alice  src/api.py          +4 −0  get_team created
+◆ ckpt#1  an app with an API and a page  (git 0594923407)
+  fa3be843  11-20 14:18  ada    src/page.py         new    render created

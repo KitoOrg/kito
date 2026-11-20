@@ -467,6 +467,8 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         owner: None,
         proposed: None,
         git_tip: None,
+        parent: None,
+        target: None,
     };
     store.put_lane(&lane).unwrap();
     assert_eq!(store.next_lane_id(), LaneId(2));

@@ -1234,3 +1234,49 @@ the `kill` of Ubuntu 24.04, reads that as `kill(-1, SIGKILL)`: every
 process of the user died, the shell and the terminal included. The group
 is now signalled with the system call (`rustix`), as the checks of an
 integration already were.
+
+### D-134 · The state of a lane is found through first parents
+A stacked lane starts from an op of its parent, and that parent may since
+have been brought up to its own target, leaving the op behind its `since`.
+Replaying "the parent's base plus its ops from `since`" would miss it.
+Every op's first parent is the op before it on its lane, and a lane's
+first op has `base_head` as first parent: replaying first parents back to
+the main lane gives the state at any op, at any depth. Open lanes whose
+head or base is that op answer at once.
+
+### D-135 · A child keeps its base; it waits instead
+When its parent lands, a child could be rebased onto the result. It is
+not: the target then holds the child's base (the parent's work) and the
+three-way merge from the old base brings only what the child did.
+Rebasing would rewrite ops for nothing. What a child needs is a rule:
+it lands only on a lane that holds the op it started from, found through
+both parents of the target's ops; ops are newer than those they are made
+on, so the walk stops at ops older than it.
+
+### D-136 · Landing on a lane: no checkpoint, no checks, at once
+Checkpoints are of the main lane until permanent lanes (phase 16). The
+checks run on what reaches the main lane; on a lane that is not shared
+they would check a state nobody deploys. With nothing to wait for, the
+daemon lands it when asked rather than behind the lanes waiting for the
+main lane's checks: that is the queue per target of ADR 0001, for now.
+Who may land on a lane is who may change it (its owner, or an
+integrator).
+
+### D-137 · The lane landed on takes on the scope
+It brings that work further, and would otherwise be refused at its own
+integration for changing what it never declared. The entries are added
+as the child declared them.
+
+### D-138 · A parent closes when its children's base has landed
+Closing a lane whose work a child was built on would leave the child on
+nothing. The close is refused while it is so; once the work has landed,
+the children are moved where it went. Adopting the parent's ops into the
+child was the other way, and would make the child bring work it did not
+do.
+
+### D-139 · Lines that came through a lane are followed into it
+On the main lane an integration's lines are attributed to the lane
+integrated (phase 10). A lane that landed on that lane did so with an op
+of its own there, whose lines are followed in the same way into the lane
+that landed, down to eight levels. Without it, a page written by Bob in a
+lane on Alice's would read as Alice's.

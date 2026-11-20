@@ -1926,7 +1926,7 @@ Kito pushed its history to a git remote and never forced a push. A commit
 made there with plain git therefore stopped every push until somebody
 reconciled the two by hand (a limit of phase 9). The first half of what
 was asked for under "teams not all on Kito"; review and a web view are
-phase 15.
+phase 17 (lanes on lanes and permanent lanes came first: 15 and 16).
 
 ### What is there
 
@@ -1998,10 +1998,85 @@ kept; `kito pull` from the command line.
   somebody integrates or runs `kito pull`.
 - **`kito pull` on a server is for whoever runs it**: clients cannot ask.
 
-## After phase 5
-## After phase 5
-## After phase 5
-## After phase 5
+## Phase 15 · lanes on lanes — done
+
+Every lane started from the main lane and landed on it: an agent could not
+build on another's work before it landed. The first half of
+[ADR 0001](adr/0001-lanes-on-lanes.md); permanent lanes such as a
+`staging` are phase 16, review and a web view phase 17.
+
+### What is there
+
+- **`Lane.parent` and `Lane.target`** (`kito-core`), optional: absent, a
+  lane starts from and lands on the main lane, as every lane did. The
+  store writes `kito-store 3` in its `format` file the first time a lane
+  with either is recorded, so that an older binary refuses it instead of
+  taking every lane for one of the main lane.
+- **The state at any op** (`Repo::state_at`) is the replay of its first
+  parents, back through its lane, the lanes below it and the main lane:
+  it holds at any depth, and after a parent was brought up to its own
+  target.
+- **`open_lane_on`** (`kito lane open --on`, MCP `open_lane` with `on` and
+  `target`): a lane on an open lane, as it is now, everything it saved
+  included. Its target is the lane it is on, or one below it.
+- **Integration onto a lane** (`kitod/src/integrate.rs`): the same merge,
+  with the target where the main lane was. It writes in the target's
+  working copy, records ops there signed by the agent that landed, makes
+  no checkpoint and runs no checks; the target takes on the scope of what
+  landed on it. The daemon does it as soon as it is asked, not behind the
+  lanes waiting for the main lane's checks.
+- **A lane lands only on a lane that holds what it was built on**
+  (`Repo::lane_holds`: the op it started from, among the target's ops
+  through both parents). A lane on `lane/1` that targets main waits until
+  `lane/1` has landed, and then brings only its own work.
+- **Closing a lane with lanes on it** is refused until what they were
+  built on has landed; they are then moved where it went.
+- **The why graph through parents**: what a stacked lane sees includes its
+  parents' work up to where it started; a line that came to the main lane
+  through a lane it landed on is told with the reason it was written for,
+  by whoever wrote it.
+
+### Demo
+
+```bash
+scripts/demo-phase15.sh
+```
+
+Output: [`docs/demo/phase15-demo.txt`](demo/phase15-demo.txt).
+
+### Acceptance target
+
+Set before the phase: an agent builds on a lane that has not landed, and
+its work reaches the main lane with it or after it, never bringing work it
+did not do. Met: a lane lands on the lane it started on, or further down
+once that one has landed; three lanes deep land one into the other; a
+parent with lanes on it closes only when their base has landed.
+
+### Tests
+
+350 tests in all. New: a lane on unlanded work, landing on it,
+the parent landing both; a lane that targets the main lane waiting for its
+parent and then bringing only its own work; closing refused, then the
+child moved; three lanes deep; stacked lanes rebuilt from the log alone
+and the store's format; why a stacked lane's code is the way it is, and
+lines that came through a lane told with their own reason
+(`kitod/tests/stack.rs`); the same from the command line.
+
+### Known limitations
+
+- **Landing on a lane runs no checks.** They run when the work reaches the
+  main lane.
+- **The uses of a renamed symbol are followed toward the main lane only**
+  (level 2, phase 4): landing on a lane merges what the syntax tells.
+- **A lane landed on keeps the reason of each landing as its own op**:
+  `kito log` on the main lane shows those ops under the agent that landed
+  them, and `kito why` tells the reason they were written for.
+- **The lanes landed on are not exported to git**: only checkpoints of the
+  main lane are, as before. Permanent lanes with branches of their own
+  are phase 16.
+- **Rolling the main lane back** below where a stacked lane's parent
+  started is not looked at specially.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

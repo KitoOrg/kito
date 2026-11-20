@@ -181,6 +181,8 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 owner: None,
                 proposed: None,
                 git_tip: None,
+                parent: None,
+                target: None,
             })
             .unwrap();
         store

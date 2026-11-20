@@ -105,6 +105,10 @@ pub struct IntegrationResult {
     /// What the lane changed outside the scope it declared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_scope: Vec<String>,
+    /// The lane the work landed on, when it is not the main lane: no
+    /// checkpoint was made, and no checks ran (ADR 0001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_on: Option<String>,
 }
 
 impl IntegrationResult {
@@ -121,6 +125,7 @@ impl IntegrationResult {
             your_next_base: None,
             message: None,
             out_of_scope: Vec::new(),
+            landed_on: None,
         }
     }
 

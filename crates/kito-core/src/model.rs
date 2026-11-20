@@ -391,17 +391,18 @@ pub enum LaneState {
 pub struct Lane {
     pub id: LaneId,
     pub agent: Author,
-    /// The checkpoint of the main lane the lane started from, or was last
-    /// brought up to.
+    /// The last checkpoint of the main lane below the lane: the one it
+    /// started from, or was last brought up to, or the one its parent lane
+    /// is filed under.
     pub base: CheckpointId,
     /// The parent of the lane's next op: its last op, or `base_head` when it
-    /// has recorded none since it was last brought up to the main lane.
+    /// has recorded none since it was last brought up to its target.
     pub head: OpId,
     pub workdir: PathBuf,
     pub state: LaneState,
-    /// The op of the main lane the lane's state starts from: the state of
-    /// the lane is the state of the main lane at this op, plus the lane's
-    /// own ops from `since` on.
+    /// The op of the parent lane the lane's state starts from: the state of
+    /// the lane is the state of its parent at this op, plus the lane's own
+    /// ops from `since` on (ADR 0001).
     pub base_head: OpId,
     /// How many of the lane's ops were already absorbed by `base_head`
     /// (integrated, or re-expressed on top of it).
@@ -432,6 +433,29 @@ pub struct Lane {
     /// in (40 hexadecimal digits): its integration is a merge with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tip: Option<String>,
+    /// The lane this one started from. None: the main lane (ADR 0001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<LaneId>,
+    /// The lane this one lands on. None: its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<LaneId>,
+}
+
+impl Lane {
+    /// The lane it started from: the main lane unless it is stacked.
+    pub fn parent_lane(&self) -> LaneId {
+        self.parent.unwrap_or(LaneId::MAIN)
+    }
+
+    /// The lane it lands on: its parent unless said otherwise.
+    pub fn target_lane(&self) -> LaneId {
+        self.target.unwrap_or_else(|| self.parent_lane())
+    }
+
+    /// Whether the store must be marked as holding lanes on lanes.
+    pub fn is_stacked(&self) -> bool {
+        self.parent.is_some() || self.target.is_some()
+    }
 }
 
 /// A lane that waits to be integrated by somebody who may.

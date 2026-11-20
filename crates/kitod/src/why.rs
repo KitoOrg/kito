@@ -770,20 +770,34 @@ impl Repo {
             all.extend(self.store.get_op(&touch.op)?);
         }
         // The chain the lane's own text went through: its ops since it
-        // last started from the main lane, and the main lane's before.
-        let based = self
-            .store
-            .lane_record(view)
-            .filter(|_| !view.is_main())
-            .and_then(|record| self.store.get_op(&record.base_head).ok().flatten())
-            .map(|op| op.at);
+        // last started from its parent, the parent's before that and since
+        // it started from its own, and so on down to the main lane's (ADR
+        // 0001). Each piece: a lane, and the times its ops are between.
+        let mut pieces: Vec<(LaneId, Option<Hlc>, Option<Hlc>)> = Vec::new();
+        let (mut lane, mut upper, mut first) = (view, None, true);
+        while pieces.len() < 64 {
+            if lane.is_main() {
+                pieces.push((LaneId::MAIN, None, upper));
+                break;
+            }
+            let record = self.store.lane_record(lane);
+            let based =
+                record.and_then(|record| self.store.get_op(&record.base_head).ok().flatten()).map(|op| op.at);
+            if !first || own {
+                pieces.push((lane, based, upper));
+            }
+            first = false;
+            upper = based;
+            lane = record.map_or(LaneId::MAIN, |record| record.parent_lane());
+        }
         let mut chain: Vec<&Op> = all
             .iter()
-            .filter(|op| match (op.lane == view, op.lane.is_main(), based) {
-                (true, true, _) => true,
-                (true, false, Some(based)) => own && op.at > based,
-                (false, true, Some(based)) => op.at <= based,
-                _ => false,
+            .filter(|op| {
+                pieces.iter().any(|(lane, after, until)| {
+                    op.lane == *lane
+                        && after.is_none_or(|after| op.at > after)
+                        && until.is_none_or(|until| op.at <= until)
+                })
             })
             .filter(|op| reach.includes(op))
             .collect();
@@ -836,6 +850,58 @@ impl Repo {
                 if *op == Some(*merge) {
                     if let Some(lane_op) = now_lines.get(line).and_then(|text| by_text.get(text)) {
                         *op = Some(*lane_op);
+                    }
+                }
+            }
+        }
+        // A lane that landed on another lane (ADR 0001): what the landing
+        // wrote on that lane was written in the lane that landed, and so on
+        // down the lanes stacked on each other.
+        for _ in 0..8 {
+            let landings: Vec<(&Op, LaneId)> = all
+                .iter()
+                .filter(|op| !op.lane.is_main() && lines.contains(&Some(op.id)))
+                .filter_map(|op| Some((op, integrated_lane(self.words(op)?)?)))
+                .collect();
+            if landings.is_empty() {
+                break;
+            }
+            for (landing, lane) in landings {
+                let onto = landing.lane;
+                // The lane's ops since it last landed on the same lane.
+                let since = all
+                    .iter()
+                    .filter(|op| op.lane == onto && op.at < landing.at)
+                    .filter(|op| self.words(op).and_then(integrated_lane) == Some(lane))
+                    .map(|op| op.at)
+                    .max();
+                let theirs: Vec<&Op> = all
+                    .iter()
+                    .filter(|op| {
+                        op.lane == lane && op.at <= landing.at && since.is_none_or(|since| op.at > since)
+                    })
+                    .collect();
+                let lane_versions = self.file_versions(&theirs);
+                let Some((_, last)) = lane_versions.last() else { continue };
+                // The file as the lane landed on had it before.
+                let before: Vec<&Op> =
+                    all.iter().filter(|op| op.lane == onto && op.at < landing.at).collect();
+                let base = self.file_versions(&before).last().map(|(_, text)| text.clone());
+                let offset = usize::from(base.is_some());
+                let texts: Vec<String> =
+                    base.into_iter().chain(lane_versions.iter().map(|(_, text)| text.clone())).collect();
+                let mut by_text: HashMap<&str, OpId> = HashMap::new();
+                for (line, version) in last.lines().zip(blame(&texts)) {
+                    if version >= offset {
+                        by_text.entry(line).or_insert(lane_versions[version - offset].0);
+                    }
+                }
+                // A line that cannot be followed stays with the landing.
+                for (line, op) in lines.iter_mut().enumerate() {
+                    if *op == Some(landing.id) {
+                        if let Some(lane_op) = now_lines.get(line).and_then(|text| by_text.get(text)) {
+                            *op = Some(*lane_op);
+                        }
                     }
                 }
             }

@@ -43,7 +43,9 @@ When a piece of work is done call request_integration, then integration_result w
 brought up to it; `conflicts` lists what to decide with resolve_conflict before asking again; \
 `verification_failed` shows the command that failed on the merged result: fix it in your working copy \
 and ask again; `out_of_scope` lists what you changed without declaring it; `awaiting_approval` means \
-the merge and the checks passed and somebody else brings the lane in: leave it open and say so. To rename a function or a \
+the merge and the checks passed and somebody else brings the lane in: leave it open and say so. To build \
+on another lane's work before it lands, open your lane with `on` set to that lane: your work then lands \
+on it (the result says `landed_on`, with no checkpoint), and reaches the main lane with it. To rename a function or a \
 class use rename_symbol rather than editing its name, so that its history follows it. You are told why \
 code is the way it is before you change it: open_lane and extend_scope answer with `why`, the reasons \
 what you declared was changed (who, for whom, in which lane, under which checkpoint) and who uses it. If \
@@ -78,7 +80,9 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
                         "description": "What you will change: functions and classes as file:name (src/auth.ts:getUser, also ones that do not exist yet), files (src/auth.ts), directories (src/billing/)"
                     },
                     "task": { "type": "string", "description": "The task it belongs to (task #55)" },
-                    "base": { "type": "string", "description": "A checkpoint to start from (ckpt#12) instead of the current state" }
+                    "base": { "type": "string", "description": "A checkpoint to start from (ckpt#12) instead of the current state" },
+                    "on": { "type": "string", "description": "Another lane to start on, as it is now, before it has landed (lane/1): to build on work in progress. Your lane then lands on that lane" },
+                    "target": { "type": "string", "description": "With `on`: the lane to land on instead, one below it (main). Your lane waits until the work it was built on is there" }
                 },
                 "required": ["agent", "intent", "scope"]
             }),

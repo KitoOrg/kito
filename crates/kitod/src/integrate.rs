@@ -50,8 +50,10 @@ impl Checks {
 /// A merge that composed, waiting to be verified and recorded.
 pub struct Prepared {
     pub lane: LaneId,
+    /// Where it lands: the main lane, or another lane (ADR 0001).
+    pub target: LaneId,
     /// What the merge was computed on: if either moved, it is computed again.
-    main_head: Option<OpId>,
+    target_head: Option<OpId>,
     lane_ops: u64,
     outcome: kito_merge::Outcome,
     /// Conflicts this merge settled with the decisions taken on them.
@@ -168,7 +170,7 @@ pub fn integrate_batch<B: Bench>(bench: &B, lanes: &[LaneId]) {
     }
 }
 
-/// A decision on a conflict, as a client gives it./// A decision on a conflict, as a client gives it.
+/// A decision on a conflict, as a client gives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Main,
@@ -334,12 +336,17 @@ impl Repo {
         answers: Option<&RefAnswers>,
         uses: &HashMap<SymbolId, bool>,
     ) -> Result<(kito_merge::Outcome, Vec<AutoResolution>)> {
-        let spread = match answers {
+        let target = self.target_of(lane)?;
+        // The uses of what was renamed are followed toward the main lane only.
+        let spread = match answers.filter(|_| target.is_main()) {
             Some(answers) => Some(self.propagate(lane, answers, uses)?),
             None => None,
         };
-        let main_tree =
-            spread.as_ref().and_then(|s| s.main.clone()).unwrap_or_else(|| self.main.tree.clone());
+        let main_tree = spread
+            .as_ref()
+            .and_then(|s| s.main.clone())
+            .unwrap_or_else(|| self.work(target).map(|work| work.tree.clone()).unwrap_or_default());
+        let target_symbols = self.work(target)?.symbols.clone();
         // Files parsed for the merge stay parsed for the capture that
         // records its result, and those the captures parsed are not parsed
         // again here.
@@ -358,7 +365,7 @@ impl Repo {
                     tree: spread.as_ref().and_then(|s| s.base.as_ref()).unwrap_or(&at.base_tree),
                     symbols: &at.base_symbols,
                 },
-                main: kito_merge::Side { tree: &main_tree, symbols: &self.main.symbols },
+                main: kito_merge::Side { tree: &main_tree, symbols: &target_symbols },
                 lane: kito_merge::Side { tree: lane_tree, symbols: &at.work.symbols },
                 blob: &|id| store.get_blob(id).ok().flatten(),
                 resolutions: decisions,
@@ -385,14 +392,25 @@ impl Repo {
         Ok((outcome, done))
     }
 
-    /// Captures what was saved on the main lane in the files a lane's work
+    /// Captures what was saved on the lane's target in the files its work
     /// touches: nothing unrecorded may be merged over, or written over.
     /// Returns `true` if something was recorded.
     pub(crate) fn capture_main_under(&mut self, lane: LaneId, also: &[PathBuf]) -> Result<bool> {
+        let target = self.target_of(lane)?;
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let mut paths: Vec<PathBuf> = at.work.tree.differences(&at.base_tree).map(Path::to_owned).collect();
         paths.extend(also.iter().cloned());
-        Ok(!self.capture_lane(LaneId::MAIN, paths)?.is_empty())
+        Ok(!self.capture_lane(target, paths)?.is_empty())
+    }
+
+    /// The lane a lane lands on, if it is there to land on.
+    pub(crate) fn target_of(&self, lane: LaneId) -> Result<LaneId> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let target = at.record.target_lane();
+        if !target.is_main() && !self.lanes.contains_key(&target) {
+            return Err(Error::Other(format!("{lane} lands on {target}, which is closed")));
+        }
+        Ok(target)
     }
 
     /// Step 1: captures what is still unsaved on both sides and merges the
@@ -404,6 +422,17 @@ impl Repo {
     pub fn prepare_integration(&mut self, lane: LaneId, answers: Option<&RefAnswers>) -> Result<Preparation> {
         if lane.is_main() {
             return Err(Error::Other("the main lane is what lanes are integrated into".into()));
+        }
+        let target = self.target_of(lane)?;
+        // A lane brings what it did, not what it was built on (ADR 0001).
+        if let Some(waits) = self.waits_for(lane)? {
+            return Ok(Preparation::Done(Box::new(IntegrationResult::failed(
+                lane.to_string(),
+                format!(
+                    "{lane} is built on {waits}, whose work is not on {} yet: integrate {waits} first",
+                    crate::lanes::lane_word(target)
+                ),
+            ))));
         }
         // The lane is scanned whole: whatever its agent saved is part of
         // what it asks to integrate. Of the main directory only the files
@@ -425,8 +454,8 @@ impl Repo {
             result.out_of_scope = outside;
             return Ok(Preparation::Done(Box::new(result)));
         }
-        let answers = answers.filter(|answers| self.answers_hold(lane, answers));
-        if answers.is_none() {
+        let answers = answers.filter(|answers| target.is_main() && self.answers_hold(lane, answers));
+        if answers.is_none() && target.is_main() {
             if let Some(plan) = self.reference_plan(lane)? {
                 return Ok(Preparation::Ask(Box::new(plan)));
             }
@@ -452,8 +481,10 @@ impl Repo {
                 break;
             }
             // The main lane moved: what was asked about it is no longer so.
-            if let Some(plan) = self.reference_plan(lane)? {
-                return Ok(Preparation::Ask(Box::new(plan)));
+            if target.is_main() {
+                if let Some(plan) = self.reference_plan(lane)? {
+                    return Ok(Preparation::Ask(Box::new(plan)));
+                }
             }
             (found, propagated) = self.merge_lane(lane, &HashMap::new(), None, &no_uses)?;
         }
@@ -521,25 +552,32 @@ impl Repo {
         if outcome.files.is_empty() {
             // The decisions taken left the main lane as it is: they are
             // applied by doing nothing.
+            let target_head = self.work(target)?.head;
             for id in &settled {
                 if let Some(mut conflict) = self.store.conflict(*id).cloned() {
-                    conflict.resolved_by = self.main.head;
+                    conflict.resolved_by = target_head;
                     self.store.put_conflict(&conflict)?;
                 }
             }
-            // Nothing the main lane does not have: the lane just catches up.
-            let base = self.lanes[&lane].record.base;
-            let base = self.latest_checkpoint_at_head().unwrap_or(base);
+            // Nothing the target does not have: the lane just catches up.
+            let base = self.base_on(target, self.lanes[&lane].record.base);
             self.fast_forward(lane, base)?;
             let mut result = IntegrationResult::new(lane.to_string(), Outcome::NothingToIntegrate);
             result.your_next_base = Some(base.to_string());
-            result.message = Some("the main lane already has everything the lane has".to_owned());
+            result.message = Some(format!(
+                "{} already has everything the lane has",
+                match target.is_main() {
+                    true => "the main lane".to_owned(),
+                    false => target.to_string(),
+                }
+            ));
             return Ok(Preparation::Done(Box::new(result)));
         }
         let at = &self.lanes[&lane];
         Ok(Preparation::Ready(Box::new(Prepared {
             lane,
-            main_head: self.main.head,
+            target,
+            target_head: self.work(target)?.head,
             lane_ops: at.work.ops,
             outcome,
             settled,
@@ -550,6 +588,16 @@ impl Repo {
 
     fn latest_checkpoint_at_head(&self) -> Option<kito_core::CheckpointId> {
         self.store.checkpoints().next_back().filter(|c| Some(c.head) == self.main.head).map(|c| c.id)
+    }
+
+    /// The checkpoint a lane brought up to `target` is filed under: the
+    /// last one, if it is the main lane as it is; for another lane, the one
+    /// that lane is filed under.
+    fn base_on(&self, target: LaneId, otherwise: kito_core::CheckpointId) -> kito_core::CheckpointId {
+        match target.is_main() {
+            true => self.latest_checkpoint_at_head().unwrap_or(otherwise),
+            false => self.lanes.get(&target).map_or(otherwise, |at| at.record.base),
+        }
     }
 
     /// Brings the conflict records of a lane in line with what a merge
@@ -563,8 +611,9 @@ impl Repo {
         open: &[Conflict],
         same_texts: &dyn Fn(&Conflict, &Found) -> bool,
     ) -> Result<Vec<ConflictInfo>> {
-        let (main_head, lane_head) = (self.main.head, self.lanes[&lane].work.head);
-        let sides: Vec<OpId> = main_head.into_iter().chain(lane_head).collect();
+        let target_head = self.work(self.target_of(lane)?)?.head;
+        let lane_head = self.lanes[&lane].work.head;
+        let sides: Vec<OpId> = target_head.into_iter().chain(lane_head).collect();
         let mut current = Vec::new();
         for conflict in found {
             let known = open.iter().find(|c| subject_of(c) == conflict.subject && c.kind == conflict.kind);
@@ -706,6 +755,12 @@ impl Repo {
         let mut plan = BatchPlan::default();
         let mut taken: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
         for lane in lanes {
+            // Runs are made of lanes landing on the main lane; the others
+            // have no checks to share (ADR 0001).
+            if !matches!(self.target_of(*lane), Ok(target) if target.is_main()) {
+                plan.alone.push(*lane);
+                continue;
+            }
             let prepared = match self.prepare_integration(*lane, None) {
                 Ok(Preparation::Ready(prepared)) => prepared,
                 Ok(Preparation::Done(result)) => {
@@ -881,7 +936,8 @@ impl Repo {
     /// commands will run. `None` if no command is configured.
     pub fn verification_copy(&mut self, prepared: &Prepared) -> Result<Option<Checks>> {
         let commands = self.config.verify.commands.clone();
-        if commands.is_empty() {
+        // Work landing on a lane is checked when it reaches the main lane.
+        if commands.is_empty() || !prepared.target.is_main() {
             return Ok(None);
         }
         let confinement = self.confinement()?;
@@ -915,19 +971,19 @@ impl Repo {
         hold: Option<Author>,
         approved_by: Option<Author>,
     ) -> Result<Option<IntegrationResult>> {
-        let lane = prepared.lane;
+        let (lane, target) = (prepared.lane, prepared.target);
         // Nothing may have been saved meanwhile in the files about to be
-        // written: on the main lane those of the merge, in the lane's
-        // working copy those in which it differs from the result.
+        // written: on the target those of the merge, in the lane's working
+        // copy those in which it differs from the result.
         let written: Vec<PathBuf> = prepared.outcome.files.keys().cloned().collect();
         self.capture_main_under(lane, &written)?;
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let mut rewritten: Vec<PathBuf> =
-            at.work.tree.differences(&self.main.tree).map(Path::to_owned).collect();
+            at.work.tree.differences(&self.work(target)?.tree).map(Path::to_owned).collect();
         rewritten.extend(written);
         self.capture_lane(lane, rewritten)?;
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
-        if self.main.head != prepared.main_head || at.work.ops != prepared.lane_ops {
+        if self.work(target)?.head != prepared.target_head || at.work.ops != prepared.lane_ops {
             return Ok(None);
         }
         let mut result = IntegrationResult::new(lane.to_string(), Outcome::Integrated);
@@ -964,29 +1020,31 @@ impl Repo {
         });
 
         // An untracked file where one must be written is not ours to overwrite.
+        let root = self.work(target)?.root.clone();
         for (path, file) in &prepared.outcome.files {
             if file.is_some()
-                && !self.main.tree.contains(path)
-                && fs::symlink_metadata(self.root.join(path)).is_ok()
+                && !self.work(target)?.tree.contains(path)
+                && fs::symlink_metadata(root.join(path)).is_ok()
             {
                 return Ok(Some(IntegrationResult::failed(
                     lane.to_string(),
                     format!(
-                        "{}: exists in the main directory but is not tracked; move it away",
-                        path.display()
+                        "{}: exists in the directory of {} but is not tracked; move it away",
+                        path.display(),
+                        crate::lanes::lane_word(target)
                     ),
                 )));
             }
         }
         // The files, then the ops that record them: signed by the agent,
         // the first one with the lane's head as second parent.
-        let root = self.root.clone();
         let mut written = Vec::new();
         for (path, file) in &prepared.outcome.files {
             match file {
                 Some(file) => {
-                    let blob = match self.main.tree.get(path) {
-                        Some(before) => self.store.put_blob_like(&file.content, &before.blob)?,
+                    let before = self.work(target)?.tree.get(path).map(|entry| entry.blob);
+                    let blob = match before {
+                        Some(before) => self.store.put_blob_like(&file.content, &before)?,
                         None => self.store.put_blob(&file.content)?,
                     };
                     written.push((path.clone(), TreeEntry { blob, mode: file.mode }));
@@ -1004,18 +1062,23 @@ impl Repo {
         let paths: Vec<PathBuf> = prepared.outcome.files.keys().cloned().collect();
         let identities = prepared.outcome.identities.clone();
         let signer = agent.clone();
-        let ops = self.with(LaneId::MAIN, |repo, work| {
+        let ops = self.with(target, |repo, work| {
             let human = std::mem::replace(&mut work.author, signer);
             work.merge_parent = lane_head;
             // This is the one way into a protected main lane.
-            repo.main_open = true;
+            repo.main_open = target.is_main();
             let recorded = repo.capture_work(work, paths, Some(intent.id), &identities, Unsettled::Trust);
             repo.main_open = false;
             work.merge_parent = None;
             work.author = human;
             recorded
         })?;
-        let head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
+        let head = self.work(target)?.head.ok_or(Error::NothingToCheckpoint)?;
+        if !target.is_main() {
+            return self
+                .landed_on_lane(prepared, ops.first().map(|op| op.id).unwrap_or(head), result)
+                .map(Some);
+        }
 
         let label = what.unwrap_or_else(|| format!("{lane} ({})", agent.name));
         // A lane that brings in commits made outside Kito: its checkpoint
@@ -1091,11 +1154,65 @@ impl Repo {
         Ok(Some(result))
     }
 
-    /// Brings a lane to the current state of the main lane: its working
-    /// copy, its state and its base. Its ops so far are behind it.
+    /// The end of a landing on a lane that is not the main lane: no
+    /// checkpoint (the main lane did not move) and no checks (they run when
+    /// the work reaches the main lane). The target takes on the scope of
+    /// what landed on it, since it will bring it further.
+    fn landed_on_lane(
+        &mut self,
+        prepared: Prepared,
+        first: OpId,
+        mut result: IntegrationResult,
+    ) -> Result<IntegrationResult> {
+        let (lane, target) = (prepared.lane, prepared.target);
+        for id in &prepared.settled {
+            if let Some(mut conflict) = self.store.conflict(*id).cloned() {
+                conflict.resolved_by = Some(first);
+                self.store.put_conflict(&conflict)?;
+            }
+        }
+        let brought = self.lanes.get(&lane).map(|at| at.record.scope.clone()).unwrap_or_default();
+        let at = self.lanes.get_mut(&target).ok_or(Error::NoSuchLane(target))?;
+        for entry in brought {
+            if !at.record.scope.iter().any(|have| have.item == entry.item) {
+                at.record.scope.push(entry);
+            }
+        }
+        let state = at.record.state;
+        self.put_lane_state(target, state)?;
+        let base = self.base_on(target, self.lanes[&lane].record.base);
+        self.fast_forward(lane, base)?;
+        let symbols = &self.work(target)?.symbols;
+        result.auto_resolutions = prepared
+            .outcome
+            .merged_symbols
+            .iter()
+            .map(|id| AutoResolution {
+                kind: "body_merge".to_owned(),
+                symbol: symbol_ref(symbols, *id),
+                new_name: None,
+                locations: symbols
+                    .get(*id)
+                    .map(|entry| entry.file.display().to_string())
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        result.landed_on = Some(target.to_string());
+        result.message = Some(format!("it reaches the main lane when {target} does"));
+        result.your_next_base = Some(base.to_string());
+        self.store.commit()?;
+        Ok(result)
+    }
+
+    /// Brings a lane to the current state of its target: its working copy,
+    /// its state and its base. Its ops so far are behind it.
     fn fast_forward(&mut self, lane: LaneId, base: kito_core::CheckpointId) -> Result<()> {
-        let main_head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
-        let (tree, symbols) = (self.main.tree.clone(), self.main.symbols.clone());
+        let target = self.target_of(lane)?;
+        let target_work = self.work(target)?;
+        let target_head = target_work.head.ok_or(Error::NothingToCheckpoint)?;
+        let (tree, symbols) = (target_work.tree.clone(), target_work.symbols.clone());
+        let main_head = target_head;
         let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
         let workdir = at.work.root.clone();
         let mut write: Vec<(PathBuf, TreeEntry)> = Vec::new();
@@ -1129,6 +1246,11 @@ impl Repo {
         at.record.proposed = None;
         // What it brought from git is on the main lane now.
         at.record.git_tip = None;
+        // Brought up to a lane below its parent: that lane is its parent now.
+        if target != at.record.parent_lane() {
+            at.record.parent = Some(target).filter(|target| !target.is_main());
+            at.record.target = None;
+        }
         // The saved state of the lane is written when the repository is
         // closed: until then the log has everything.
         self.put_lane_state(lane, LaneState::Active)
