@@ -37,6 +37,7 @@ toml_edit.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 sha2.workspace = true
+rustix.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true

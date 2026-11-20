@@ -1993,6 +1993,7 @@ dependencies = [
  "kito-store",
  "landlock",
  "notify",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",

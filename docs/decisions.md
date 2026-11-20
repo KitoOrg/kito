@@ -1226,3 +1226,11 @@ for up to 2 s before it says it is in use. A second daemon on the same
 store is still refused, two seconds later. Locks that a fork does not
 inherit (POSIX record locks) would not keep two opens in one process
 apart, which the store relies on.
+
+### D-133 · A process group is signalled directly, never through `kill`
+A lane command that outlives its time is stopped with its whole process
+group. It was done by running `kill -KILL -<group>`, and procps-ng 4.0.4,
+the `kill` of Ubuntu 24.04, reads that as `kill(-1, SIGKILL)`: every
+process of the user died, the shell and the terminal included. The group
+is now signalled with the system call (`rustix`), as the checks of an
+integration already were.

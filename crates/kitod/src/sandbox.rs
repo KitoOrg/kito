@@ -220,12 +220,13 @@ pub fn run_in_lane(
             Some(status) => break Some(status),
             None if std::time::Instant::now() >= deadline => {
                 late = true;
-                // The whole group: `kill` with a negative number.
-                let _ = std::process::Command::new("kill")
-                    .arg("-KILL")
-                    .arg(format!("-{}", child.id()))
-                    .stderr(Stdio::null())
-                    .status();
+                // The whole group, signalled directly. Not through the
+                // `kill` program: procps-ng 4.0.4 (Ubuntu 24.04) reads
+                // `kill -KILL -<group>` as `kill(-1)` and kills every
+                // process of the user (D-133).
+                if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+                    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+                }
                 let _ = child.kill();
                 break child.wait().ok();
             }
