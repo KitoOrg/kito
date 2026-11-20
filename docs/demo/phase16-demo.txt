@@ -1,0 +1,67 @@
+# 1. A permanent lane next to main
+
+$ kito lane create staging
+staging (lane/1) created on ckpt#1: open lanes on it with `--on staging`, land it on main with `kito integrate staging`.
+
+$ kito lanes
+lane/1   ada          active      base ckpt#1     0 ops   0 files  permanent: staging  the permanent lane staging
+
+
+# 2. Work lands on staging, under checkpoints of its own
+
+$ kito integrate 2
+lane/2: landed on staging as ckpt#2 (git 386633266b), verified in 0.2 s
+
+$ kito integrate 3
+lane/3: landed on staging as ckpt#3 (git e5b816211b), verified in 0.2 s
+
+$ git log --graph --oneline --all     # here; the remote has both branches too
+* e5b8162  (staging) show the team
+* 3866332  users have a team
+* 3482e22  (HEAD -> main) an app with an API and a page
+
+$ git -C remote.git branch
+* main
+  staging
+
+
+# 3. A fix lands on main directly; staging catches up
+
+$ kito integrate 4
+lane/4: integrated as ckpt#4 (git ca90d126c1)
+
+$ kito lane catch-up staging
+staging caught up with main: README.md
+
+
+# 4. Staging lands on main as a merge, and stays
+
+$ kito integrate staging
+lane/1: integrated as ckpt#6 (git 4cdfd40ae0)
+
+$ git log --graph --oneline --all
+*   4cdfd40  (HEAD -> main) staging
+|\  
+| *   3308dcc  (staging) catch up with main
+| |\  
+| |/  
+|/|   
+* | ca90d12  a readme
+| * e5b8162  show the team
+| * 3866332  users have a team
+|/  
+* 3482e22  an app with an API and a page
+
+$ kito lanes
+lane/1   ada          active      base ckpt#6     0 ops   0 files  permanent: staging  the permanent lane staging
+lane/2   alice        active      base ckpt#1     0 ops   0 files  on staging  users have a team
+lane/3   bob          active      base ckpt#1     0 ops   0 files  on staging  show the team
+lane/4   carol        active      base ckpt#4     0 ops   0 files  a readme
+
+$ cat src/page.py
+from api import get_user
+
+
+def render(user_id):
+    user = get_user(user_id)
+    return "user " + str(user["id"]) + " of " + user["team"]

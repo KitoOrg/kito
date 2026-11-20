@@ -439,6 +439,10 @@ pub struct Lane {
     /// The lane this one lands on. None: its parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<LaneId>,
+    /// Set for a permanent lane: its name (`staging`), unique and never
+    /// `main`. It cannot be closed and has checkpoints of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Lane {
@@ -454,7 +458,12 @@ impl Lane {
 
     /// Whether the store must be marked as holding lanes on lanes.
     pub fn is_stacked(&self) -> bool {
-        self.parent.is_some() || self.target.is_some()
+        self.parent.is_some() || self.target.is_some() || self.name.is_some()
+    }
+
+    /// A lane that is never closed: `staging` next to `main`.
+    pub fn is_permanent(&self) -> bool {
+        self.name.is_some()
     }
 }
 
@@ -571,4 +580,15 @@ pub struct Checkpoint {
     /// parent.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::serde_helpers::opt_oid20")]
     pub git_merge: Option<[u8; 20]>,
+    /// The permanent lane this is a checkpoint of. None: the main lane
+    /// (ADR 0001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneId>,
+}
+
+impl Checkpoint {
+    /// The lane it is a checkpoint of.
+    pub fn lane_of(&self) -> LaneId {
+        self.lane.unwrap_or(LaneId::MAIN)
+    }
 }

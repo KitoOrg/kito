@@ -95,8 +95,10 @@ is a checkpoint of the target when the target is permanent. Landing on a
 lane that is not permanent writes ops on that lane, as a capture would,
 under the intent of the lane that landed.
 
-- **One queue per target.** Lanes landing on `staging` do not wait for
-  lanes landing on `main`; batches (phase 13) are made per target.
+- **Queues.** Lanes landing on a lane that is not permanent run no checks
+  and do not wait in the queue. Lanes landing on a permanent lane go
+  through the one queue, with their own checks; batches (phase 13) are
+  made of lanes landing on main only.
 - **Checks per target.** `[verify]` stays the default; a permanent lane
   may have its own (`[lanes.staging.verify]`). Landing on a lane that is
   not permanent runs no checks: the work is not on a shared lane yet,
@@ -131,11 +133,14 @@ under the intent of the lane that landed.
 - `kito integrate staging` lands the permanent lane on its target (main)
   without closing it, as one checkpoint of the target; staging then
   starts again from that checkpoint, as a landed parent's children do.
-- `kito catch-up staging` brings main's later checkpoints into staging
-  (the same merge, the other way): what landed on main directly does
-  not have to go through staging.
-- Protection is per permanent lane: `[lanes.staging] protected` next to
-  `[main] protected`, which stays.
+- `kito lane catch-up staging` brings what main did since into staging
+  (the same merge, the other way, as a checkpoint of staging exported as
+  a merge with main's commit): what landed on main directly does not
+  have to go through staging. Staging keeps its base, so those changes
+  are on both sides when it lands and merge as one.
+- Who may land on a permanent lane: `[lanes.staging] integrate`, a list
+  of people; empty, whoever may integrate. Work reaches a permanent lane
+  only by landing on it.
 
 **Git.** Each permanent lane is exported to its own branch
 (`refs/heads/<name>`, or `[lanes.<name>] branch`), its checkpoints in
@@ -150,7 +155,7 @@ its target. The blame chain of a lane goes through its parents.
 
 **Server.** The `Integrate` role keeps meaning "may land work", on any
 lane. A permanent lane may restrict who lands on it
-(`[lanes.main] integrate = ["ci"]`); the default is the role, as today.
+(`[lanes.staging] integrate = ["ci"]`); the default is the role, as today.
 
 ## Consequences
 
@@ -181,8 +186,8 @@ Two phases, each closed as usual:
   on a lane served without waiting for the main lane's queue; CLI and MCP
   (`--on`, `--target`); why graph through parents.
 - **Phase 16 · Permanent lanes**: names, checkpoints and git branches per
-  permanent lane, `integrate staging` and `catch-up`, checks and
-  protection per lane, push and pull per branch, `integrate` lists on the
-  server.
+  permanent lane, `integrate staging` and `lane catch-up`, checks per
+  lane, the branches pushed with main's, `integrate` lists. Pulling a
+  permanent lane's branch from the remote is left for later.
 
 Review of a lane with a web view moves to phase 17.

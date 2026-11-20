@@ -443,6 +443,23 @@ impl Daemon {
                         self.with_repo(|repo| Ok(repo.lanes(all))).map_err(internal)?,
                     ))
                 }
+                // A permanent lane, `staging` (ADR 0001).
+                "create_lane" => {
+                    let name = text("name")?;
+                    let from = optional("from");
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| {
+                            let from = from.as_deref().map(|spec| repo.lane_of(spec)).transpose()?;
+                            repo.create_lane(name, from)
+                        })
+                        .map_err(internal)?,
+                    ))
+                }
+                "catch_up" => {
+                    let lane = lane()?;
+                    let written = self.with_repo(|repo| repo.catch_up(lane)).map_err(internal)?;
+                    Ok(json!({ "lane": lane.to_string(), "files": written }))
+                }
                 "open_lane" => {
                     let agent = text("agent")?;
                     let (task, base) = (optional("task"), optional("base"));
@@ -725,8 +742,15 @@ impl Daemon {
                     // Landing on another lane waits for no checks, and so
                     // for no lane landing on the main lane: it is done now,
                     // by whoever may change that lane (ADR 0001).
-                    let target = self.with_repo(|repo| repo.target_of(lane)).map_err(internal)?;
-                    if !target.is_main() {
+                    let (target, permanent) = self
+                        .with_repo(|repo| {
+                            let target = repo.target_of(lane)?;
+                            // Who may land on a permanent lane, when it says.
+                            repo.may_land_on(target, person_name(params).as_deref())?;
+                            Ok((target, repo.is_permanent(target)))
+                        })
+                        .map_err(internal)?;
+                    if !permanent {
                         let person = person_name(params);
                         let result = self
                             .with_repo(|repo| {
@@ -1180,11 +1204,16 @@ async fn push_loop(daemon: Arc<Daemon>) {
         let asked = tokio::task::spawn_blocking(move || {
             worker.with_repo(|repo| {
                 let git = &repo.config().git;
-                Ok((git.push.clone(), git.branch.clone(), repo.status()?.last_checkpoint))
+                Ok((
+                    git.push.clone(),
+                    git.branch.clone(),
+                    repo.status()?.last_checkpoint,
+                    repo.permanent_branches(),
+                ))
             })
         })
         .await;
-        let Ok(Ok((Some(remote), branch, checkpoint))) = asked else { continue };
+        let Ok(Ok((Some(remote), branch, checkpoint, permanent))) = asked else { continue };
         // What the remote has that the main lane does not comes in first:
         // commits made with git by people who do not work through Kito.
         let worker = daemon.clone();
@@ -1210,10 +1239,12 @@ async fn push_loop(daemon: Arc<Daemon>) {
         }
         // The branch Kito advances: the one named, or the one HEAD is on.
         let what = branch.map_or_else(|| "HEAD".to_owned(), |branch| format!("refs/heads/{branch}"));
+        // With the branches of the permanent lanes (ADR 0001).
         let pushing = tokio::process::Command::new("git")
             .arg("-C")
             .arg(&daemon.root)
             .args(["push", "--quiet", &remote, &what])
+            .args(permanent.iter().map(|branch| format!("refs/heads/{branch}")))
             // Nobody is there to type a password.
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(std::process::Stdio::null())

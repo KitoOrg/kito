@@ -1280,3 +1280,37 @@ integrated (phase 10). A lane that landed on that lane did so with an op
 of its own there, whose lines are followed in the same way into the lane
 that landed, down to eight levels. Without it, a page written by Bob in a
 lane on Alice's would read as Alice's.
+
+### D-140 · `checkpoints()` keeps meaning the main lane's
+Every reader of the checkpoints until now (export, log, status, rollback,
+pull, the why index) means the main lane's. Rather than filter in each,
+the store's `checkpoints()` returns those, and `lane_checkpoints` and
+`all_checkpoints` are new: a reader that forgets permanent lanes stays
+right about main.
+
+### D-141 · A permanent lane is a lane with a name
+Not a second kind of lane: it has a working copy, ops, a base, and lands
+like any other. What differs: it has no scope (it holds what landed on
+it), it is not closed, its landings are checkpoints of it, and it is
+named. Main stays the lane without a record.
+
+### D-142 · Catching up keeps the base
+Moving staging's base to main's head would need staging's own work
+re-expressed on top. The merge is written on staging instead, and its
+base stays: when staging lands, main's changes are on both sides and the
+merge by function takes them as one. The next landing on main brings
+staging up to main anyway.
+
+### D-143 · A permanent lane's commits, made whole
+The branch of a permanent lane is written from the tree at each of its
+checkpoints, every file, rather than replayed op by op as main's is:
+permanent lanes have few checkpoints, and their ops start from different
+states of main. Its first parent is the lane's commit before; its second,
+main's commit, when the lane was brought up to a new state of main, or
+the commit a catch-up merged.
+
+### D-144 · Staging landing on main is a merge with staging's branch
+When the last checkpoint of the permanent lane is the lane as it lands,
+main's checkpoint records its commit (`git_merge`, as for a pull) and is
+exported as a merge: `git log` shows what came through staging, and a
+branch that follows staging fast-forwards to main.

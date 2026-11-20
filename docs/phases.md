@@ -2077,6 +2077,76 @@ lines that came through a lane told with their own reason
 - **Rolling the main lane back** below where a stacked lane's parent
   started is not looked at specially.
 
+## Phase 16 · permanent lanes — done
+
+The second half of [ADR 0001](adr/0001-lanes-on-lanes.md): a `staging`
+next to `main`, with checkpoints, a git branch and checks of its own.
+
+### What is there
+
+- **`Lane.name`** marks a permanent lane; **`Checkpoint.lane`** says
+  whose checkpoint it is (absent: the main lane). `Store::checkpoints()`
+  still means those of the main lane, which every reader before assumed;
+  `lane_checkpoints` and `all_checkpoints` are new. Either field makes the
+  store `kito-store 3`.
+- **`Repo::create_lane`** (`kito lane create staging [--from LANE]`, RPC
+  `create_lane`): a lane with no scope, never closed, found by its name
+  wherever a lane is named (`--on staging`, `kito integrate staging`).
+- **Landing on a permanent lane** makes a checkpoint of it, runs its
+  checks (`[lanes.<name>] verify`, else `[verify]`) and exports the
+  checkpoint to its branch (`[lanes.<name>] branch`, else its name): each
+  commit after the lane's commit before it and, the first time it is on a
+  new state of main, after that state's commit. The branches are pushed
+  with main's.
+- **A permanent lane landing on main** (`kito integrate staging`) makes a
+  checkpoint of main exported as a git merge with the lane's branch, and
+  brings the lane up to main without closing it.
+- **`kito lane catch-up staging`**: what main did since staging started
+  from it is merged into staging, as a checkpoint of staging exported as a
+  merge with main's commit. Staging keeps its base: those changes are on
+  both sides when it lands, and merge as one. A conflict stops it whole.
+- **`[lanes.<name>] integrate`**: who may land on it, checked when a
+  server says who asks.
+
+### Demo
+
+```bash
+scripts/demo-phase16.sh
+```
+
+Output: [`docs/demo/phase16-demo.txt`](demo/phase16-demo.txt).
+
+### Acceptance target
+
+Set before the phase: lanes land on a `staging` that has its own checks
+and branch, CI can follow that branch, and staging reaches main as a
+merge without being closed. Met, with what lands on main directly brought
+into staging by `catch-up`.
+
+### Tests
+
+357 tests in all. New: names, closing refused, landing on staging
+under its own checkpoint and branch, its own checks, staging landing on
+main as a merge and staying, the next work on staging coming after main's
+merge, catch-up and its refusal, who may land
+(`kitod/tests/permanent.rs`); the same from the command line, with the
+branch reaching a remote.
+
+### Known limitations
+
+- **Pulling a permanent lane's branch** from the remote (commits made on
+  it with plain git) is not done: phase 14's pull is for main's branch.
+- **Lanes landing on a permanent lane wait in the one queue** with those
+  landing on main, and are not batched (phase 13 batches lanes landing on
+  main).
+- **A catch-up stops at the first conflict**: there is no conflict to
+  decide, as there is for a lane; land staging first, or undo one side.
+- **The directory of a permanent lane is a lane's working copy**: an
+  edit made there by hand is recorded on the lane like any other, not
+  put back as on a protected main.
+- **The server's clients cannot create a permanent lane or ask for a
+  catch-up**: those are done where the repository is.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

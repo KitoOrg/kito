@@ -95,6 +95,9 @@ pub struct LaneInfo {
     /// said: `lane/2`, `main`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The name of a permanent lane (`staging`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Where a lane starts and where it lands, when not on the main lane.
@@ -138,6 +141,10 @@ impl Repo {
 
     /// A lane given as `lane/1`, `1` or `main`.
     pub fn lane_of(&self, spec: &str) -> Result<LaneId> {
+        // A permanent lane by its name: `staging`.
+        if let Some(lane) = self.permanent_lane(spec.trim()) {
+            return Ok(lane);
+        }
         let lane: LaneId = spec
             .trim()
             .parse()
@@ -331,7 +338,81 @@ impl Repo {
                 Some(target)
             }
         };
-        self.open_lane_with(agent, task, base, intent, scope, parent, target)
+        self.open_lane_with(agent, task, base, intent, scope, parent, target, None)
+    }
+
+    /// Creates a permanent lane: `staging` next to `main`, starting from
+    /// `from` (the main lane, or another permanent lane) as it is now. It
+    /// has no scope, cannot be closed, and has checkpoints of its own
+    /// (ADR 0001).
+    pub fn create_lane(&mut self, name: &str, from: Option<LaneId>) -> Result<LaneInfo> {
+        let name = name.trim();
+        let valid = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+            && name.chars().any(|c| c.is_ascii_lowercase())
+            && !name.starts_with(['-', '.']);
+        if !valid || name == "main" || name.starts_with("lane") {
+            return Err(Error::Other(format!(
+                "{name:?} cannot name a permanent lane: lowercase letters, digits, `-`, `_` and `.`, not `main` \
+                 nor `lane…`"
+            )));
+        }
+        if self.permanent_lane(name).is_some() {
+            return Err(Error::Other(format!("there is already a permanent lane called {name}")));
+        }
+        let parent = from.filter(|lane| !lane.is_main());
+        if let Some(parent) = parent {
+            if !self.lanes.get(&parent).is_some_and(|at| at.record.is_permanent()) {
+                return Err(Error::Other(format!(
+                    "{parent} is not a permanent lane: a permanent lane starts from main or another one"
+                )));
+            }
+        }
+        let author = self.identity.author().name;
+        let intent = format!("the permanent lane {name}");
+        self.open_lane_with(&author, None, None, &intent, &[], parent, None, Some(name.to_owned()))
+    }
+
+    /// The git branches of the permanent lanes that have a commit there.
+    pub fn permanent_branches(&self) -> Vec<String> {
+        self.lanes
+            .values()
+            .filter_map(|at| at.record.name.as_ref().map(|name| (at.record.id, name)))
+            .filter(|(id, _)| self.store.lane_checkpoints(*id).any(|ck| ck.git_commit.is_some()))
+            .map(|(_, name)| {
+                self.config.lanes.permanent.get(name).and_then(|c| c.branch.clone()).unwrap_or(name.clone())
+            })
+            .collect()
+    }
+
+    /// The permanent lane of that name.
+    pub fn permanent_lane(&self, name: &str) -> Option<LaneId> {
+        self.lanes.values().find(|at| at.record.name.as_deref() == Some(name)).map(|at| at.record.id)
+    }
+
+    /// Refuses a person a permanent lane's `integrate` list leaves out.
+    /// `person`: who asks, when a server established it; on the machine of
+    /// the repository, whoever can reach it.
+    pub fn may_land_on(&self, target: LaneId, person: Option<&str>) -> Result<()> {
+        let (Some(person), Some(name)) =
+            (person, self.lanes.get(&target).and_then(|at| at.record.name.as_deref()))
+        else {
+            return Ok(());
+        };
+        let allowed =
+            self.config.lanes.permanent.get(name).map(|lane| lane.integrate.clone()).unwrap_or_default();
+        match allowed.is_empty() || allowed.iter().any(|one| one == person) {
+            true => Ok(()),
+            false => Err(Error::Refused(format!("work lands on {name} only by {}", allowed.join(", ")))),
+        }
+    }
+
+    /// Whether the lane is a permanent one (the main lane is).
+    pub fn is_permanent(&self, lane: LaneId) -> bool {
+        lane.is_main() || self.lanes.get(&lane).is_some_and(|at| at.record.is_permanent())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -344,6 +425,7 @@ impl Repo {
         scope: &[String],
         parent: Option<LaneId>,
         target: Option<LaneId>,
+        name: Option<String>,
     ) -> Result<LaneInfo> {
         let agent = agent.trim();
         if agent.is_empty() {
@@ -352,7 +434,8 @@ impl Repo {
         if intent.trim().is_empty() {
             return Err(Error::Other("a lane needs an intent: one sentence saying why it is opened".into()));
         }
-        if scope.iter().all(|item| item.trim().is_empty()) {
+        // A permanent lane has no scope: it holds whatever lands on it.
+        if name.is_none() && scope.iter().all(|item| item.trim().is_empty()) {
             return Err(Error::Other(
                 "a lane needs a scope: what it will change, as functions (src/auth.ts:getUser), files \
                  (src/auth.ts) or directories (src/billing/)"
@@ -379,7 +462,10 @@ impl Repo {
                 let checkpoint = self
                     .store
                     .checkpoint(id)
-                    .ok_or_else(|| Error::Other(format!("{id}: this checkpoint does not exist")))?;
+                    .filter(|checkpoint| checkpoint.lane_of().is_main())
+                    .ok_or_else(|| {
+                        Error::Other(format!("{id}: this checkpoint does not exist on the main lane"))
+                    })?;
                 (id, checkpoint.head)
             }
             (None, None) => match latest {
@@ -395,6 +481,7 @@ impl Repo {
                         git_commit: None,
                         approved_by: None,
                         git_merge: None,
+                        lane: None,
                     };
                     self.store.put_checkpoint(&checkpoint)?;
                     if self.config.git.export_on_checkpoint {
@@ -406,7 +493,10 @@ impl Repo {
             },
         };
         let (base_tree, base_symbols) = self.state_at(base_head)?;
-        let scope = self.read_scope(&base_tree, &base_symbols, &[], scope)?;
+        let scope = match name {
+            Some(_) => Vec::new(),
+            None => self.read_scope(&base_tree, &base_symbols, &[], scope)?,
+        };
 
         let id = self.store.next_lane_id();
         let workdir = self.lane_dir(id).join("work");
@@ -436,6 +526,7 @@ impl Repo {
             git_tip: None,
             parent,
             target,
+            name,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -448,6 +539,9 @@ impl Repo {
     pub fn close_lane(&mut self, lane: LaneId) -> Result<LaneInfo> {
         if lane.is_main() {
             return Err(Error::Other("the main lane cannot be closed".into()));
+        }
+        if let Some(name) = self.lanes.get(&lane).and_then(|at| at.record.name.clone()) {
+            return Err(Error::Other(format!("{name} is a permanent lane: it is not closed")));
         }
         self.scan_lane(lane)?;
         // The lanes on top of it go where its work went, if it went there.
@@ -585,8 +679,10 @@ impl Repo {
             },
             owner: record.owner.as_ref().map(|owner| owner.name.clone()),
             proposed_by: record.proposed.as_ref().map(|proposal| proposal.by.name.clone()),
-            parent: record.parent.map(|lane| lane.to_string()),
-            target: record.is_stacked().then(|| lane_word(record.target_lane())),
+            parent: record.parent.map(|lane| self.lane_name(lane)),
+            target: (record.parent.is_some() || record.target.is_some())
+                .then(|| self.lane_name(record.target_lane())),
+            name: record.name.clone(),
         }
     }
 

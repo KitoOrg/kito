@@ -660,6 +660,10 @@ impl Repo {
 
     /// What a lane changed outside the scope it declared.
     pub fn out_of_scope(&self, lane: LaneId) -> Result<Vec<String>> {
+        // A permanent lane holds whatever landed on it (ADR 0001).
+        if self.lanes.get(&lane).is_some_and(|at| at.record.is_permanent()) {
+            return Ok(Vec::new());
+        }
         Ok(self.claims(lane)?.out_of_scope.clone())
     }
 

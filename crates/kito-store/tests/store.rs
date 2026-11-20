@@ -345,6 +345,7 @@ fn checkpoints_are_durable_and_updatable() {
         git_commit: None,
         approved_by: None,
         git_merge: None,
+        lane: None,
     };
     // put_checkpoint confirms the appended ops on its own.
     store.put_checkpoint(&ck).unwrap();
@@ -447,6 +448,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         git_commit: None,
         approved_by: None,
         git_merge: None,
+        lane: None,
     };
     store.put_checkpoint(&checkpoint).unwrap();
 
@@ -469,6 +471,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         git_tip: None,
         parent: None,
         target: None,
+        name: None,
     };
     store.put_lane(&lane).unwrap();
     assert_eq!(store.next_lane_id(), LaneId(2));

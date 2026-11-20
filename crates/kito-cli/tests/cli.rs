@@ -1173,6 +1173,68 @@ fn lanes_asked_for_together_are_checked_in_one_run() {
 }
 
 #[test]
+fn a_staging_lane_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("app");
+    let remote = base.join("remote.git");
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    git(&base, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+    ok(root, &["init"]);
+    let config = root.join(".kito/config.toml");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("# push = \"origin\"", &format!("push = {:?}", remote.to_str().unwrap()));
+    fs::write(&config, text).unwrap();
+    ok(root, &["daemon", "stop"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
+    fs::write(root.join("docs/a.txt"), "v1\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+
+    let created = ok(root, &["lane", "create", "staging"]);
+    assert!(created.contains("staging (lane/1) created"), "{created}");
+    assert!(ok(root, &["lanes"]).contains("permanent: staging"));
+    ok(root, &["lane", "open", "alice", "--intent", "v2", "--scope", "docs/a.txt", "--on", "staging"]);
+    fs::write(root.join(".kito/lanes/2/work/docs/a.txt"), "v2\n").unwrap();
+    let landed = ok(root, &["integrate", "2"]);
+    assert!(landed.contains("lane/2: landed on staging as ckpt#2"), "{landed}");
+    assert_eq!(fs::read_to_string(root.join("docs/a.txt")).unwrap(), "v1\n");
+    // Its branch reaches the remote.
+    let mut at_remote = String::new();
+    for _ in 0..200 {
+        let out = Command::new("git")
+            .args(["-C", remote.to_str().unwrap(), "rev-parse", "staging"])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            at_remote = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(at_remote, git(root, &["rev-parse", "staging"]).trim(), "{}", ok(root, &["status"]));
+    let refused = kito(root, &["lane", "close", "staging"]);
+    assert!(!refused.status.success());
+
+    fs::write(root.join("docs/b.txt"), "direct\n").unwrap();
+    ok(root, &["checkpoint", "-m", "b"]);
+    let caught = ok(root, &["lane", "catch-up", "staging"]);
+    assert!(caught.contains("staging caught up with main: docs/b.txt"), "{caught}");
+    let promoted = ok(root, &["integrate", "staging"]);
+    assert!(promoted.contains("lane/1: integrated as"), "{promoted}");
+    assert_eq!(fs::read_to_string(root.join("docs/a.txt")).unwrap(), "v2\n");
+    assert_eq!(
+        git(root, &["log", "-1", "--format=%P", "main"]).split(' ').count(),
+        2,
+        "a merge: {}",
+        git(root, &["log", "--graph", "--all", "--format=%h %s"])
+    );
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn lanes_on_lanes_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();

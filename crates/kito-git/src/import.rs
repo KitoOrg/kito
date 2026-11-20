@@ -106,6 +106,7 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
                 git_commit: Some(oid20(commit_id)),
                 approved_by: None,
                 git_merge: None,
+                lane: None,
             };
             store.put_checkpoint(&checkpoint)?;
             report.checkpoints += 1;

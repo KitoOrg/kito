@@ -660,14 +660,34 @@ impl Repo {
         Ok(current.iter().map(|c| self.conflict_info(c)).collect())
     }
 
+    /// The checks of what lands on `target`: those of the main lane, or of
+    /// a permanent lane (`[lanes.<name>] verify`, else `[verify]`); none
+    /// for a lane that is not permanent: they run when the work reaches one.
+    pub(crate) fn checks_of(&self, target: LaneId) -> Vec<String> {
+        if target.is_main() {
+            return self.config.verify.commands.clone();
+        }
+        match self.lanes.get(&target).and_then(|at| at.record.name.as_deref()) {
+            Some(name) => self
+                .config
+                .lanes
+                .permanent
+                .get(name)
+                .and_then(|lane| lane.verify.clone())
+                .unwrap_or_else(|| self.config.verify.commands.clone()),
+            None => Vec::new(),
+        }
+    }
+
     /// The tree a prepared merge leads to.
     fn merged_tree(&mut self, prepared: &Prepared) -> Result<Tree> {
+        let target = self.work(prepared.target)?.tree.clone();
         let mut entries: std::collections::BTreeMap<PathBuf, TreeEntry> =
-            self.main.tree.iter().map(|(path, entry)| (path.to_owned(), *entry)).collect();
+            target.iter().map(|(path, entry)| (path.to_owned(), *entry)).collect();
         for (path, file) in &prepared.outcome.files {
             match file {
                 Some(file) => {
-                    let blob = match self.main.tree.get(path) {
+                    let blob = match target.get(path) {
                         Some(before) => self.store.put_blob_like(&file.content, &before.blob)?,
                         None => self.store.put_blob(&file.content)?,
                     };
@@ -935,9 +955,8 @@ impl Repo {
     /// Step 2: materializes the merged result where the verification
     /// commands will run. `None` if no command is configured.
     pub fn verification_copy(&mut self, prepared: &Prepared) -> Result<Option<Checks>> {
-        let commands = self.config.verify.commands.clone();
-        // Work landing on a lane is checked when it reaches the main lane.
-        if commands.is_empty() || !prepared.target.is_main() {
+        let commands = self.checks_of(prepared.target);
+        if commands.is_empty() {
             return Ok(None);
         }
         let confinement = self.confinement()?;
@@ -1074,13 +1093,17 @@ impl Repo {
             recorded
         })?;
         let head = self.work(target)?.head.ok_or(Error::NothingToCheckpoint)?;
-        if !target.is_main() {
+        if !self.is_permanent(target) {
             return self
                 .landed_on_lane(prepared, ops.first().map(|op| op.id).unwrap_or(head), result)
                 .map(Some);
         }
 
-        let label = what.unwrap_or_else(|| format!("{lane} ({})", agent.name));
+        let label = match self.lanes.get(&lane).and_then(|at| at.record.name.clone()) {
+            // A permanent lane landing: by its name.
+            Some(name) => name,
+            None => what.unwrap_or_else(|| format!("{lane} ({})", agent.name)),
+        };
         // A lane that brings in commits made outside Kito: its checkpoint
         // is exported as a merge with the last of them.
         let brought =
@@ -1090,6 +1113,10 @@ impl Repo {
             Some(_) => format!("merge of commits made with git: {label}"),
             None => label,
         };
+        // A permanent lane landing on the main lane: a merge with its own
+        // branch, if its last checkpoint is what landed (ADR 0001).
+        let brought = brought.or_else(|| self.permanent_tip(lane).filter(|_| target.is_main()));
+        let on_lane = (!target.is_main()).then_some(target);
         let checkpoint = Checkpoint {
             id: self.store.next_checkpoint_id(),
             head,
@@ -1102,7 +1129,8 @@ impl Repo {
             }),
             git_commit: None,
             approved_by,
-            git_merge: brought,
+            git_merge: brought.filter(|_| on_lane.is_none()),
+            lane: on_lane,
         };
         self.store.put_checkpoint(&checkpoint)?;
         for id in &prepared.settled {
@@ -1114,8 +1142,12 @@ impl Repo {
         if self.config.git.export_on_checkpoint {
             // The commit is made now; git's index, which costs in proportion
             // to the repository, is rewritten once the lane has its answer.
-            match self.export_git_later_index() {
-                Ok(_) => {
+            let exported = match on_lane {
+                Some(permanent) => self.export_lane_git(permanent).map(|_| ()),
+                None => self.export_git_later_index().map(|_| ()),
+            };
+            match exported {
+                Ok(()) => {
                     result.git_commit = self
                         .store
                         .checkpoint(checkpoint.id)
@@ -1125,22 +1157,30 @@ impl Repo {
                 Err(e) => result.message = Some(format!("integrated, but the export to git failed: {e}")),
             }
         }
-        self.fast_forward(lane, checkpoint.id)?;
+        match on_lane {
+            // Brought up to the permanent lane, filed under the checkpoint
+            // of the main lane it is on.
+            Some(permanent) => {
+                let base = self.base_on(permanent, self.lanes[&lane].record.base);
+                self.fast_forward(lane, base)?;
+                result.landed_on = Some(self.lane_name(permanent));
+            }
+            None => self.fast_forward(lane, checkpoint.id)?,
+        }
         if !prepared.problems.is_empty() && result.message.is_none() {
             result.message = Some(prepared.problems.join("; "));
         }
 
+        let symbols = &self.work(target)?.symbols;
         result.auto_resolutions = prepared
             .outcome
             .merged_symbols
             .iter()
             .map(|id| AutoResolution {
                 kind: "body_merge".to_owned(),
-                symbol: symbol_ref(&self.main.symbols, *id),
+                symbol: symbol_ref(symbols, *id),
                 new_name: None,
-                locations: self
-                    .main
-                    .symbols
+                locations: symbols
                     .get(*id)
                     .map(|entry| entry.file.display().to_string())
                     .into_iter()
@@ -1149,9 +1189,25 @@ impl Repo {
             .chain(prepared.propagated.iter().cloned())
             .collect();
         result.checkpoint = Some(checkpoint.id.to_string());
-        result.your_next_base = Some(checkpoint.id.to_string());
+        result.your_next_base = Some(self.lanes[&lane].record.base.to_string());
         result.verification = verification;
         Ok(Some(result))
+    }
+
+    /// `staging` for a permanent lane, `lane/2` otherwise.
+    pub(crate) fn lane_name(&self, lane: LaneId) -> String {
+        match self.lanes.get(&lane).and_then(|at| at.record.name.clone()) {
+            Some(name) => name,
+            None => crate::lanes::lane_word(lane),
+        }
+    }
+
+    /// The git commit of a permanent lane's last checkpoint, if that
+    /// checkpoint is the lane as it is.
+    fn permanent_tip(&self, lane: LaneId) -> Option<[u8; 20]> {
+        let at = self.lanes.get(&lane).filter(|at| at.record.is_permanent())?;
+        let last = self.store.lane_checkpoints(lane).next_back()?;
+        (Some(last.head) == at.work.head).then_some(last.git_commit).flatten()
     }
 
     /// The end of a landing on a lane that is not the main lane: no
@@ -1254,6 +1310,124 @@ impl Repo {
         // The saved state of the lane is written when the repository is
         // closed: until then the log has everything.
         self.put_lane_state(lane, LaneState::Active)
+    }
+
+    /// Brings into a permanent lane what the lane it started from (the
+    /// main lane) did since: `kito catch-up staging`. The same merge, the
+    /// other way; the lane keeps its base, so when it lands those changes
+    /// are on both sides and merge as one (ADR 0001, D-142). A conflict
+    /// stops it whole. Returns the files written.
+    pub fn catch_up(&mut self, lane: LaneId) -> Result<Vec<String>> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let Some(name) = at.record.name.clone() else {
+            return Err(Error::Other(format!(
+                "{lane} is not a permanent lane: a lane is brought up to date when it is integrated"
+            )));
+        };
+        let from = at.record.parent_lane();
+        if from.is_main() {
+            self.scan()?;
+        } else {
+            self.scan_lane(from)?;
+        }
+        self.scan_lane(lane)?;
+        let cache = std::cell::RefCell::new(std::mem::take(&mut self.parse_cache));
+        let source = self.work(from)?;
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let store = &self.store;
+        let parse = |path: &Path, blob: &BlobId, _: &[u8]| {
+            crate::semantic::load(store, Some(&mut cache.borrow_mut()), path, blob, None)
+                .ok()
+                .flatten()
+                .map(|parsed| parsed.file.clone())
+        };
+        let outcome = kito_merge::merge(&kito_merge::Input {
+            base: kito_merge::Side { tree: &at.base_tree, symbols: &at.base_symbols },
+            // What is written is written on the permanent lane...
+            main: kito_merge::Side { tree: &at.work.tree, symbols: &at.work.symbols },
+            // ...from what the lane below it did.
+            lane: kito_merge::Side { tree: &source.tree, symbols: &source.symbols },
+            blob: &|id| store.get_blob(id).ok().flatten(),
+            resolutions: &HashMap::new(),
+            parse: Some(&parse),
+        });
+        let source_head = source.head;
+        self.parse_cache = cache.into_inner();
+        if !outcome.conflicts.is_empty() {
+            let what: Vec<String> = outcome
+                .conflicts
+                .iter()
+                .map(|found| match &found.subject {
+                    Subject::Symbol(id) => {
+                        symbol_ref(&self.work(lane).map(|w| w.symbols.clone()).unwrap_or_default(), *id)
+                    }
+                    Subject::File(path) => path.display().to_string(),
+                    #[allow(unreachable_patterns)]
+                    _ => "a file".to_owned(),
+                })
+                .collect();
+            return Err(Error::Refused(format!(
+                "{name} and {} changed the same code: {}. Nothing was brought in; land {name} first, or undo \
+                 one side",
+                crate::lanes::lane_word(from),
+                what.join(", ")
+            )));
+        }
+        if outcome.files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let root = self.work(lane)?.root.clone();
+        let mut written = Vec::new();
+        for (path, file) in &outcome.files {
+            match file {
+                Some(file) => {
+                    let blob = self.store.put_blob(&file.content)?;
+                    written.push((path.clone(), TreeEntry { blob, mode: file.mode }));
+                }
+                None => remove_in(&root, path)?,
+            }
+        }
+        self.write_files_in(&root, &written)?;
+        let intent = Intent::new(format!("catch up with {}", crate::lanes::lane_word(from)), None, None)?;
+        self.store.put_intent(&intent)?;
+        let paths: Vec<PathBuf> = outcome.files.keys().cloned().collect();
+        let identities = outcome.identities.clone();
+        let signer = self.identity.author();
+        self.with(lane, |repo, work| {
+            let agent = std::mem::replace(&mut work.author, signer);
+            work.merge_parent = source_head;
+            let recorded = repo.capture_work(work, paths, Some(intent.id), &identities, Unsettled::Trust);
+            work.merge_parent = None;
+            work.author = agent;
+            recorded
+        })?;
+        let state = self.lanes[&lane].record.state;
+        self.put_lane_state(lane, state)?;
+        // A checkpoint of the permanent lane, exported as a merge with the
+        // commit of what it caught up with.
+        let head = self.work(lane)?.head.ok_or(Error::NothingToCheckpoint)?;
+        let caught = match from.is_main() {
+            true => self.store.checkpoints().next_back().filter(|ck| Some(ck.head) == source_head),
+            false => self.store.lane_checkpoints(from).next_back().filter(|ck| Some(ck.head) == source_head),
+        }
+        .and_then(|ck| ck.git_commit);
+        let checkpoint = Checkpoint {
+            id: self.store.next_checkpoint_id(),
+            head,
+            label: format!("catch up with {}", crate::lanes::lane_word(from)),
+            created_by: self.identity.author(),
+            verification: None,
+            git_commit: None,
+            approved_by: None,
+            git_merge: caught,
+            lane: Some(lane),
+        };
+        self.store.put_checkpoint(&checkpoint)?;
+        if self.config.git.export_on_checkpoint {
+            self.export_lane_git(lane)?;
+        }
+        self.store.commit()?;
+        Ok(outcome.files.keys().map(|path| path.display().to_string()).collect())
     }
 
     /// The three steps in a row, running the verification commands in

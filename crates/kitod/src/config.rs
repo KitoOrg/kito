@@ -76,6 +76,14 @@ email_domain = "kito.invalid"
 # Untracked paths of the main working directory that every lane sees
 # through a link instead of a copy: what the tools need and no lane changes.
 # share = ["node_modules", ".venv"]
+#
+# A permanent lane (`kito lane create staging`) may have a section of its
+# own: the checks of what lands on it, the git branch it is exported to,
+# and who may land work on it (default: whoever may integrate).
+# [lanes.staging]
+# verify = ["npm test"]
+# branch = "staging"
+# integrate = ["ci"]
 
 [scope]
 # Every lane declares what it will change before it changes it: functions
@@ -284,6 +292,21 @@ pub struct LanesConfig {
     /// through a link instead of a copy (`node_modules`, `.venv`): what the
     /// tools need and no lane should change.
     pub share: Vec<String>,
+    /// The permanent lanes, by name: `[lanes.staging]` (ADR 0001).
+    #[serde(flatten)]
+    pub permanent: std::collections::BTreeMap<String, PermanentConfig>,
+}
+
+/// What a permanent lane has of its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermanentConfig {
+    /// The checks of what lands on it, instead of those of `[verify]`.
+    pub verify: Option<Vec<String>>,
+    /// The git branch its checkpoints are exported to (default: its name).
+    pub branch: Option<String>,
+    /// Who may land work on it; empty: whoever may integrate.
+    pub integrate: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

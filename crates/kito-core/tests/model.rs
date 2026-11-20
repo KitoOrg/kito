@@ -255,6 +255,7 @@ fn checkpoint_and_friends_round_trip() {
         git_commit: Some([0xab; 20]),
         approved_by: Some(Author::human("ada")),
         git_merge: Some([7; 20]),
+        lane: None,
     };
     let back: Checkpoint = codec::from_slice(&codec::to_vec(&ck).unwrap()).unwrap();
     assert_eq!(back, ck);
@@ -284,6 +285,7 @@ fn checkpoint_and_friends_round_trip() {
         git_tip: None,
         parent: None,
         target: None,
+        name: None,
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 

@@ -7,7 +7,9 @@
 mod export;
 mod import;
 
-pub use export::{export, export_known, refresh_index, ExportOptions, Exported, Known};
+pub use export::{
+    export, export_known, export_lane, refresh_index, ExportOptions, Exported, Known, LaneCommit,
+};
 pub use import::{import, Imported};
 
 use kito_core::{CheckpointId, CodecError, OpId, TreeError};

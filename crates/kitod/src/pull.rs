@@ -346,6 +346,7 @@ impl Repo {
             git_commit: None,
             approved_by: None,
             git_merge: tip,
+            lane: None,
         };
         self.store.put_checkpoint(&checkpoint)?;
         self.store.commit()?;

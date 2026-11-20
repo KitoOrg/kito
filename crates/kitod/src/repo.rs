@@ -1385,6 +1385,7 @@ impl Repo {
             git_commit: None,
             approved_by: None,
             git_merge: None,
+            lane: None,
         };
         self.store.put_checkpoint(&checkpoint)?;
         self.save_state()?;
@@ -1446,7 +1447,84 @@ impl Repo {
         Ok(())
     }
 
+    /// Exports the checkpoints of a permanent lane not exported yet to its
+    /// own branch (`[lanes.<name>] branch`, else its name). Each commit
+    /// comes after the lane's commit before it and, the first time the
+    /// lane is on a new state of the main lane, after that state's commit
+    /// too (ADR 0001).
+    pub(crate) fn export_lane_git(&mut self, lane: LaneId) -> Result<Vec<(String, String)>> {
+        let Some(name) = self.lanes.get(&lane).and_then(|at| at.record.name.clone()) else {
+            return Ok(Vec::new());
+        };
+        let branch = self.config.lanes.permanent.get(&name).and_then(|c| c.branch.clone()).unwrap_or(name);
+        let email = self.config.git.email_domain.clone();
+        let mine: Vec<Checkpoint> = self.store.lane_checkpoints(lane).cloned().collect();
+        let Some(first) = mine.iter().position(|ck| ck.git_commit.is_none()) else { return Ok(Vec::new()) };
+        let before = first.checked_sub(1).map(|at| &mine[at]);
+        let mut previous = before.and_then(|ck| ck.git_commit);
+        let mut previous_on = match before {
+            Some(ck) => self.main_commit_under(lane, ck.head)?,
+            None => None,
+        };
+        let mut done = Vec::new();
+        for ck in &mine[first..] {
+            let (tree, _) = self.state_at(ck.head)?;
+            let on = self.main_commit_under(lane, ck.head)?;
+            let mut parents: Vec<[u8; 20]> = match previous {
+                None => on.into_iter().collect(),
+                Some(previous) => {
+                    std::iter::once(previous).chain(on.filter(|on| Some(*on) != previous_on)).collect()
+                }
+            };
+            // A catch-up says which commit it merged.
+            if let Some(merged) = ck.git_merge.filter(|merged| !parents.contains(merged)) {
+                parents.push(merged);
+            }
+            let wall_ms = self.store.get_op(&ck.head)?.map_or(0, |op| op.at.wall_ms);
+            let commit = kito_git::LaneCommit { checkpoint: ck.clone(), tree, parents, wall_ms };
+            let exported = kito_git::export_lane(&mut self.store, &self.root, &branch, &email, &[commit])?;
+            for one in exported {
+                previous = Some(one.commit);
+                done.push((one.checkpoint.to_string(), hex20(&one.commit)));
+            }
+            previous_on = on;
+        }
+        Ok(done)
+    }
+
+    /// The commit of the main lane a lane is on at its op `head`: its
+    /// first parents lead, through the lane, to the op of the main lane it
+    /// was last brought up to. The checkpoint at that op, or else the one
+    /// the lane is filed under.
+    fn main_commit_under(&self, lane: LaneId, head: kito_core::OpId) -> Result<Option<[u8; 20]>> {
+        let mut at = head;
+        loop {
+            let Some(op) = self.store.get_op(&at)? else { return Ok(None) };
+            if op.lane.is_main() {
+                let exact =
+                    self.store.checkpoints().rev().find(|ck| ck.head == op.id).and_then(|ck| ck.git_commit);
+                let filed = self
+                    .lanes
+                    .get(&lane)
+                    .and_then(|at| self.store.checkpoint(at.record.base))
+                    .and_then(|ck| ck.git_commit);
+                return Ok(exact.or(filed));
+            }
+            match op.parents.first() {
+                Some(parent) => at = *parent,
+                None => return Ok(None),
+            }
+        }
+    }
+
     fn export_git_with(&mut self, update_index: bool) -> Result<Vec<(String, String)>> {
+        // The permanent lanes first: a checkpoint of the main lane may be a
+        // merge with one of their commits.
+        let permanent: Vec<LaneId> =
+            self.lanes.values().filter(|at| at.record.is_permanent()).map(|at| at.record.id).collect();
+        for lane in permanent {
+            self.export_lane_git(lane)?;
+        }
         // The files at the last checkpoint exported are remembered: the
         // next commit is made from what changed since, not from the log.
         let known = match (&self.exported, self.main.head) {

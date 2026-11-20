@@ -81,7 +81,7 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     },
                     "task": { "type": "string", "description": "The task it belongs to (task #55)" },
                     "base": { "type": "string", "description": "A checkpoint to start from (ckpt#12) instead of the current state" },
-                    "on": { "type": "string", "description": "Another lane to start on, as it is now, before it has landed (lane/1): to build on work in progress. Your lane then lands on that lane" },
+                    "on": { "type": "string", "description": "Another lane to start on, as it is now, before it has landed (lane/1), or a permanent lane by its name (staging): to build on work in progress, or to land on staging instead of main. Your lane then lands on that lane" },
                     "target": { "type": "string", "description": "With `on`: the lane to land on instead, one below it (main). Your lane waits until the work it was built on is there" }
                 },
                 "required": ["agent", "intent", "scope"]

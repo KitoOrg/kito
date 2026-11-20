@@ -193,6 +193,69 @@ pub fn export_known(
     Ok(done)
 }
 
+/// A checkpoint of a permanent lane to export (ADR 0001): the files as the
+/// lane has them there, and the commits it comes after.
+pub struct LaneCommit {
+    pub checkpoint: Checkpoint,
+    pub tree: Tree,
+    /// The commit before it on the lane's branch, then the commit of the
+    /// main lane it was brought up to, when there is one.
+    pub parents: Vec<[u8; 20]>,
+    pub wall_ms: u64,
+}
+
+/// Exports checkpoints of a permanent lane, in order, to their own branch
+/// (`staging`): the commits are made from the trees given, each whole, and
+/// the branch is moved to the last one. Git's index is not touched: it
+/// follows the branch of the main lane.
+pub fn export_lane(
+    store: &mut Store,
+    root: &Path,
+    branch: &str,
+    email_domain: &str,
+    commits: &[LaneCommit],
+) -> Result<Vec<Exported>, GitError> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut repo = match gix::open(root) {
+        Ok(repo) => repo,
+        Err(_) if !root.join(".git").exists() => gix::init(root).map_err(git_err)?,
+        Err(e) => return Err(git_err(e)),
+    };
+    repo.committer_or_set_fallback("Kito", format!("kito@{email_domain}").as_str()).map_err(git_err)?;
+    let branch = match branch.starts_with("refs/") {
+        true => branch.to_owned(),
+        false => format!("refs/heads/{branch}"),
+    };
+    let opts = ExportOptions {
+        branch: Some(branch.clone()),
+        email_domain: email_domain.to_owned(),
+        update_index: false,
+    };
+    let empty = repo.empty_tree().id;
+    let mut out =
+        Progress { parent: None, base_tree: empty, last_commit: None, last_tree: None, done: Vec::new() };
+    for commit in commits {
+        // The first parent comes from `parents`, the second rides on
+        // `git_merge`, as for a merge with a commit made outside Kito.
+        let mut ck = commit.checkpoint.clone();
+        out.parent = commit.parents.first().map(object_id);
+        ck.git_merge = commit.parents.get(1).copied();
+        out.base_tree = empty;
+        let paths: Vec<&Path> = commit.tree.iter().map(|(path, _)| path).collect();
+        commit_checkpoint(&repo, store, &opts, &ck, &commit.tree, &paths, commit.wall_ms, &mut out)?;
+    }
+    if let Some(last) = out.last_commit {
+        let message = format!(
+            "kito: export of {}",
+            commits.last().map(|c| c.checkpoint.id.to_string()).unwrap_or_default()
+        );
+        repo.reference(branch.as_str(), last, PreviousValue::Any, message).map_err(git_err)?;
+    }
+    Ok(out.done)
+}
+
 /// Rewrites git's index from a tree, if HEAD is on the exported branch: with
 /// it `git status` is clean when the working directory matches the commit.
 fn write_index(repo: &gix::Repository, branch: &str, tree: gix::ObjectId) -> Result<(), GitError> {

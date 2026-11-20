@@ -28,7 +28,7 @@ runnable demo.
 | 13 | Integration without waiting in line: lanes that do not depend on each other are checked in one run | done |
 | 14 | Git both ways: commits made with plain git are brought in through a lane, merged and pushed back | done |
 | 15 | Lanes on lanes: a lane opened on work that has not landed, landing on it or further down ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)) | done |
-| 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch, checks and protection | planned |
+| 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch and checks | done |
 | 17 | Review of a lane: diffs, comments and approvals, with a local web view | planned |
 
 ## Crates
@@ -196,8 +196,39 @@ kito lane open carol --intent "the team is tested" --scope tests/ --on lane/1 --
 
 A lane with lanes on it closes once the work they were built on has
 landed; they are then moved to where it went. Lanes stack as deep as
-needed. The design is [ADR 0001](docs/adr/0001-lanes-on-lanes.md);
-permanent lanes such as a `staging` come next.
+needed. The design is [ADR 0001](docs/adr/0001-lanes-on-lanes.md).
+
+### Permanent lanes
+
+A `staging` next to `main`, that work lands on before it reaches main, and
+that CI deploys from:
+
+```bash
+kito lane create staging
+```
+
+```bash
+kito lane open alice --intent "users have a team" --scope src/api.py --on staging
+```
+
+Landing on a permanent lane makes a checkpoint of it, runs its checks, and
+exports the checkpoint to a git branch of its own (`staging`), pushed with
+main's. What lands on main directly comes into staging with `kito lane
+catch-up staging`. When staging is good, it lands on main as a git merge
+and stays open, brought up to main:
+
+```bash
+kito integrate staging
+```
+
+Its checks, its branch, and who may land on it go in the configuration:
+
+```toml
+[lanes.staging]
+verify = ["npm test"]
+branch = "staging"
+integrate = ["ci"]
+```
 
 Agents do all this through the MCP server, `kito-mcp`, which offers
 `kito.open_lane`, `kito.sync`, `kito.status`, `kito.log`, `kito.set_intent`,

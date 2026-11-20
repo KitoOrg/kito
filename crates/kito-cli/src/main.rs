@@ -323,6 +323,19 @@ enum LaneCmd {
         #[arg(long, value_name = "LANE")]
         target: Option<String>,
     },
+    /// Create a permanent lane, such as `staging`: lanes land on it under
+    /// checkpoints of its own, it has its own git branch and checks, and
+    /// `kito integrate <name>` lands it on main without closing it
+    Create {
+        /// Its name: lowercase letters, digits, `-`, `_`, `.`
+        name: String,
+        /// The lane it starts from and lands on (default: main)
+        #[arg(long, value_name = "LANE")]
+        from: Option<String>,
+    },
+    /// Bring into a permanent lane what main did since it started from it
+    #[command(name = "catch-up")]
+    CatchUp { lane: String },
     /// Record the last changes of a lane and remove its working copy
     Close { lane: String },
     /// Ops since the base, files touched, open conflicts
@@ -1218,6 +1231,9 @@ fn lane_line(lane: &LaneInfo) -> String {
     if !lane.conflicts.is_empty() {
         line.push_str(&format!("  {}", count(lane.conflicts.len() as u64, "conflict", "conflicts")));
     }
+    if let Some(name) = &lane.name {
+        line.push_str(&format!("  permanent: {name}"));
+    }
     match (&lane.parent, &lane.target) {
         (Some(parent), Some(target)) if parent == target => line.push_str(&format!("  on {parent}")),
         (Some(parent), Some(target)) => line.push_str(&format!("  on {parent}, lands on {target}")),
@@ -1750,6 +1766,33 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 );
             }
         }
+        LaneCmd::Create { name, from } => {
+            let created: Value =
+                client.call("create_lane", json!({ "name": name, "from": from })).map_err(fail)?;
+            if cli.json {
+                print_json(&created);
+            } else {
+                let lane: LaneInfo = serde_json::from_value(created).map_err(fail)?;
+                println!(
+                    "{name} ({}) created on {}: open lanes on it with `--on {name}`, land it on main with `kito \
+                     integrate {name}`.",
+                    lane.id, lane.base
+                );
+            }
+        }
+        LaneCmd::CatchUp { lane } => {
+            let done: Value = client.call("catch_up", json!({ "lane": lane })).map_err(fail)?;
+            if cli.json {
+                print_json(&done);
+            } else {
+                let files: Vec<&str> =
+                    done["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                match files.is_empty() {
+                    true => println!("{lane} already has everything main has."),
+                    false => println!("{lane} caught up with main: {}", files.join(", ")),
+                }
+            }
+        }
         // Run before any of these: its exit code is the command's.
         LaneCmd::Run { .. } => {}
         LaneCmd::Scope { lane, add } => {
@@ -1873,9 +1916,12 @@ fn print_integration(result: &IntegrationResult) {
                 .as_ref()
                 .map(|c| format!(" (git {})", &c[..10.min(c.len())]))
                 .unwrap_or_default();
-            match &result.landed_on {
-                Some(target) => println!("{}: landed on {target}", result.lane),
-                None => println!(
+            match (&result.landed_on, &result.checkpoint) {
+                (Some(target), Some(checkpoint)) => {
+                    println!("{}: landed on {target} as {checkpoint}{git}{verified}", result.lane)
+                }
+                (Some(target), None) => println!("{}: landed on {target}", result.lane),
+                (None, _) => println!(
                     "{}: integrated as {}{git}{verified}",
                     result.lane,
                     result.checkpoint.clone().unwrap_or_default()

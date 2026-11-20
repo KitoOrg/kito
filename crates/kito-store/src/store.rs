@@ -732,6 +732,11 @@ impl Store {
             return Err(StoreError::InvalidOp(format!("{}: unknown op {}", ck.id, ck.head)));
         }
         self.commit()?;
+        if ck.lane.is_some() && !self.lanes_on_lanes {
+            let format = self.dir.join(FORMAT_FILE);
+            atomic_write(&format, FORMAT_LANES_ON_LANES.as_bytes()).at(&format)?;
+            self.lanes_on_lanes = true;
+        }
         let put = self.checkpoints.put(ck);
         self.guard(put)?;
         // The checkpoint is durable; the index takes note of it as a floor.
@@ -745,8 +750,19 @@ impl Store {
         self.checkpoints.get(id)
     }
 
-    /// All the checkpoints, in ID order.
+    /// The checkpoints of the main lane, in ID order: those every reader
+    /// before permanent lanes knew (ADR 0001).
     pub fn checkpoints(&self) -> impl DoubleEndedIterator<Item = &Checkpoint> {
+        self.checkpoints.iter().filter(|ck| ck.lane.is_none_or(|lane| lane.is_main()))
+    }
+
+    /// The checkpoints of a permanent lane, in ID order.
+    pub fn lane_checkpoints(&self, lane: LaneId) -> impl DoubleEndedIterator<Item = &Checkpoint> {
+        self.checkpoints.iter().filter(move |ck| ck.lane_of() == lane)
+    }
+
+    /// Every checkpoint, of any lane, in ID order.
+    pub fn all_checkpoints(&self) -> impl DoubleEndedIterator<Item = &Checkpoint> {
         self.checkpoints.iter()
     }
 

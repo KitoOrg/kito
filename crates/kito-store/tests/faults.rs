@@ -162,6 +162,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
             git_commit: None,
             approved_by: None,
             git_merge: None,
+            lane: None,
         };
         store.put_checkpoint(&checkpoint).unwrap();
         store
@@ -183,6 +184,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 git_tip: None,
                 parent: None,
                 target: None,
+                name: None,
             })
             .unwrap();
         store
@@ -245,6 +247,7 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
         git_commit: None,
         approved_by: None,
         git_merge: None,
+        lane: None,
     };
     store.put_checkpoint(&ck).unwrap();
     store.close().unwrap();
