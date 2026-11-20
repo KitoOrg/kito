@@ -395,6 +395,10 @@ struct Running {
     busy: std::collections::HashSet<String>,
     /// It said it began some work, since this was last set to `false`.
     reported: bool,
+    /// What the server last said of itself through
+    /// `experimental/serverStatus` (rust-analyzer): whether it has nothing
+    /// left to load. `None`: it does not say.
+    quiescent: Option<bool>,
     /// No question was answered yet: the project may still be loading.
     fresh: bool,
 }
@@ -463,6 +467,7 @@ impl Running {
             next_id: 0,
             busy: Default::default(),
             reported: false,
+            quiescent: None,
             fresh: true,
         };
         let root_uri = uri_of(root, Path::new(""));
@@ -483,7 +488,10 @@ impl Running {
                         "definition": { "dynamicRegistration": false, "linkSupport": false }
                     },
                     "workspace": { "workspaceFolders": true, "configuration": true },
-                    "window": { "workDoneProgress": true }
+                    "window": { "workDoneProgress": true },
+                    // rust-analyzer says when it has loaded everything: a
+                    // gap between two of its phases of work is not that.
+                    "experimental": { "serverStatusNotification": true }
                 }
             }),
             deadline,
@@ -546,6 +554,14 @@ impl Running {
                 }
                 Ok(())
             }
+            (None, Some("experimental/serverStatus")) => {
+                let quiescent = message["params"]["quiescent"].as_bool().unwrap_or(true);
+                if !quiescent {
+                    self.reported = true;
+                }
+                self.quiescent = Some(quiescent);
+                Ok(())
+            }
             // Other notifications, and answers to nothing we wait for.
             _ => Ok(()),
         }
@@ -570,7 +586,9 @@ impl Running {
         self.reported = false;
         loop {
             let waited_enough = self.reported || started.elapsed() >= grace;
-            if self.busy.is_empty() && waited_enough && last.elapsed() >= QUIET {
+            // A server that says whether it is done is believed.
+            let done = self.busy.is_empty() && self.quiescent != Some(false);
+            if done && waited_enough && last.elapsed() >= QUIET {
                 return Ok(());
             }
             if Instant::now() >= deadline {
