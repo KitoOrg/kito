@@ -83,5 +83,12 @@ debug = false
 [profile.release]
 debug = 1
 
+# The archives of a release: what is measured with `release`, without the
+# debug information, which made the Linux binaries ten times larger.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
+
 [profile.bench]
 debug = 1

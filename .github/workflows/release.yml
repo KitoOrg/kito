@@ -28,15 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
+      # `dist`: the release profile without debug information, stripped.
       - name: Build
-        run: cargo build --release --locked -p kitod -p kito-cli -p kito-mcp -p kito-server
+        run: cargo build --profile dist --locked -p kitod -p kito-cli -p kito-mcp -p kito-server
       - name: Pack
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
           name="kito-${version}-${{ matrix.platform }}"
           mkdir -p "dist/$name"
-          for bin in kito kitod kito-mcp kito-server; do cp "target/release/$bin" "dist/$name/"; done
+          for bin in kito kitod kito-mcp kito-server; do cp "target/dist/$bin" "dist/$name/"; done
           cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
