@@ -4,6 +4,18 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [Unreleased]
+
+Phase 18 (the why graph, better), part 1:
+
+- An intent that says nothing (`wip`, `fix`, `update`, `minor changes`) is
+  refused when a lane is opened or an intent is set: it is what the next
+  agent is told before it changes the code. Intents Kito writes itself
+  (git commit subjects, integrations) are taken as they are.
+
+Windows (ADR 0002), under way: Kito builds for Windows; its tests do not
+pass there yet.
+
 ## [0.16.0]
 
 Permanent lanes ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)).

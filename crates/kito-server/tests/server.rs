@@ -385,7 +385,10 @@ fn the_same_protocol_over_a_command() {
     std::env::set_var("KITOD_BIN", kitod());
     let mut bob = Client::remote(&through("bob", "shop"), true).unwrap();
     let lane = bob
-        .call_value("open_lane", json!({ "agent": "fixer", "intent": "a fix", "scope": ["src/shop.ts"] }))
+        .call_value(
+            "open_lane",
+            json!({ "agent": "fixer", "intent": "a fix of the totals", "scope": ["src/shop.ts"] }),
+        )
         .unwrap();
     assert_eq!(lane["owner"], "bob");
     // The same limits hold: his repositories only, and people the server knows.

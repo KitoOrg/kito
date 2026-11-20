@@ -109,6 +109,93 @@ pub struct Stack {
     pub target: Option<LaneId>,
 }
 
+/// Words that, alone, say that something changed but not why: an intent
+/// made only of them is refused (D-145).
+const SAYS_NOTHING: &[&str] = &[
+    "a",
+    "again",
+    "all",
+    "an",
+    "and",
+    "bug",
+    "bugs",
+    "change",
+    "changed",
+    "changes",
+    "cleanup",
+    "code",
+    "commit",
+    "done",
+    "edit",
+    "edited",
+    "edits",
+    "file",
+    "files",
+    "fix",
+    "fixed",
+    "fixes",
+    "for",
+    "improve",
+    "improved",
+    "improvements",
+    "in",
+    "it",
+    "minor",
+    "misc",
+    "more",
+    "of",
+    "on",
+    "progress",
+    "quick",
+    "refactor",
+    "refactoring",
+    "small",
+    "some",
+    "stuff",
+    "temp",
+    "test",
+    "tests",
+    "that",
+    "the",
+    "things",
+    "this",
+    "tmp",
+    "to",
+    "todo",
+    "tweak",
+    "tweaks",
+    "update",
+    "updated",
+    "updates",
+    "various",
+    "wip",
+    "work",
+    "working",
+    "x",
+    "xx",
+    "xxx",
+];
+
+/// Why an intent is refused, if it is: it says nothing of what the change
+/// is for. `None`: it says something.
+pub fn says_nothing(summary: &str) -> Option<String> {
+    let words: Vec<String> = summary
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let letters: usize = words.iter().map(|word| word.chars().filter(|c| c.is_alphabetic()).count()).sum();
+    if letters >= 3 && words.iter().any(|word| !SAYS_NOTHING.contains(&word.as_str())) {
+        return None;
+    }
+    Some(format!(
+        "{:?} says that something changes, not why: the intent is what the next agent is told before it \
+         changes this code. Say what the change is for (\"prices in cents everywhere\", \"fix the rounding \
+         of totals\")",
+        summary.trim()
+    ))
+}
+
 /// `main` or `lane/2`, for messages.
 pub(crate) fn lane_word(lane: LaneId) -> String {
     match lane.is_main() {
@@ -442,6 +529,10 @@ impl Repo {
         if intent.trim().is_empty() {
             return Err(Error::Other("a lane needs an intent: one sentence saying why it is opened".into()));
         }
+        // A permanent lane's intent is Kito's own.
+        if let Some(why) = says_nothing(intent).filter(|_| name.is_none()) {
+            return Err(Error::Other(why));
+        }
         // A permanent lane has no scope: it holds whatever lands on it.
         if name.is_none() && scope.iter().all(|item| item.trim().is_empty()) {
             return Err(Error::Other(
@@ -538,7 +629,7 @@ impl Repo {
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
-        self.set_intent(id, intent, None, None)?;
+        self.set_intent_given(id, intent, None, None)?;
         self.lane_info(id)
     }
 
@@ -612,8 +703,25 @@ impl Repo {
         Ok(())
     }
 
-    /// Declares the "why" of the ops a lane records from now on.
+    /// Declares the "why" of the ops a lane records from now on. An intent
+    /// that says nothing (`wip`, `fix`, `update`) is refused: it is what the
+    /// next agent will be told before it changes this code.
     pub fn set_intent(
+        &mut self,
+        lane: LaneId,
+        summary: &str,
+        task: Option<String>,
+        prompt: Option<&str>,
+    ) -> Result<String> {
+        if let Some(why) = says_nothing(summary) {
+            return Err(Error::Other(why));
+        }
+        self.set_intent_given(lane, summary, task, prompt)
+    }
+
+    /// The same, for an intent Kito writes itself (a git commit's subject,
+    /// an integration): taken as it is.
+    pub(crate) fn set_intent_given(
         &mut self,
         lane: LaneId,
         summary: &str,

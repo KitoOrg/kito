@@ -1202,7 +1202,20 @@ fn a_staging_lane_from_the_command_line() {
     let created = ok(root, &["lane", "create", "staging"]);
     assert!(created.contains("staging (lane/1) created"), "{created}");
     assert!(ok(root, &["lanes"]).contains("permanent: staging"));
-    ok(root, &["lane", "open", "alice", "--intent", "v2", "--scope", "docs/a.txt", "--on", "staging"]);
+    ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "alice",
+            "--intent",
+            "the second version of a",
+            "--scope",
+            "docs/a.txt",
+            "--on",
+            "staging",
+        ],
+    );
     fs::write(root.join(".kito/lanes/2/work/docs/a.txt"), "v2\n").unwrap();
     let landed = ok(root, &["integrate", "2"]);
     assert!(landed.contains("lane/2: landed on staging as ckpt#2"), "{landed}");
@@ -1267,7 +1280,7 @@ fn lanes_on_lanes_from_the_command_line() {
             "open",
             "carol",
             "--intent",
-            "the tests",
+            "the tests of the docs",
             "--scope",
             "docs/t.txt",
             "--on",

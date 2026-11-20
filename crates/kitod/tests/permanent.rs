@@ -180,7 +180,7 @@ fn staging_catches_up_with_what_landed_on_main_directly() {
     assert_eq!(repo.integrate(api).unwrap().result, Outcome::Integrated);
 
     // A fix lands on main without going through staging.
-    let fix = repo.open_lane("carol", None, None, "a fix", &scope(&["src/page.py"])).unwrap();
+    let fix = repo.open_lane("carol", None, None, "a fix of the page", &scope(&["src/page.py"])).unwrap();
     write(fix.workdir.as_ref().unwrap(), "src/page.py", PAGE_V2);
     assert_eq!(repo.integrate(fix.id.parse().unwrap()).unwrap().result, Outcome::Integrated);
 
@@ -205,7 +205,7 @@ fn staging_catches_up_with_what_landed_on_main_directly() {
     let (api2, api2_work) = open_on(&mut repo, "alice", &["src/api.py"], staging);
     write(&api2_work, "src/api.py", "def get_user(user_id):\n    return None\n");
     assert_eq!(repo.integrate(api2).unwrap().result, Outcome::Integrated);
-    let other = repo.open_lane("erin", None, None, "other", &scope(&["src/api.py"])).unwrap();
+    let other = repo.open_lane("erin", None, None, "another take on users", &scope(&["src/api.py"])).unwrap();
     write(other.workdir.as_ref().unwrap(), "src/api.py", "def get_user(user_id):\n    return {}\n");
     assert_eq!(repo.integrate(other.id.parse().unwrap()).unwrap().result, Outcome::Integrated);
     let refused = repo.catch_up(staging).unwrap_err().to_string();

@@ -258,7 +258,8 @@ impl Repo {
             true => format!("commit {short}"),
             false => subject.trim().to_owned(),
         };
-        self.set_intent(lane, &subject, Some(format!("git {short}")), None)?;
+        // A commit's subject is what its author wrote: taken as it is.
+        self.set_intent_given(lane, &subject, Some(format!("git {short}")), None)?;
         let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
         at.work.author = Author {
             kind: AuthorKind::Human,

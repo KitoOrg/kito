@@ -1309,6 +1309,17 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-145 · An intent that says nothing is refused
+The intent is what the next agent is told before it changes the code:
+"wip" or "fix" tells it nothing. An intent made only of words that say
+that something changed but not why (`wip`, `fix`, `update`, `changes`,
+`minor`, `stuff`…, with fewer than three letters in all) is refused when a
+lane is opened or an intent is set, with an example of one that says
+something. A list of such words, rather than a minimum length: "round half
+up" is short and says it all. Intents Kito writes itself are taken as they
+are: a git commit's subject is its author's (phase 14), and the text of an
+integration or a permanent lane is Kito's.
+
 ### D-144 · Staging landing on main is a merge with staging's branch
 When the last checkpoint of the permanent lane is the lane as it lands,
 main's checkpoint records its commit (`git_merge`, as for a pull) and is
