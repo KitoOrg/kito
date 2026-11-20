@@ -252,6 +252,10 @@ fn modify_behind_the_watcher(file: &Path, outside: &Path, content: &str) {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "a write through a link from outside is missed by inotify only; FSEvents reports it"
+)]
 fn changes_the_watcher_cannot_see_are_found_by_scanning() {
     let tmp = new_repo();
     let root = tmp.path();
@@ -316,6 +320,10 @@ fn without_a_watcher_the_daemon_polls() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "a save is known complete by inotify's close-after-write; FSEvents has no such event (known limit on macOS)"
+)]
 fn a_save_that_takes_its_time_is_captured_once_it_is_complete() {
     use std::io::Write;
     let tmp = new_repo();

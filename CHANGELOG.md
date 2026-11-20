@@ -18,6 +18,11 @@ Permanent lanes ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)).
 - `[lanes.<name>] integrate`: who may land on it.
 - The store's format becomes `kito-store 3` once a permanent lane or a lane
   on a lane exists; older versions refuse it.
+- Tested on macOS in CI for the first time. Known limit there: a save that
+  a program writes slowly, in several steps, may be recorded half-way, then
+  again when complete. Linux knows a file is complete when it is closed
+  after writing; macOS's file events do not say so. Editors that save
+  quickly or by renaming a new file into place are not affected.
 
 ## [0.15.0]
 

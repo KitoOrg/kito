@@ -459,6 +459,10 @@ async fn the_php_server_follows_a_symbol_into_a_lane() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Apple's clangd, without a compilation database, does not index the other files"
+)]
 async fn the_c_server_follows_a_symbol_into_a_lane() {
     if !installed("clangd") {
         skip("clangd");
@@ -571,6 +575,10 @@ async fn the_typescript_server_also_reads_javascript() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Apple's clangd, without a compilation database, does not index the other files"
+)]
 async fn the_c_server_also_reads_cpp() {
     if !installed("clangd") {
         skip("clangd");
