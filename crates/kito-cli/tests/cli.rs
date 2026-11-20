@@ -1606,10 +1606,9 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     // The lane's working copy is on this machine: what is saved in it is
     // in the lane on the server once `sync` has answered.
     let there = serverdir.join("repos/shop/.kito/lanes/1/work");
-    let work = here.join(".kito/lanes/1/work");
     // As the system writes it: on Windows with `\` all through.
-    let shown = work.components().collect::<PathBuf>();
-    assert!(opened.contains(&format!("Working copy: {}", shown.display())), "{opened}");
+    let work = here.join(".kito/lanes/1/work").components().collect::<PathBuf>();
+    assert!(opened.contains(&format!("Working copy: {}", work.display())), "{opened}");
     assert_eq!(fs::read_to_string(work.join("src/shop.py")).unwrap(), SHOP_PY);
     let cents = SHOP_PY.replace("price * quantity", "round(price * 100) * quantity");
     assert_ne!(cents, SHOP_PY);
@@ -1633,7 +1632,7 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     let status = ok(&desk, &["lane", "status", "1"]);
     assert!(status.contains("on the server (`kito lane attach lane/1` brings its files here)"), "{status}");
     let attached = ok(&desk, &["lane", "attach", "1"]);
-    let view = desk.join(".kito/lanes/1/work");
+    let view = desk.join(".kito/lanes/1/work").components().collect::<PathBuf>();
     assert!(attached.contains(&format!("lane/1 is here: {}", view.display())), "{attached}");
     assert!(attached.contains("It follows the lane"), "{attached}");
     assert_eq!(fs::read_to_string(view.join("src/shop.py")).unwrap(), cents);
