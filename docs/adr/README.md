@@ -34,3 +34,4 @@ Compatibility with existing data, migration, what becomes harder.
 
 - [0001 · Lanes on lanes: stacked lanes, targets, permanent lanes](0001-lanes-on-lanes.md)
   (accepted)
+- [0002 · Kito on Windows](0002-windows.md) (accepted)

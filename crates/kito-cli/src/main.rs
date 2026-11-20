@@ -1060,7 +1060,10 @@ fn repo_relative(root: &Path, path: &Path) -> Result<PathBuf, String> {
             _ => abs,
         },
     };
-    Ok(abs.strip_prefix(root).map(Path::to_owned).unwrap_or_else(|_| path.to_owned()))
+    Ok(abs
+        .strip_prefix(root)
+        .map(kito_core::paths::portable_path)
+        .unwrap_or_else(|_| kito_core::paths::portable_path(path)))
 }
 
 fn cmd_rollback(

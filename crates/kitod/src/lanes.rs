@@ -245,7 +245,15 @@ impl Repo {
                 if let Some(dir) = to.parent() {
                     fs::create_dir_all(dir).map_err(Error::io(dir))?;
                 }
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(&from, &to).map_err(Error::io(&to))?;
+                // Links need privileges on Windows; a directory junction
+                // and a hard link do not (ADR 0002).
+                #[cfg(windows)]
+                match from.is_dir() {
+                    true => junction::create(&from, &to).map_err(Error::io(&to))?,
+                    false => fs::hard_link(&from, &to).map_err(Error::io(&to))?,
+                }
             }
         }
         Ok(done.stats.into_iter().map(|(path, meta)| (path, FileStat::of(&meta))).collect())

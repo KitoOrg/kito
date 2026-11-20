@@ -109,13 +109,29 @@ fn language_id(path: &Path) -> &'static str {
     }
 }
 
+/// A path as a URI wants it: on Windows `/C:/repo/src/a.ts`, without the
+/// `\\?\` that canonical paths carry, and with `/` (ADR 0002).
+fn uri_path(path: &Path) -> String {
+    let text = path.to_string_lossy().into_owned();
+    if !cfg!(windows) {
+        return text;
+    }
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/");
+    match text.as_bytes().get(1) {
+        Some(b':') => format!("/{text}"),
+        _ => text,
+    }
+}
+
 fn uri_of(root: &Path, file: &Path) -> String {
     let mut uri = String::from("file://");
-    for byte in root.join(file).to_string_lossy().bytes() {
+    for byte in uri_path(&root.join(file)).bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 uri.push(byte as char)
             }
+            // The drive of a Windows path.
+            b':' if cfg!(windows) => uri.push(':'),
             other => uri.push_str(&format!("%{other:02X}")),
         }
     }
@@ -139,7 +155,14 @@ fn path_of(root: &Path, uri: &str) -> Option<PathBuf> {
             }
         }
     }
-    let path = PathBuf::from(String::from_utf8(bytes).ok()?);
+    let text = String::from_utf8(bytes).ok()?;
+    if cfg!(windows) {
+        // Compared as URIs write them: `/C:/repo/...`, case aside.
+        let (found, base) = (text.to_lowercase(), uri_path(root).to_lowercase());
+        let rest = found.strip_prefix(&base)?.trim_start_matches('/');
+        return Some(PathBuf::from(&text[text.len() - rest.len()..]));
+    }
+    let path = PathBuf::from(text);
     path.strip_prefix(root).ok().map(Path::to_owned)
 }
 

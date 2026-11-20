@@ -110,6 +110,8 @@ fn kind_of(item: &ScopeItem) -> &'static str {
 
 /// A path as the repository names it: relative, with no way out of it.
 pub(crate) fn clean(text: &str) -> Result<PathBuf> {
+    // An agent on Windows may write `src\auth.ts` (ADR 0002).
+    let text = kito_core::paths::portable_text(text);
     let mut text = text.trim();
     while let Some(rest) = text.strip_prefix("./") {
         text = rest;

@@ -13,7 +13,6 @@ use crate::rpc::{self, Request, Response};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -167,7 +166,9 @@ impl Daemon {
                 match path.strip_prefix(&work) {
                     // What Kito keeps for itself is no file of the lane.
                     Ok(rel) if rel.starts_with(kito_store::STORE_DIR) => {}
-                    Ok(rel) if !rel.as_os_str().is_empty() => seen.touched(rel.to_owned(), wait),
+                    Ok(rel) if !rel.as_os_str().is_empty() => {
+                        seen.touched(kito_core::paths::portable_path(rel), wait)
+                    }
                     _ => {}
                 }
             }
@@ -526,9 +527,7 @@ impl Daemon {
     }
 }
 
-fn serve_client(daemon: &Arc<Daemon>, stream: UnixStream) {
-    let Ok(read) = stream.try_clone() else { return };
-    let mut writer = stream;
+fn serve_client(daemon: &Arc<Daemon>, (read, mut writer): crate::ipc::Halves) {
     let kept = daemon.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
     let mut up = kept.unwrap_or_else(|| Upstream::new(&daemon.remote));
     // Whoever speaks first says the key of the socket.
@@ -618,8 +617,7 @@ pub fn serve(root: &Path) -> Result<(), String> {
     }
 
     let socket = rpc::socket_path(&root);
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).map_err(|e| format!("{}: {e}", socket.display()))?;
+    let (_, clients) = crate::ipc::blocking(&root).map_err(|e| format!("{}: {e}", socket.display()))?;
     eprintln!(
         "kitod: listening on {} for {}, connected to `{}` on {}",
         socket.display(),
@@ -640,10 +638,10 @@ pub fn serve(root: &Path) -> Result<(), String> {
         }
     });
 
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+    for client in clients {
+        let Ok(client) = client else { continue };
         let daemon = daemon.clone();
-        std::thread::spawn(move || serve_client(&daemon, stream));
+        std::thread::spawn(move || serve_client(&daemon, client));
     }
     drop(lock);
     Ok(())

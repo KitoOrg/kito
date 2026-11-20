@@ -189,20 +189,20 @@ pub fn run_in_lane(
     timeout: std::time::Duration,
 ) -> Result<(Option<i32>, String), String> {
     use std::io::Read;
-    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     const KEPT: usize = 8000;
-    let mut child = lane_command(root, workdir, network)?
+    let mut command = lane_command(root, workdir, network)?;
+    command
         .arg("sh")
         .arg("-c")
         .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A group of its own, so that everything it started stops with it.
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("the command could not be started: {e}"))?;
+        .stderr(Stdio::piped());
+    // A group of its own, so that everything it started stops with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(|e| format!("the command could not be started: {e}"))?;
     let read = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -225,9 +225,7 @@ pub fn run_in_lane(
                 // `kill` program: procps-ng 4.0.4 (Ubuntu 24.04) reads
                 // `kill -KILL -<group>` as `kill(-1)` and kills every
                 // process of the user (D-133).
-                if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
-                    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-                }
+                stop_tree(child.id());
                 let _ = child.kill();
                 break child.wait().ok();
             }
@@ -244,6 +242,21 @@ pub fn run_in_lane(
         output.push_str(&format!("\n(still running after {} s: stopped)", timeout.as_secs()));
     }
     Ok((status.and_then(|status| status.code()).filter(|_| !late), output))
+}
+
+/// Stops a process and everything it started: its process group, signalled
+/// directly (D-133); on Windows its tree, through `taskkill` (ADR 0002).
+pub fn stop_tree(pid: u32) {
+    #[cfg(unix)]
+    if let Some(group) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// The environment that sends temporary files, and the caches of the
@@ -396,11 +409,12 @@ mod imp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn everything_but_what_is_hidden_is_spelled_as_its_siblings() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -436,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_policy_is_settled_on_real_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();

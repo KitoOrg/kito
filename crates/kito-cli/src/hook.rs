@@ -83,7 +83,7 @@ pub fn place_of(path: &Path) -> Place {
     let path = settled(path);
     for dir in path.ancestors().skip(1) {
         if is_repository(dir) {
-            let rel = path.strip_prefix(dir).unwrap_or(&path).to_owned();
+            let rel = kito_core::paths::portable_path(path.strip_prefix(dir).unwrap_or(&path));
             return Place::Main { root: dir.to_owned(), rel };
         }
         let Some(root) = dir.parent().filter(|root| dir.ends_with(".kito") && is_repository(root)) else {

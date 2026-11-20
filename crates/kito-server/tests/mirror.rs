@@ -264,6 +264,7 @@ fn kill(dir: &Path) {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn a_lane_opened_from_another_machine_is_edited_there() {
     let mut world = World::new();
     let ada = world.ada.clone();

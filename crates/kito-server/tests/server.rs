@@ -52,6 +52,7 @@ fn ok(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn refused(dir: &Path, args: &[&str]) -> String {
     let out = server(dir, args).output().unwrap();
     assert!(!out.status.success(), "kito-server {args:?} should have failed");
@@ -188,6 +189,7 @@ fn refusal(result: Result<Client, ClientError>) -> String {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn people_repositories_and_tokens() {
     let world = World::new();
     // A repository that came with a history is protected from the start.
@@ -416,6 +418,7 @@ fn a_person_added_while_the_server_runs_is_known_at_once() {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn connections_are_encrypted_and_the_server_is_known_by_its_fingerprint() {
     let mut world = World::new();
     // The server has a certificate of its own from the start, and says

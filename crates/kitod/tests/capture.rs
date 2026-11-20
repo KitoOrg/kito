@@ -5,6 +5,7 @@ use kitod::repo::LogItem;
 use kitod::Repo;
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,7 +41,11 @@ fn disk(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, FileMode)> {
     fn visit(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, (Vec<u8>, FileMode)>) {
         for entry in fs::read_dir(root.join(dir)).unwrap() {
             let entry = entry.unwrap();
-            let rel = dir.join(entry.file_name());
+            // Kito's paths use `/` everywhere (ADR 0002).
+            let rel = match dir.as_os_str().is_empty() {
+                true => PathBuf::from(entry.file_name()),
+                false => PathBuf::from(format!("{}/{}", dir.display(), entry.file_name().to_string_lossy())),
+            };
             let meta = fs::symlink_metadata(entry.path()).unwrap();
             if rel == Path::new(".kito") || rel == Path::new(".git") {
                 continue;
@@ -51,11 +56,14 @@ fn disk(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, FileMode)> {
                 let target = fs::read_link(entry.path()).unwrap();
                 out.insert(rel, (target.to_string_lossy().into_owned().into_bytes(), FileMode::Symlink));
             } else {
+                #[cfg(unix)]
                 let mode = if meta.permissions().mode() & 0o111 != 0 {
                     FileMode::Executable
                 } else {
                     FileMode::Regular
                 };
+                #[cfg(not(unix))]
+                let mode = FileMode::Regular;
                 out.insert(rel, (fs::read(entry.path()).unwrap(), mode));
             }
         }
@@ -74,6 +82,7 @@ fn kito_state(repo: &Repo) -> BTreeMap<PathBuf, (Vec<u8>, FileMode)> {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn every_kind_of_change_on_disk_becomes_the_right_op() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
@@ -370,6 +379,7 @@ fn many_new_files_at_once_give_the_symbols_they_give_one_by_one() {
     assert_eq!(story(&a, "src/d03/f199.ts", "C199.m"), ["method `m` created in src/d03/f199.ts"]);
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
@@ -384,6 +394,7 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn an_export_from_memory_gives_the_commit_an_export_from_the_log_gives() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
@@ -517,6 +528,7 @@ fn identity_signs_ops_and_exported_commits() {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn rollback_restores_files_and_can_itself_be_undone() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();

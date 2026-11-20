@@ -1,7 +1,7 @@
 name: Windows
 
-# The port to Windows, while it is under way: what does not compile there
-# yet. Run by hand; it becomes part of CI once Windows is supported.
+# The port to Windows (ADR 0002), while it is under way: the build and the
+# tests on Windows. Run by hand; it joins CI once they pass.
 on:
   workflow_dispatch:
 
@@ -9,9 +9,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: cargo check --workspace --all-targets --message-format short
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked --no-fail-fast

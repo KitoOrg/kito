@@ -20,6 +20,7 @@ use kito_store::{Store, STORE_DIR};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -151,10 +152,15 @@ fn read_settled(
                         false => return OnDisk::Later,
                     }
                 }
+                // Windows has no executable bit: the capture keeps the mode
+                // the tree had (ADR 0002).
+                #[cfg(unix)]
                 let mode = match meta.permissions().mode() & 0o111 {
                     0 => FileMode::Regular,
                     _ => FileMode::Executable,
                 };
+                #[cfg(not(unix))]
+                let mode = FileMode::Regular;
                 // If the file disappears between the stat and the read, it is a removal.
                 let Ok(content) = fs::read(abs) else { return OnDisk::Missing };
                 let unchanged =
@@ -226,12 +232,26 @@ pub(crate) struct FileStat {
 }
 
 impl FileStat {
+    #[cfg(unix)]
     pub(crate) fn of(meta: &fs::Metadata) -> FileStat {
         FileStat {
             size: meta.len(),
             mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
             mode: meta.mode(),
         }
+    }
+
+    /// On Windows: the modification time to the 100 ns the system keeps,
+    /// and the attributes in place of a mode (ADR 0002).
+    #[cfg(windows)]
+    pub(crate) fn of(meta: &fs::Metadata) -> FileStat {
+        use std::os::windows::fs::MetadataExt;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_nanos() as i64);
+        FileStat { size: meta.len(), mtime_ns, mode: meta.file_attributes() }
     }
 }
 
@@ -785,7 +805,7 @@ impl Repo {
 
     /// Path relative to the root, if `path` is inside the repository.
     pub fn relative(&self, path: &Path) -> Option<PathBuf> {
-        path.strip_prefix(&self.root).ok().map(Path::to_owned)
+        path.strip_prefix(&self.root).ok().map(kito_core::paths::portable_path)
     }
 
     /// Full scan of the main working directory: compares it with the tree
@@ -899,7 +919,7 @@ impl Repo {
     fn walk(work: &Work, dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(work.root.join(dir)) else { return };
         for entry in entries.flatten() {
-            let rel = dir.join(entry.file_name());
+            let rel = kito_core::paths::join_portable(dir, &entry.file_name());
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() {
                 if !work.ignore.is_ignored(&rel, true) {
@@ -958,6 +978,7 @@ impl Repo {
             let intent = work.intent;
             let mut all = Vec::new();
             for (path, whole) in paths {
+                let path = kito_core::paths::portable_path(&path);
                 if let Some(then) = whole {
                     work.settled.insert(path.clone(), then);
                 }
@@ -1013,6 +1034,8 @@ impl Repo {
         // 1. From the reported paths to the individual files to look at.
         let mut files: BTreeSet<PathBuf> = BTreeSet::new();
         for rel in paths {
+            // However it was reported, with `/` (ADR 0002).
+            let rel = kito_core::paths::portable_path(&rel);
             if rel.file_name().is_some_and(|n| n == ".gitignore" || n == ".kitoignore") {
                 work.ignore.invalidate();
             }
@@ -1080,6 +1103,13 @@ impl Repo {
             };
             match on_disk {
                 Some((content, mode, meta)) => {
+                    // Without an executable bit or links (Windows), a file
+                    // keeps the mode the tree gives it (ADR 0002).
+                    #[cfg(not(unix))]
+                    let mode = match (mode, work.tree.get(&rel).map(|entry| entry.mode)) {
+                        (FileMode::Regular, Some(kept @ (FileMode::Executable | FileMode::Symlink))) => kept,
+                        _ => mode,
+                    };
                     let blob = BlobId::of(&content);
                     let same = work.tree.get(&rel).is_some_and(|e| e.blob == blob && e.mode == mode);
                     if !same && protected {
@@ -2069,21 +2099,28 @@ pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 /// Writes a file of a working directory: to a temporary file, then a
 /// rename, so that readers never see it half-written.
 pub(crate) fn write_file(root: &Path, rel: &Path, mode: FileMode, content: &[u8]) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
     let abs = root.join(rel);
     if let Some(dir) = abs.parent() {
         fs::create_dir_all(dir).map_err(Error::io(dir))?;
     }
+    #[cfg(unix)]
     if mode == FileMode::Symlink {
+        use std::os::unix::ffi::OsStrExt;
         let _ = fs::remove_file(&abs);
         return std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(content), &abs)
             .map_err(Error::io(&abs));
     }
+    // Elsewhere a link is a file that holds its target (ADR 0002).
     let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = abs.with_file_name(format!(".{name}.kito-tmp"));
     fs::write(&tmp, content).map_err(Error::io(&tmp))?;
-    let mode = if mode == FileMode::Executable { 0o755 } else { 0o644 };
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(Error::io(&tmp))?;
+    #[cfg(unix)]
+    {
+        let mode = if mode == FileMode::Executable { 0o755 } else { 0o644 };
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)).map_err(Error::io(&tmp))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     fs::rename(&tmp, &abs).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         Error::io(&abs)(e)

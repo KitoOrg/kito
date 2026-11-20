@@ -18,6 +18,7 @@ pub mod hash;
 pub mod hlc;
 pub mod ids;
 pub mod model;
+pub mod paths;
 mod serde_helpers;
 pub mod symbols;
 pub mod tree;

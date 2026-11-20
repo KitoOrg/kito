@@ -15,6 +15,7 @@ use kito_core::{BlobId, FileMode, Tree, TreeEntry};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,12 +122,23 @@ fn create(
         done.files += 1;
         if entry.mode == FileMode::Symlink {
             let target = blob(&entry.blob).map_err(context)?;
+            #[cfg(unix)]
             std::os::unix::fs::symlink(String::from_utf8_lossy(&target).as_ref(), &to).map_err(context)?;
+            // Where links need privileges (Windows), a file that holds the
+            // target, as git does with `core.symlinks = false`.
+            #[cfg(not(unix))]
+            fs::write(&to, &target).map_err(context)?;
             done.written += 1;
             continue;
         }
         let mode = if entry.mode == FileMode::Executable { 0o755 } else { 0o644 };
-        let create = || fs::File::options().write(true).create(true).truncate(true).mode(mode).open(&to);
+        let create = || {
+            let mut options = fs::File::options();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            options.mode(mode);
+            options.open(&to)
+        };
         let mut file = None;
         // `true` once something that is not the content was left at `to`.
         let mut leftover = false;
@@ -187,13 +199,18 @@ fn create(
             }
         };
         file.set_modified(stamp).map_err(context)?;
+        #[allow(unused_mut)]
         let mut meta = file.metadata().map_err(context)?;
         // A cloned file has the permissions of the original, and a created
         // one those the process is allowed to give: set only if they differ.
+        // Windows has no executable bit: the mode stays in the tree.
+        #[cfg(unix)]
         if meta.permissions().mode() & 0o777 != mode {
             file.set_permissions(fs::Permissions::from_mode(mode)).map_err(context)?;
             meta = file.metadata().map_err(context)?;
         }
+        #[cfg(not(unix))]
+        let _ = mode;
         done.stats.push((path.to_path_buf(), meta));
     }
     Ok(done)

@@ -132,6 +132,10 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
 /// (about 100 bytes) it falls back to a name in the temporary directory,
 /// derived from the repository root.
 pub fn socket_path(root: &Path) -> PathBuf {
+    // On Windows, the file that stands for the daemon's pipe (crate::ipc).
+    if cfg!(windows) {
+        return root.join(kito_store::STORE_DIR).join("kitod.pipe");
+    }
     let preferred = root.join(kito_store::STORE_DIR).join("kitod.sock");
     if preferred.as_os_str().len() <= 100 {
         return preferred;
@@ -154,17 +158,20 @@ pub fn socket_key(root: &Path) -> Option<String> {
 
 /// The key of the socket, made if there is none yet: read by its owner only.
 pub fn ensure_socket_key(root: &Path) -> std::io::Result<String> {
-    use std::io::{Read, Write};
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Write;
     if let Some(key) = socket_key(root) {
         return Ok(key);
     }
     let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::getrandom(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     let key: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let path = root.join(kito_store::STORE_DIR).join(SOCKET_KEY);
-    let mut file =
-        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // On Windows the user profile's permissions keep it from other users (ADR 0002).
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
     file.write_all(key.as_bytes())?;
     Ok(key)
 }

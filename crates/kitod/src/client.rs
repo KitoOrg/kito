@@ -12,8 +12,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -70,16 +68,15 @@ impl Remote {
     /// Makes `root` a client of this remote. The file holds the token: it
     /// is readable by its owner only.
     pub fn save(&self, root: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         let dir = root.join(kito_store::STORE_DIR);
         std::fs::create_dir_all(&dir)?;
         let text = toml::to_string(self).map_err(std::io::Error::other)?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(dir.join(REMOTE_FILE))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // On Windows the user profile's permissions keep it from other users (ADR 0002).
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(dir.join(REMOTE_FILE))?;
         file.write_all(text.as_bytes())
     }
 
@@ -182,7 +179,7 @@ impl Client {
     /// Connects to the directory's daemon, if it is running.
     pub fn connect(root: &Path) -> Result<Client, ClientError> {
         let socket = rpc::socket_path(root);
-        let stream = UnixStream::connect(&socket)
+        let stream = crate::ipc::connect(root)
             .map_err(|e| ClientError::Connect(format!("{}: {e}", socket.display())))?;
         let mut writer = stream.try_clone()?;
         // The key of the socket first: it says this client can read the
@@ -357,7 +354,7 @@ fn daemon_binary() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name("kitod");
+        let sibling = exe.with_file_name(format!("kitod{}", std::env::consts::EXE_SUFFIX));
         if sibling.is_file() {
             return sibling;
         }
@@ -374,14 +371,21 @@ fn spawn_daemon(root: &Path) -> Result<std::process::Child, ClientError> {
         .map_err(|e| ClientError::Spawn(e.to_string()))?;
     let err = log.try_clone().map_err(|e| ClientError::Spawn(e.to_string()))?;
     let binary = daemon_binary();
-    Command::new(&binary)
-        .arg("--repo")
-        .arg(root)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(err)
-        // A process group of its own: the daemon outlives the CLI's terminal.
-        .process_group(0)
-        .spawn()
-        .map_err(|e| ClientError::Spawn(format!("{}: {e}", binary.display())))
+    let mut command = Command::new(&binary);
+    command.arg("--repo").arg(root).stdin(Stdio::null()).stdout(log).stderr(err);
+    // A process group of its own: the daemon outlives the CLI's terminal.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    // On Windows: detached from the console, in a group of its own (ADR 0002).
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(
+        &mut command,
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+    );
+    command.spawn().map_err(|e| ClientError::Spawn(format!("{}: {e}", binary.display())))
 }
+
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

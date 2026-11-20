@@ -3,7 +3,9 @@
 
 use kito_core::*;
 use kito_diff::fileops::{ops_for_changes, Snapshot};
-use kito_git::{export, import, ExportOptions, GitError};
+#[cfg(unix)]
+use kito_git::import;
+use kito_git::{export, ExportOptions, GitError};
 use kito_store::Store;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -115,6 +117,7 @@ fn file(content: &str) -> (Vec<u8>, FileMode) {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn checkpoints_become_commits_that_git_accepts() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -223,6 +226,7 @@ fn export_continues_history_and_detects_foreign_commits() {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn git_history_is_imported_as_ops_and_checkpoints() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

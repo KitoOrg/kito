@@ -5,7 +5,8 @@ use kito_lane::{materialize, remove, Source};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -45,16 +46,24 @@ fn check(repo: &Repo, dest: &Path) {
         let at = dest.join(path);
         let meta = fs::symlink_metadata(&at).unwrap();
         match entry.mode {
+            #[cfg(unix)]
             FileMode::Symlink => {
                 assert_eq!(
                     fs::read_link(&at).unwrap().to_string_lossy().as_bytes(),
                     &repo.blobs[&entry.blob][..]
                 );
             }
+            // Without links or an executable bit (Windows), a file that
+            // holds the content, or the link's target (ADR 0002).
+            #[allow(unused_variables)]
             mode => {
                 assert_eq!(fs::read(&at).unwrap(), repo.blobs[&entry.blob], "{}", path.display());
-                let executable = meta.permissions().mode() & 0o111 != 0;
-                assert_eq!(executable, mode == FileMode::Executable, "{}", path.display());
+                #[cfg(unix)]
+                {
+                    let executable = meta.permissions().mode() & 0o111 != 0;
+                    assert_eq!(executable, mode == FileMode::Executable, "{}", path.display());
+                }
+                let _ = &meta;
             }
         }
     }
@@ -75,10 +84,7 @@ fn a_working_copy_is_written_from_the_store() {
     assert_eq!(done.stats.len(), 4, "every file but the link");
     for (path, reported) in &done.stats {
         let now = fs::metadata(dest.join(path)).unwrap();
-        assert_eq!(
-            (reported.len(), reported.mtime(), reported.mtime_nsec()),
-            (now.len(), now.mtime(), now.mtime_nsec())
-        );
+        assert_eq!((reported.len(), reported.modified().unwrap()), (now.len(), now.modified().unwrap()));
         let age = SystemTime::now().duration_since(now.modified().unwrap()).unwrap();
         assert!(age >= Duration::from_secs(1), "{}: {age:?}", path.display());
     }

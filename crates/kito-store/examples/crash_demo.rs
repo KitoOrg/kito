@@ -27,6 +27,7 @@ use kito_core::*;
 use kito_store::fs::{FileSystem, RawFile, StdFs};
 use kito_store::{IndexRecovery, Store, StoreOptions};
 use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -354,7 +355,12 @@ fn driver(dir: &Path, target: u64, seed: u64, max_ms: u64) -> Result<(), String>
         let seen = confirmed.load(Ordering::SeqCst);
         confirmed_max = confirmed_max.max(seen);
 
-        let finished = if status.signal() == Some(9) {
+        // Killed: by SIGKILL; on Windows, terminated with no exit of its own.
+        #[cfg(unix)]
+        let killed = status.signal() == Some(9);
+        #[cfg(not(unix))]
+        let killed = !status.success();
+        let finished = if killed {
             match kill {
                 Kill::AfterCommit(_) => totals.kills_after_commit += 1,
                 Kill::AtStartup(_) => totals.kills_at_startup += 1,

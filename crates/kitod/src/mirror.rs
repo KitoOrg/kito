@@ -556,9 +556,11 @@ impl Mirror {
             return Local::Gone;
         };
         if meta.file_type().is_symlink() {
-            use std::os::unix::ffi::OsStrExt;
             let Ok(target) = fs::read_link(&abs) else { return Local::Gone };
-            let bytes = target.as_os_str().as_bytes().to_vec();
+            #[cfg(unix)]
+            let bytes = std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str()).to_vec();
+            #[cfg(not(unix))]
+            let bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
             let file = Synced { blob: BlobId::of(&bytes).to_string(), executable: false, symlink: true };
             return Local::File(file, bytes);
         }
@@ -579,8 +581,11 @@ impl Mirror {
             state.stats.remove(path);
             return Local::Gone;
         };
-        use std::os::unix::fs::PermissionsExt;
-        let executable = meta.permissions().mode() & 0o111 != 0;
+        // Windows has no executable bit: what was known of the file stays (ADR 0002).
+        #[cfg(unix)]
+        let executable = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+        #[cfg(not(unix))]
+        let executable = state.stats.get(path).is_some_and(|(_, _, known)| known.executable);
         let file = Synced { blob: BlobId::of(&bytes).to_string(), executable, symlink: false };
         state.stats.insert(path.to_owned(), (meta.len(), modified, file.clone()));
         Local::File(file, bytes)
@@ -831,7 +836,7 @@ impl Mirror {
 
     fn walk(&self, dir: &Path, found: &mut BTreeSet<String>) {
         for entry in fs::read_dir(self.work.join(dir)).into_iter().flatten().flatten() {
-            let rel = dir.join(entry.file_name());
+            let rel = kito_core::paths::join_portable(dir, &entry.file_name());
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() {
                 let reserved = dir.as_os_str().is_empty()

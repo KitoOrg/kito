@@ -134,15 +134,15 @@ impl Server {
     /// readable by its owner only.
     fn save(&self) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let path = self.dir.join(CONFIG_FILE);
         let text = toml::to_string(&self.config).map_err(|e| e.to_string())?;
         let staged = path.with_extension("toml.new");
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // On Windows the user profile's permissions keep it from other users (ADR 0002).
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let written = options
             .open(&staged)
             .and_then(|mut file| file.write_all(text.as_bytes()))
             .and_then(|()| std::fs::rename(&staged, &path));

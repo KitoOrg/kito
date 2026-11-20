@@ -1031,6 +1031,7 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
 }
 
 #[test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn a_command_runs_confined_to_its_lane() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();

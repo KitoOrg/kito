@@ -41,33 +41,57 @@ pub async fn verify(
     timeout: Duration,
     confinement: &Confinement,
 ) -> VerificationReport {
+    verify_with_shell(dir, commands, timeout, confinement).await
+}
+
+/// The shell the checks are written for: `sh`; on Windows `sh` where one is
+/// on the `PATH` (Git for Windows has one), else `cmd` (ADR 0002).
+pub fn shell_program() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        let found = std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("sh.exe").is_file()));
+        if !found {
+            return ("cmd", "/C");
+        }
+    }
+    ("sh", "-c")
+}
+
+async fn verify_with_shell(
+    dir: &Path,
+    commands: &[String],
+    timeout: Duration,
+    confinement: &Confinement,
+) -> VerificationReport {
     let started = Instant::now();
     let mut ran = Vec::new();
     let mut failure: Option<(String, String)> = None;
     let confined = !confinement.wrapper.is_empty();
     for command in commands {
         ran.push(command.clone());
+        let (program, flag) = shell_program();
         let mut shell = match confinement.wrapper.split_first() {
-            Some((program, args)) => {
-                let mut wrapped = Command::new(program);
-                wrapped.args(args).arg("sh");
+            Some((wrapper, args)) => {
+                let mut wrapped = Command::new(wrapper);
+                wrapped.args(args).arg(program);
                 wrapped
             }
-            None => Command::new("sh"),
+            None => Command::new(program),
         };
-        let spawned = shell
-            .arg("-c")
+        shell
+            .arg(flag)
             .arg(command)
             .current_dir(dir)
             .env("KITO_VERIFY", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // A group of its own: on a timeout the whole of it is killed,
-            // not only the shell.
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn();
+            .kill_on_drop(true);
+        // A group of its own: on a timeout the whole of it is killed, not
+        // only the shell.
+        #[cfg(unix)]
+        shell.process_group(0);
+        let spawned = shell.spawn();
         let mut child = match spawned {
             Ok(child) => child,
             Err(e) => {
@@ -114,8 +138,18 @@ pub async fn verify(
                 break;
             }
             Err(_) => {
+                #[cfg(unix)]
                 if let Some(pid) = pid.and_then(|pid| rustix::process::Pid::from_raw(pid as i32)) {
                     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                }
+                // On Windows, the command's tree (ADR 0002).
+                #[cfg(windows)]
+                if let Some(pid) = pid {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
                 }
                 let _ = child.kill().await;
                 failure =

@@ -13,6 +13,7 @@ pub mod guard;
 pub mod identity;
 pub mod ignore;
 pub mod integrate;
+pub mod ipc;
 pub mod lanes;
 pub mod mirror;
 pub mod pull;

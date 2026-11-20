@@ -14,8 +14,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Notify};
+
+/// What stops the daemon besides a `shutdown` request and Ctrl-C: SIGTERM,
+/// or Ctrl-Break on Windows (ADR 0002).
+#[cfg(unix)]
+fn terminate_signal() -> Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| Error::Other(format!("signal handling: {e}")))
+}
+
+#[cfg(windows)]
+fn terminate_signal() -> Result<tokio::signal::windows::CtrlBreak> {
+    tokio::signal::windows::ctrl_break().map_err(|e| Error::Other(format!("signal handling: {e}")))
+}
 
 /// How many latency samples are kept for the percentiles.
 const SAMPLES: usize = 1024;
@@ -1563,8 +1575,8 @@ async fn integration_loop(daemon: Arc<Daemon>) {
     }
 }
 
-async fn serve_connection(daemon: Arc<Daemon>, stream: UnixStream) {
-    let (reader, mut writer) = stream.into_split();
+async fn serve_connection(daemon: Arc<Daemon>, stream: Box<dyn crate::ipc::Connection>) {
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
     // Whoever speaks first says the key of the socket.
     let mut trusted = daemon.key.is_none();
@@ -1674,6 +1686,7 @@ pub async fn serve(root: &Path) -> Result<()> {
                         .filter_map(|abs| {
                             let rel = abs.strip_prefix(&watch_root).ok()?;
                             let (lane, path) = route(rel).filter(|_| !rel.as_os_str().is_empty())?;
+                            let path = kito_core::paths::portable_path(&path);
                             let now = || {
                                 let meta = std::fs::symlink_metadata(abs).ok()?;
                                 meta.is_file().then(|| crate::repo::FileStat::of(&meta))
@@ -1707,8 +1720,7 @@ pub async fn serve(root: &Path) -> Result<()> {
     repo.analyze()?;
 
     let socket = rpc::socket_path(&root);
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).map_err(Error::io(&socket))?;
+    let mut listener = crate::ipc::Listener::bind(&root).map_err(Error::io(&socket))?;
 
     let daemon = Arc::new(Daemon {
         root: root.clone(),
@@ -1747,19 +1759,18 @@ pub async fn serve(root: &Path) -> Result<()> {
     let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
     let integrator = tokio::spawn(integration_loop(daemon.clone()));
     let pusher = tokio::spawn(push_loop(daemon.clone()));
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| Error::Other(format!("signal handling: {e}")))?;
+    let mut terminated = terminate_signal()?;
 
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     tokio::spawn(serve_connection(daemon.clone(), stream));
                 }
                 Err(e) => eprintln!("kitod: accept: {e}"),
             },
             _ = daemon.shutdown.notified() => break,
-            _ = sigterm.recv() => break,
+            _ = terminated.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
         }
     }

@@ -217,6 +217,7 @@ fn skip(what: &str) {
 
 /// The TypeScript package the `tsc` on the path belongs to: the server
 /// looks for one in the project, as a project that uses TypeScript has.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn typescript_package() -> Option<PathBuf> {
     let out = Command::new("sh").args(["-c", "command -v tsc"]).output().ok()?;
     let tsc = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim()).canonicalize().ok()?;
@@ -225,6 +226,7 @@ fn typescript_package() -> Option<PathBuf> {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 async fn the_typescript_server_follows_a_symbol_into_a_lane() {
     let Some(typescript) = typescript_package().filter(|_| installed("typescript-language-server")) else {
         skip("typescript-language-server, or a TypeScript with a tsserver for it,");
@@ -542,6 +544,7 @@ async fn the_rust_server_follows_a_symbol_into_a_lane() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 async fn the_typescript_server_also_reads_javascript() {
     let Some(typescript) = typescript_package().filter(|_| installed("typescript-language-server")) else {
         skip("typescript-language-server, or a TypeScript with a tsserver for it,");

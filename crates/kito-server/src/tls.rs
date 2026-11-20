@@ -24,7 +24,6 @@ fn files(dir: &Path) -> (PathBuf, PathBuf) {
 
 /// Makes the server's key and certificate if it has none yet.
 pub fn ensure(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let (cert, key) = files(dir);
     if cert.is_file() && key.is_file() {
         return Ok(());
@@ -33,12 +32,13 @@ pub fn ensure(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("making the server's certificate: {e}"))?;
     let tls = dir.join("tls");
     std::fs::create_dir_all(&tls).map_err(|e| format!("{}: {e}", tls.display()))?;
-    // The key first, readable by its owner only.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    // The key first, readable by its owner only (on Windows, by the user
+    // profile's permissions: ADR 0002).
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
         .open(&key)
         .and_then(|mut file| file.write_all(made.signing_key.serialize_pem().as_bytes()))
         .map_err(|e| format!("{}: {e}", key.display()))?;
