@@ -3,7 +3,6 @@
 use kito_core::paths::Canonical as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "server.toml";
@@ -181,6 +180,10 @@ impl Server {
         let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
         match from {
             Some(from) => {
+                // A directory here is given to git as a plain path: git on
+                // Windows does not take one that starts with `\\?\` (ADR 0002).
+                let local = Path::new(from).canonical().ok().filter(|path| path.is_dir());
+                let from = local.as_ref().and_then(|path| path.to_str()).unwrap_or(from);
                 let cloned = std::process::Command::new("git")
                     .args(["clone", "--quiet", from])
                     .arg(&root)
@@ -232,9 +235,8 @@ impl Server {
             }
         }
         let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut source| source.read_exact(&mut bytes))
-            .map_err(|e| format!("no randomness to make a token from: {e}"))?;
+        // The system's randomness, on every platform (ADR 0002).
+        getrandom::getrandom(&mut bytes).map_err(|e| format!("no randomness to make a token from: {e}"))?;
         let token = format!("kito_{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
         let repos = match repos.is_empty() {
             true => vec!["*".to_owned()],

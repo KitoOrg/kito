@@ -22,9 +22,15 @@ fn fake_server() -> String {
     let exe = std::env::current_exe().unwrap();
     let path = exe
         .ancestors()
-        .map(|dir| dir.join("examples/fake_lsp"))
+        .map(|dir| dir.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX)))
         .find(|path| path.is_file())
-        .unwrap_or_else(|| exe.parent().unwrap().parent().unwrap().join("examples/fake_lsp"));
+        .unwrap_or_else(|| {
+            exe.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX))
+        });
     assert!(
         path.is_file(),
         "{} is not built: `cargo test -p kito-semantic` builds it, a single `--test` does not (then: `cargo build -p kito-semantic --example fake_lsp`)",
@@ -463,8 +469,8 @@ async fn the_php_server_follows_a_symbol_into_a_lane() {
 
 #[tokio::test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "Apple's clangd, without a compilation database, does not index the other files"
+    not(target_os = "linux"),
+    ignore = "clangd, without a compilation database, indexes the other files on Linux only"
 )]
 async fn the_c_server_follows_a_symbol_into_a_lane() {
     if !installed("clangd") {
@@ -580,8 +586,8 @@ async fn the_typescript_server_also_reads_javascript() {
 
 #[tokio::test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "Apple's clangd, without a compilation database, does not index the other files"
+    not(target_os = "linux"),
+    ignore = "clangd, without a compilation database, indexes the other files on Linux only"
 )]
 async fn the_c_server_also_reads_cpp() {
     if !installed("clangd") {

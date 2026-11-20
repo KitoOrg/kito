@@ -32,25 +32,43 @@ pub trait FileSystem: Send + Sync + Debug {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StdFs;
 
-struct StdFile(File);
+struct StdFile {
+    file: File,
+    /// Where it is: on Windows a file opened to append cannot change its
+    /// length, and a truncation goes through a handle of its own.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    path: std::path::PathBuf,
+}
 
 impl RawFile for StdFile {
     fn append(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.write_all(buf)
+        self.file.write_all(buf)
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        self.0.sync_data()
+        self.file.sync_data()
     }
 
     fn truncate(&mut self, len: u64) -> io::Result<()> {
-        self.0.set_len(len)
+        // A file opened to append has no right to set its end on Windows
+        // (FILE_APPEND_DATA without FILE_WRITE_DATA): recovery and the undo
+        // of a partial write cut it through a handle opened to write
+        // (ADR 0002). Every write still goes through the append handle.
+        #[cfg(windows)]
+        {
+            OpenOptions::new().write(true).open(&self.path)?.set_len(len)
+        }
+        #[cfg(not(windows))]
+        {
+            self.file.set_len(len)
+        }
     }
 }
 
 impl FileSystem for StdFs {
     fn open_append(&self, path: &Path) -> io::Result<Box<dyn RawFile>> {
-        Ok(Box::new(StdFile(OpenOptions::new().append(true).open(path)?)))
+        let file = OpenOptions::new().append(true).open(path)?;
+        Ok(Box::new(StdFile { file, path: path.to_owned() }))
     }
 
     fn create_atomic(&self, path: &Path, content: &[u8]) -> io::Result<()> {

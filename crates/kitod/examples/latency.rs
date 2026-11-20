@@ -36,8 +36,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("KITOD_BIN").is_none() {
         // target/<profile>/examples/latency → target/<profile>/kitod
         let exe = std::env::current_exe()?;
-        let candidate: PathBuf =
-            exe.parent().and_then(|p| p.parent()).map(|p| p.join("kitod")).unwrap_or_default();
+        let candidate: PathBuf = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join(format!("kitod{}", std::env::consts::EXE_SUFFIX)))
+            .unwrap_or_default();
         if !candidate.is_file() {
             return Err("kitod not found: run `cargo build --release -p kitod` first or set KITOD_BIN".into());
         }

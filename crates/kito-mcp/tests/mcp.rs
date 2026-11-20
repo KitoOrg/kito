@@ -11,7 +11,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// package alone it may not have been built.
 fn kitod() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
-    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kitod");
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp"))
+        .with_file_name(format!("kitod{}", std::env::consts::EXE_SUFFIX));
     BUILD.call_once(|| {
         if !path.is_file() {
             let status = Command::new(env!("CARGO"))
@@ -553,7 +554,8 @@ fn an_agent_runs_a_command_confined_to_its_lane() {
 
 fn kito_server() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
-    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("kito-server");
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-mcp"))
+        .with_file_name(format!("kito-server{}", std::env::consts::EXE_SUFFIX));
     BUILD.call_once(|| {
         if !path.is_file() {
             let status = Command::new(env!("CARGO"))

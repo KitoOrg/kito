@@ -73,7 +73,14 @@ fn kept(root: &Path) -> Vec<(String, String)> {
                 match entry.file_type().unwrap().is_dir() {
                     true => dirs.push(entry.path()),
                     false => {
-                        let rel = entry.path().strip_prefix(when.path()).unwrap().display().to_string();
+                        // With `/`, as Kito names files (ADR 0002).
+                        let rel = entry
+                            .path()
+                            .strip_prefix(when.path())
+                            .unwrap()
+                            .display()
+                            .to_string()
+                            .replace('\\', "/");
                         found.push((rel, fs::read_to_string(entry.path()).unwrap()));
                     }
                 }

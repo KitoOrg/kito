@@ -1960,6 +1960,7 @@ name = "kito-server"
 version = "0.18.0"
 dependencies = [
  "clap",
+ "getrandom 0.2.17",
  "kito-core",
  "kito-store",
  "kitod",

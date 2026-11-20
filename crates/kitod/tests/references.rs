@@ -45,9 +45,15 @@ fn sure_server() -> String {
     let exe = std::env::current_exe().unwrap();
     let path = exe
         .ancestors()
-        .map(|dir| dir.join("examples/fake_language_server"))
+        .map(|dir| dir.join(format!("examples/fake_language_server{}", std::env::consts::EXE_SUFFIX)))
         .find(|path| path.is_file())
-        .unwrap_or_else(|| exe.parent().unwrap().parent().unwrap().join("examples/fake_language_server"));
+        .unwrap_or_else(|| {
+            exe.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(format!("examples/fake_language_server{}", std::env::consts::EXE_SUFFIX))
+        });
     assert!(
         path.is_file(),
         "{} is not built: `cargo test -p kitod` builds it, a single `--test` does not (then: `cargo build -p kitod --example fake_language_server`)",

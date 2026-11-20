@@ -112,7 +112,9 @@ fn a_lane_is_read_from_elsewhere() {
     assert_ne!(blob(&repo, lane, "src/shop.ts"), blob(&repo, LaneId::MAIN, "src/shop.ts"));
     let files = repo.lane_files(lane, None).unwrap();
     let run = files.iter().find(|file| file.path == "bin/run").unwrap();
-    assert!(run.executable && !run.symlink);
+    // Windows has no executable bit (ADR 0002).
+    assert_eq!(run.executable, cfg!(unix));
+    assert!(!run.symlink);
 
     // A content is asked by its ID.
     let id = blob(&repo, lane, "src/shop.ts").unwrap();

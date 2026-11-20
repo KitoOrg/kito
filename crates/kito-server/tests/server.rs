@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 /// package alone it may not have been built.
 fn kitod() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
-    let path = Path::new(env!("CARGO_BIN_EXE_kito-server")).with_file_name("kitod");
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-server"))
+        .with_file_name(format!("kitod{}", std::env::consts::EXE_SUFFIX));
     BUILD.call_once(|| {
         if !path.is_file() {
             let status = Command::new(env!("CARGO"))

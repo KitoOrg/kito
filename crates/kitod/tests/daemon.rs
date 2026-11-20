@@ -209,7 +209,10 @@ fn only_one_daemon_per_repository_and_errors_are_reported() {
     stop(root, &mut client);
 }
 
+/// `kill -9` is Unix's. The recovery it tests is the store's, the same code
+/// on every platform, and kito-store's fault tests run on Windows too.
 #[test]
+#[cfg(unix)]
 fn killed_daemon_loses_nothing_that_was_captured() {
     let tmp = new_repo();
     let root = tmp.path();
