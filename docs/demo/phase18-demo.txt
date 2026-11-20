@@ -1,0 +1,67 @@
+# 1. An intent that says nothing is refused
+
+$ kito lane open agent-a --intent wip --scope src/billing.py
+kito: "wip" says that something changes, not why: the intent is what the next agent is told before it changes this code. Say what the change is for ("prices in cents everywhere", "fix the rounding of totals")
+
+$ kito lane open agent-a --intent taxes on every invoice --scope src/billing.py
+lane/1 opened for agent-a on ckpt#1.
+Working copy: /demo/app/.kito/lanes/1/work
+Scope: src/billing.py
+Why it is the way it is:
+  src/billing.py
+    "invoices": ada, checkpoint ckpt#1
+Every save there is recorded on the lane; `kito integrate lane/1` brings it in.
+
+$ kito integrate 1
+lane/1: integrated as ckpt#2 (git 9a82a4e1b6)
+
+
+# 2. A note on code
+
+$ kito note src/billing.py:invoice called by the nightly billing job, outside this repository: do not rename
+note#1  src/billing.py:invoice  (ada): called by the nightly billing job, outside this repository: do not rename
+It is told with the why of that code, to whoever is about to change it.
+
+$ kito why src/billing.py:invoice
+function invoice  (src/billing.py)  lines 1-3
+
+Notes left on it:
+  note#1  src/billing.py:invoice  (ada): called by the nightly billing job, outside this repository: do not rename
+
+Why it is the way it is, newest first:
+  1. taxes on every invoice
+     body changed · by agent-a for ada · lane/1 · ckpt#2 · 2026-11-20 20:14
+  2. invoices
+     created · by ada · ckpt#1 · 2026-11-20 20:14
+     with: .gitignore
+
+Its lines, with the reason each was last written for:
+    2     1  def invoice(customer, amount):
+    1     2      total = round(amount * 1.2, 2)
+    2     3      return {"customer": customer, "total": total}
+
+
+# 3. A renamed file keeps the reasons of its lines
+
+$ kito checkpoint -m billing becomes invoices
+ckpt#3 created and exported as git commit 324c87c1b7
+
+$ kito why src/invoices.py:2
+function invoice  (src/invoices.py)  lines 1-3
+
+Notes left on it:
+  note#1  src/invoices.py:invoice  (ada): called by the nightly billing job, outside this repository: do not rename
+
+Why it is the way it is, newest first:
+  1. taxes on every invoice
+     body changed · by agent-a for ada · lane/1 · ckpt#2 · 2026-11-20 20:14
+     with: src/billing.py
+  2. invoices
+     created · by ada · ckpt#1 · 2026-11-20 20:14
+     with: .gitignore, src/billing.py
+
+Its lines, with the reason each was last written for:
+    1     2      total = round(amount * 1.2, 2)
+
+$ kito note --list
+note#1  src/invoices.py:invoice  (ada): called by the nightly billing job, outside this repository: do not rename

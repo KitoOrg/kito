@@ -6,7 +6,12 @@ of a version are its section here.
 
 ## [Unreleased]
 
-Phase 18 (the why graph, better), part 1:
+Windows (ADR 0002), under way: Kito builds for Windows; its tests do not
+pass there yet.
+
+## [0.18.0]
+
+The why graph, better (phase 18; phase 17, review, comes after):
 
 - An intent that says nothing (`wip`, `fix`, `update`, `minor changes`) is
   refused when a lane is opened or an intent is set: it is what the next
@@ -18,9 +23,9 @@ Phase 18 (the why graph, better), part 1:
   a directory are told for what is in it. They are shown with the why of
   that code (`annotations`), and an agent about to change it is told them
   once, with the reasons.
-
-Windows (ADR 0002), under way: Kito builds for Windows; its tests do not
-pass there yet.
+- A renamed file keeps the reasons of its lines: its history is followed
+  under the names it had before. A new file given the name of an earlier
+  one no longer takes that one's history.
 
 ## [0.16.0]
 

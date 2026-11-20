@@ -602,16 +602,62 @@ impl Repo {
         Ok(groups)
     }
 
-    /// The same for a file as a whole: every change to it, inside its
-    /// functions or not.
-    fn file_groups(&self, reach: &crate::semantic::Reach, file: &Path) -> Result<Vec<Group>> {
-        let index = self.index()?;
-        let mut touches: Vec<(Op, &'static str)> = Vec::new();
-        for touch in index.files.get(file).map(Vec::as_slice).unwrap_or_default() {
-            if let Some(op) = self.store.get_op(&touch.op)?.filter(|op| reach.includes(op)) {
-                touches.push((op, touch.how));
+    /// Every change to a file as a whole, oldest first, and those to the
+    /// names it had before: each earlier name is followed back from the
+    /// rename that gave it the next one, and only up to that rename (phase
+    /// 18, D-147).
+    fn file_touches(&self, index: &WhyIndex, file: &Path) -> Result<Vec<(Op, &'static str)>> {
+        let mut found: Vec<(Op, &'static str)> = Vec::new();
+        let mut seen: std::collections::HashSet<OpId> = std::collections::HashSet::new();
+        let mut names: Vec<(PathBuf, Option<Hlc>)> = vec![(file.to_owned(), None)];
+        let mut followed = 0;
+        while let Some((path, until)) = names.pop() {
+            // A file renamed back and forth is not followed for ever.
+            followed += 1;
+            if followed > 64 {
+                break;
+            }
+            let mut here: Vec<(Op, &'static str)> = Vec::new();
+            for touch in index.files.get(&path).map(Vec::as_slice).unwrap_or_default() {
+                let Some(op) = self.store.get_op(&touch.op)? else { continue };
+                if until.is_none_or(|until| op.at <= until) {
+                    here.push((op, touch.how));
+                }
+            }
+            // What had this name before is another file: its life ended
+            // when it was removed or renamed away (the rename that gave the
+            // next name ends this one at `until`, and is kept).
+            let born = here
+                .iter()
+                .filter(|(op, how)| {
+                    matches!(*how, "removed" | "renamed away") && until.is_none_or(|until| op.at < until)
+                })
+                .map(|(op, _)| op.at)
+                .max();
+            for (op, how) in here {
+                if born.is_some_and(|born| op.at <= born) {
+                    continue;
+                }
+                if let OpKind::FileRename { from, to } = &op.kind {
+                    if to == &path {
+                        names.push((from.clone(), Some(op.at)));
+                    }
+                }
+                if seen.insert(op.id) {
+                    found.push((op, how));
+                }
             }
         }
+        found.sort_by_key(|(op, _)| op.at);
+        Ok(found)
+    }
+
+    /// The same for a file as a whole: every change to it, inside its
+    /// functions or not, under this name and the ones it had before.
+    fn file_groups(&self, reach: &crate::semantic::Reach, file: &Path) -> Result<Vec<Group>> {
+        let index = self.index()?;
+        let touches: Vec<(Op, &'static str)> =
+            self.file_touches(index, file)?.into_iter().filter(|(op, _)| reach.includes(op)).collect();
         let told: BTreeSet<LaneId> =
             touches.iter().filter(|(op, _)| !op.lane.is_main()).map(|(op, _)| op.lane).collect();
         let mut groups: Vec<Group> = Vec::new();
@@ -742,8 +788,9 @@ impl Repo {
             match &op.kind {
                 OpKind::FileAdd { blob, .. } => versions.extend(text(blob).map(|content| (op.id, content))),
                 OpKind::TextEdit { before, after, .. } => {
-                    // Its history under another name is not followed: what
-                    // it held when it got this one is where the story starts.
+                    // What is older than the history Kito has of it (an
+                    // import, a rename made with an edit): the story
+                    // starts from what it held then.
                     if versions.is_empty() {
                         versions.extend(text(before).map(|content| (OpId::from_bytes([0; 32]), content)));
                     }
@@ -769,10 +816,8 @@ impl Repo {
         own: bool,
     ) -> Result<Vec<Option<Place>>> {
         let index = self.index()?;
-        let mut all: Vec<Op> = Vec::new();
-        for touch in index.files.get(file).map(Vec::as_slice).unwrap_or_default() {
-            all.extend(self.store.get_op(&touch.op)?);
-        }
+        // Under this name and the ones it had before.
+        let all: Vec<Op> = self.file_touches(index, file)?.into_iter().map(|(op, _)| op).collect();
         // The chain the lane's own text went through: its ops since it
         // last started from its parent, the parent's before that and since
         // it started from its own, and so on down to the main lane's (ADR

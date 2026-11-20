@@ -2147,6 +2147,58 @@ branch reaching a remote.
 - **The server's clients cannot create a permanent lane or ask for a
   catch-up**: those are done where the repository is.
 
+## Phase 18 · the why graph, better — done
+
+What the why graph tells is only as good as what it is given and how far
+it follows. Done before phase 17 (review), at the person's request.
+
+### What is there
+
+- **Intents that say nothing are refused** (`kitod::lanes::says_nothing`):
+  made only of words such as `wip`, `fix`, `update`, `minor`, `changes`,
+  or with fewer than three letters, when a lane is opened or an intent is
+  set. Intents Kito writes itself (git commit subjects, integrations,
+  permanent lanes) are taken as they are (D-145).
+- **Notes on code** ([ADR 0003](adr/0003-notes-on-code.md)): `kito note`,
+  the MCP tool `note`, the daemon's `add_note`, `notes`, `remove_note`. A
+  note is on a function (followed through renames and moves), a file or a
+  directory; on lines, on the function they are in. Stored in
+  `.kito/notes`, which an older Kito ignores. Shown as `annotations` with
+  the why of that code, in the answers of `open_lane` and `extend_scope`,
+  and to an agent about to change that code, once (D-146).
+- **A file's history through its names** (`file_touches` in `why.rs`): the
+  lines and reasons of a renamed file are followed under the names it had
+  before; a new file under an old name no longer takes the history of the
+  file that had it (D-147).
+
+### Demo
+
+```bash
+scripts/demo-phase18.sh
+```
+
+Output: [`docs/demo/phase18-demo.txt`](demo/phase18-demo.txt).
+
+### Tests
+
+368 tests in all. New: intents refused and accepted
+(`kitod/tests/lanes.rs`); notes on a function followed through a rename,
+on files and directories, on lines, removed, kept across a restart,
+refused when asked wrongly, and told once before an edit
+(`kitod/tests/notes.rs`); notes from the command line; lines of a file
+renamed once and twice, and a new file under an old name
+(`kitod/tests/renamed.rs`).
+
+### Known limitations
+
+- **A rename made together with an edit** is a removal and a creation for
+  Kito: the history starts again there.
+- **Lines moved to another file with their function** (`Move`) keep the
+  function's reasons, but not the reasons of each line.
+- **The words that say nothing** are a list: an intent of real words that
+  still says nothing ("do the thing") goes through.
+- **Notes are not in git.**
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

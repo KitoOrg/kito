@@ -1309,6 +1309,16 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-147 · A file's history is followed through its names
+The why of a file was gathered by its path: after a rename its lines
+came out with no reason, and a new file given the name an earlier one
+had took that one's history. A file's changes are now gathered under its
+name since it last got it, and under each name it had before, back from
+the rename that gave it the next one. Only renames Kito saw as renames
+are followed (the same content under a new name, `FileRename`): a rename
+made together with an edit is a removal and a creation, and the story
+starts there.
+
 ### D-146 · A note is told once, with the reasons
 An agent about to change code with a note on it is told the note, in the
 same answer as the reasons, and the edit is held back once, as for the

@@ -29,7 +29,9 @@ runnable demo.
 | 14 | Git both ways: commits made with plain git are brought in through a lane, merged and pushed back | done |
 | 15 | Lanes on lanes: a lane opened on work that has not landed, landing on it or further down ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)) | done |
 | 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch and checks | done |
-| 17 | Review of a lane: diffs, comments and approvals, with a local web view | planned |
+| 17 | Review of a lane: diffs, comments and approvals, in the daemon and the server; a web view as a separate, optional program | planned |
+| 18 | The why graph, better: intents that say nothing refused, notes on code ([ADR 0003](docs/adr/0003-notes-on-code.md)), lines followed across file renames | done |
+| — | Windows ([ADR 0002](docs/adr/0002-windows.md)): builds; tests under way | in progress |
 
 ## Crates
 
