@@ -1,0 +1,17 @@
+name: Windows
+
+# The port to Windows, while it is under way: what does not compile there
+# yet. Run by hand; it becomes part of CI once Windows is supported.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo check --workspace --all-targets --message-format short
