@@ -1018,6 +1018,15 @@ impl Repo {
         let head = self.main.head.ok_or(Error::NothingToCheckpoint)?;
 
         let label = what.unwrap_or_else(|| format!("{lane} ({})", agent.name));
+        // A lane that brings in commits made outside Kito: its checkpoint
+        // is exported as a merge with the last of them.
+        let brought =
+            self.lanes.get(&lane).and_then(|at| at.record.git_tip.as_deref()).and_then(crate::pull::oid);
+        let label = match brought {
+            // The last of them names the merge, as its message did.
+            Some(_) => format!("merge of commits made with git: {label}"),
+            None => label,
+        };
         let checkpoint = Checkpoint {
             id: self.store.next_checkpoint_id(),
             head,
@@ -1030,6 +1039,7 @@ impl Repo {
             }),
             git_commit: None,
             approved_by,
+            git_merge: brought,
         };
         self.store.put_checkpoint(&checkpoint)?;
         for id in &prepared.settled {
@@ -1117,6 +1127,8 @@ impl Repo {
         at.record.base_head = main_head;
         at.record.since = at.work.ops;
         at.record.proposed = None;
+        // What it brought from git is on the main lane now.
+        at.record.git_tip = None;
         // The saved state of the lane is written when the repository is
         // closed: until then the log has everything.
         self.put_lane_state(lane, LaneState::Active)

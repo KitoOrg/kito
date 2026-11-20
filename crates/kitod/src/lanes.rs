@@ -234,6 +234,7 @@ impl Repo {
                         verification: None,
                         git_commit: None,
                         approved_by: None,
+                        git_merge: None,
                     };
                     self.store.put_checkpoint(&checkpoint)?;
                     if self.config.git.export_on_checkpoint {
@@ -272,6 +273,7 @@ impl Repo {
             // Whoever runs the repository, until told otherwise.
             owner: Some(self.identity.author()),
             proposed: None,
+            git_tip: None,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });

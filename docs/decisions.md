@@ -1181,3 +1181,36 @@ When the repository has checks, the first request waits 15 ms before the
 run is made up, so that `kito integrate a b c` and agents that finish in
 the same instant are one run. Next to checks that take seconds it is
 nothing; with no checks there is no wait and no batching.
+
+### D-127 · Commits made with git come in through a lane
+They could have been written straight onto the main lane, as an import
+does. A lane gives them everything other work gets: the merge by
+function with what the main lane did meanwhile, the checks, conflicts
+that wait for a decision instead of failing, and a reason per commit in
+the why graph. The lane starts from the checkpoint the commits were made
+on, so the merge is a real three-way merge.
+
+### D-128 · The result is a git merge
+After the integration the remote must be able to fast-forward, or the
+next push is refused. The checkpoint of the lane is exported with the
+remote's last commit as second parent. Rewriting the commits Kito made
+and had not pushed yet (a rebase) would also work, and would change
+commits that are already checkpoints.
+
+### D-129 · Joined even when nothing changes
+When the commits change nothing here, there is nothing to integrate, and
+yet the histories must be joined. A checkpoint with no operation of its
+own does it. An empty checkpoint is new; the alternative was a remote
+that refuses every push from then on.
+
+### D-130 · Pull before push, and when asked
+The daemon looks at the remote when it is about to push and when
+`kito pull` is run. A timer would bring commits in sooner and would have
+the daemon talk to a remote all day; it can be added without changing
+anything else.
+
+### D-131 · A change that does not apply stops the pull whole
+When a commit's file is not, in the lane, as the commit found it, the
+change is carried over by a three-way merge by lines. If that conflicts,
+nothing is brought in and the error says which commit and file: half a
+history replayed is worse than none.

@@ -428,6 +428,10 @@ pub struct Lane {
     /// somebody who may not integrate, and waits for somebody who may.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed: Option<Proposal>,
+    /// The git commit, made outside Kito, whose changes this lane brings
+    /// in (40 hexadecimal digits): its integration is a merge with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tip: Option<String>,
 }
 
 /// A lane that waits to be integrated by somebody who may.
@@ -538,4 +542,9 @@ pub struct Checkpoint {
     /// The person who let an integration in, when a server knew who asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_by: Option<Author>,
+    /// A git commit made outside Kito that this checkpoint brings in: the
+    /// commit exported for it is a merge, with that commit as its second
+    /// parent.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::serde_helpers::opt_oid20")]
+    pub git_merge: Option<[u8; 20]>,
 }

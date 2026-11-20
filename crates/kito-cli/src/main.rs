@@ -267,6 +267,11 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Bring in the commits the git remote has and the main lane does
+    /// not (made with plain git by people who do not work through Kito):
+    /// they are merged through a lane, and the result is pushed back.
+    /// Done by itself before every push
+    Pull,
     /// What Claude Code runs around its tools, written into the project by
     /// `kito claude`: edits are checked before they are made
     Hook {
@@ -1223,6 +1228,26 @@ fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
     Ok(())
 }
 
+/// Brings in the commits of the git remote. Fails (after saying why) when
+/// they wait in a lane for somebody to settle something.
+fn cmd_pull(cli: &Cli) -> Outcome {
+    let done: Value = daemon(cli)?.call("pull", json!({})).map_err(fail)?;
+    if cli.json {
+        print_json(&done);
+    } else {
+        println!("{}", done["message"].as_str().unwrap_or_default());
+        if let Ok(result) = serde_json::from_value::<IntegrationResult>(done["result"].clone()) {
+            if result.result != Integration::Integrated {
+                print_integration(&result);
+            }
+        }
+    }
+    match done["lane"].is_null() {
+        true => Ok(()),
+        false => Err(String::new()),
+    }
+}
+
 /// Runs a command in the working copy of a lane, confined to it. Returns
 /// its exit code (128 and more: stopped by a signal).
 fn cmd_lane_run(cli: &Cli, lane: &str, network: bool, command: &[String]) -> Result<u8, String> {
@@ -2101,6 +2126,12 @@ fn print_status(status: &DaemonStatus, with_daemon: bool) {
             (None, None) => "nothing pushed yet by this daemon".to_owned(),
         };
         println!("Git push .......... {remote} ({state})");
+        if let Some(lane) = &repo.pull_waiting {
+            println!(
+                "                    commits made with git wait to be merged in {lane}: `kito conflicts`, then \
+                 `kito pull`"
+            );
+        }
     }
     if with_daemon {
         let w = &status.watcher;
@@ -2347,6 +2378,7 @@ fn main() -> ExitCode {
         Cmd::Rename { symbol, new_name, lane } => cmd_rename(&cli, symbol, new_name, lane),
         Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
         Cmd::Hook { .. } => Ok(()),
+        Cmd::Pull => cmd_pull(&cli),
         Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

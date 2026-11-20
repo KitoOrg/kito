@@ -161,6 +161,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
             verification: None,
             git_commit: None,
             approved_by: None,
+            git_merge: None,
         };
         store.put_checkpoint(&checkpoint).unwrap();
         store
@@ -179,6 +180,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 scope: Vec::new(),
                 owner: None,
                 proposed: None,
+                git_tip: None,
             })
             .unwrap();
         store
@@ -240,6 +242,7 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
         verification: None,
         git_commit: None,
         approved_by: None,
+        git_merge: None,
     };
     store.put_checkpoint(&ck).unwrap();
     store.close().unwrap();

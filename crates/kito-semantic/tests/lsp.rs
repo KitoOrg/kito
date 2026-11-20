@@ -15,9 +15,15 @@ const WEB: &str =
     "import { getUser } from \"./auth\";\n\nexport function profile(id: string): string {\n  return getUser(id);\n}\n";
 
 fn fake_server() -> String {
-    // target/<profile>/deps/lsp-… → target/<profile>/examples/fake_lsp
+    // target/<profile>/deps/lsp-… → target/<profile>/examples/fake_lsp; newer
+    // cargo puts the test deeper (target/<profile>/build/<crate>/<hash>/out),
+    // so the first directory above it that holds the example is taken.
     let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().unwrap().parent().unwrap().join("examples/fake_lsp");
+    let path = exe
+        .ancestors()
+        .map(|dir| dir.join("examples/fake_lsp"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| exe.parent().unwrap().parent().unwrap().join("examples/fake_lsp"));
     assert!(
         path.is_file(),
         "{} is not built: `cargo test -p kito-semantic` builds it, a single `--test` does not (then: `cargo build -p kito-semantic --example fake_lsp`)",

@@ -524,6 +524,7 @@ impl Daemon {
                             .map_err(internal)?,
                     ))
                 }
+                "pull" => to_json(serde_json::to_value(self.pull().map_err(|why| (rpc::REFUSED, why))?)),
                 "reasons_behind" => {
                     let lane = lane()?;
                     to_json(serde_json::to_value(
@@ -1157,6 +1158,29 @@ async fn push_loop(daemon: Arc<Daemon>) {
         })
         .await;
         let Ok(Ok((Some(remote), branch, checkpoint))) = asked else { continue };
+        // What the remote has that the main lane does not comes in first:
+        // commits made with git by people who do not work through Kito.
+        let worker = daemon.clone();
+        let pulled = tokio::task::spawn_blocking(move || worker.pull()).await;
+        let mut checkpoint = checkpoint;
+        if let Ok(Ok(outcome)) = &pulled {
+            if let Some(lane) = &outcome.lane {
+                // They wait to be merged: nothing is pushed over them.
+                let why = format!("commits of {remote} wait to be merged in {lane}");
+                let worker = daemon.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    worker.with_repo(|repo| {
+                        repo.set_pushed(None, Some(why));
+                        Ok(())
+                    })
+                })
+                .await;
+                continue;
+            }
+            if let Some(merged) = outcome.result.as_ref().and_then(|result| result.checkpoint.clone()) {
+                checkpoint = Some(merged);
+            }
+        }
         // The branch Kito advances: the one named, or the one HEAD is on.
         let what = branch.map_or_else(|| "HEAD".to_owned(), |branch| format!("refs/heads/{branch}"));
         let pushing = tokio::process::Command::new("git")
@@ -1254,7 +1278,159 @@ impl crate::integrate::Bench for Together {
     }
 }
 
+/// What bringing in the commits of the git remote did.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PullOutcome {
+    pub remote: String,
+    /// How many commits were brought into a lane by this call.
+    pub commits: usize,
+    /// The lane they are in, when they are not on the main lane yet.
+    pub lane: Option<String>,
+    /// How the integration of that lane ended.
+    pub result: Option<IntegrationResult>,
+    /// The same, in a sentence.
+    pub message: String,
+}
+
 impl Daemon {
+    /// Brings in what the git remote has and the main lane does not: it
+    /// fetches, replays the commits in a lane, and has the lane
+    /// integrated like any other, in its turn. Blocking: not to be called
+    /// on the runtime's own threads.
+    fn pull(&self) -> std::result::Result<PullOutcome, String> {
+        let fail = |e: Error| e.to_string();
+        let (remote, branch) = self
+            .with_repo(|repo| Ok((repo.config().git.push.clone(), repo.config().git.branch.clone())))
+            .map_err(fail)?;
+        let remote = remote.ok_or(
+            "this repository has no git remote to bring commits from: set one with `[git] push` (on a \
+             server, `kito-server repo set <name> --push <remote>`)",
+        )?;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(std::process::Stdio::null())
+                .output()
+        };
+        let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_owned();
+        // The branch Kito advances: the one named, or the one HEAD is on.
+        let branch = match branch {
+            Some(branch) => branch,
+            None => git(&["symbolic-ref", "--short", "HEAD"])
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| said(&out.stdout))
+                .ok_or("git's HEAD is on no branch: there is nothing to bring commits to")?,
+        };
+        let fetching = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["fetch", "--quiet", &remote, &branch])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let nothing = |message: String| PullOutcome {
+            remote: remote.clone(),
+            commits: 0,
+            lane: None,
+            result: None,
+            message,
+        };
+        let runtime = tokio::runtime::Handle::current();
+        match runtime.block_on(tokio::time::timeout(PUSH_WITHIN, fetching)) {
+            Ok(Ok(output)) if output.status.success() => {}
+            Ok(Ok(output)) => {
+                let complaint = said(&output.stderr);
+                // A remote that has no such branch yet has nothing to bring.
+                if complaint.contains("couldn't find remote ref") {
+                    return Ok(nothing(format!("{remote} has no branch {branch} yet")));
+                }
+                let last =
+                    complaint.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("git fetch failed");
+                return Err(format!("{remote}: {}", last.trim()));
+            }
+            Ok(Err(e)) => return Err(format!("git: {e}")),
+            Err(_) => return Err(format!("no answer from {remote} in {} s", PUSH_WITHIN.as_secs())),
+        }
+        let tip = git(&["rev-parse", "FETCH_HEAD"])
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| said(&out.stdout))
+            .ok_or("git fetched nothing it can name")?;
+        let Some(pull) = self.with_repo(|repo| repo.pull_import(&tip)).map_err(fail)? else {
+            return Ok(nothing(format!("nothing to bring in from {remote}")));
+        };
+        // Integrated like any lane: in its turn, with the checks.
+        let job = self.queue.submit(pull.lane);
+        let result = loop {
+            match self.queue.state(job) {
+                Some(JobState::Done { result }) => break *result,
+                Some(_) => std::thread::sleep(Duration::from_millis(10)),
+                None => return Err("the integration of the commits was lost".to_owned()),
+            }
+        };
+        let lane = pull.lane.to_string();
+        let commits = match pull.commits {
+            0 => "the commits".to_owned(),
+            1 => "1 commit".to_owned(),
+            n => format!("{n} commits"),
+        };
+        let (waits, message) = match result.result {
+            kito_integrate::Outcome::Integrated => {
+                self.with_repo(|repo| repo.pull_done(pull.lane)).map_err(fail)?;
+                let checkpoint = result.checkpoint.clone().unwrap_or_default();
+                (false, format!("{commits} of {remote} merged into the main lane as {checkpoint}"))
+            }
+            kito_integrate::Outcome::NothingToIntegrate => {
+                let joined = self.with_repo(|repo| repo.pull_joined(pull.lane)).map_err(fail)?;
+                (
+                    false,
+                    format!(
+                        "{commits} of {remote} change nothing the main lane does not have: the two \
+                         histories are joined as {joined}"
+                    ),
+                )
+            }
+            kito_integrate::Outcome::Conflicts => (
+                true,
+                format!(
+                    "{commits} of {remote} wait in {lane}: they conflict with what the main lane did \
+                     (`kito conflicts`, `kito resolve`, then `kito pull` again)"
+                ),
+            ),
+            kito_integrate::Outcome::VerificationFailed => (
+                true,
+                format!(
+                    "{commits} of {remote} wait in {lane}: merged with the main lane they fail the checks \
+                     (fix it in the lane, then `kito pull` again)"
+                ),
+            ),
+            _ => (
+                true,
+                format!(
+                    "{commits} of {remote} wait in {lane}: {}",
+                    result.message.clone().unwrap_or_else(|| "they could not be integrated".to_owned())
+                ),
+            ),
+        };
+        self.events.emit("pulled", Some(LaneId::MAIN.to_string()), None, message.clone());
+        if !waits {
+            // What was brought in goes back to the remote, merged.
+            self.push_wanted.notify_one();
+        }
+        Ok(PullOutcome {
+            remote,
+            commits: pull.commits,
+            lane: waits.then_some(lane),
+            result: Some(result),
+            message,
+        })
+    }
+
     /// A lane has its answer: whoever watches is told, and whoever waits.
     fn conclude(&self, job: JobId, result: IntegrationResult) {
         self.integration_ended(&result);

@@ -1920,6 +1920,85 @@ three.
   by itself waits for the run it was left out of.
 - **No priorities**, and no way to take a lane out of a run that started.
 
+## Phase 14 · git both ways — done
+
+Kito pushed its history to a git remote and never forced a push. A commit
+made there with plain git therefore stopped every push until somebody
+reconciled the two by hand (a limit of phase 9). The first half of what
+was asked for under "teams not all on Kito"; review and a web view are
+phase 15.
+
+### What is there
+
+- **`Repo::pull_import`** (`kitod/src/pull.rs`): given a commit that was
+  fetched, it finds what the main lane lacks; opens a lane signed `git`
+  from the checkpoint those commits were made on, declaring every file
+  they change; and replays each commit of the first-parent line: its
+  author on the ops, its subject as the intent, `git <hash>` as the task.
+  A file is written as the commit left it when the lane has it as the
+  commit found it; otherwise the change is carried over with a three-way
+  merge by lines, and if that does not apply nothing is brought in.
+- **A lane that brings commits** (`Lane.git_tip`) is integrated like any
+  other. Its checkpoint records the commit (`Checkpoint.git_merge`), and
+  the export makes a git merge with it as second parent.
+- **Commits that change nothing here** (the same change was made on both
+  sides, or every conflict was decided for the main lane) still join the
+  histories: a checkpoint with no change of its own, exported as a merge.
+  Without it the remote would refuse every push from then on.
+- **The daemon pulls before it pushes**: `git fetch`, `pull_import`, the
+  lane through the integration queue in its turn (checks included), then
+  the push. Commits that wait (a conflict, a failed check) stop the push,
+  and `kito status` says in which lane they wait.
+- **`kito pull`** does the same when asked, and again after a conflict
+  was decided. More commits that arrive meanwhile join the waiting lane.
+- An event, `pulled`, for whoever watches.
+
+### Demo
+
+```bash
+scripts/demo-phase14.sh
+```
+
+Output: [`docs/demo/phase14-demo.txt`](demo/phase14-demo.txt).
+
+### Acceptance target
+
+Set before the phase: a commit made outside Kito never blocks the push
+again. Met for commits pushed to the remote on the branch Kito advances,
+whose history starts from a commit the repository had: they are merged
+and pushed back, or they wait in a lane for a decision and are pushed
+once it is taken. Not covered: a commit made with git in the main
+directory itself (still a direct edit), and a remote whose branch was
+rewritten.
+
+### Tests
+
+339 tests in all. New: two commits merged function by function with a
+lane's work, the merge commit and its parents, the push, the reasons of
+the commits, a second round on top of the merge; a conflict that waits,
+commits that join the waiting lane, the decision; nothing to bring and
+nothing in common (`kitod/tests/pull.rs`); through a server with a real
+remote: pull before push, a conflict, histories joined when nothing was
+kept; `kito pull` from the command line.
+
+### Known limitations
+
+- **Only what is on the first-parent line of the remote's branch** is
+  replayed, one step per commit: a branch merged there comes in as one
+  change, under the merge's author and message.
+- **Renames are a removal and an addition**: a file renamed with git
+  loses its history in Kito at that point.
+- **Each commit's author is on its changes; the merge is signed `git`.**
+- **A commit made with git in the main directory** is not this: the files
+  are recorded as edits made by hand (or put back, on a protected main
+  lane), and the commit itself makes the export refuse to go on.
+- **A remote branch that was rewritten** (force-pushed) is not followed.
+- **Pulling happens before a push and when asked**, not on a timer: a
+  remote that only receives commits made with git is not looked at until
+  somebody integrates or runs `kito pull`.
+- **`kito pull` on a server is for whoever runs it**: clients cannot ask.
+
+## After phase 5
 ## After phase 5
 ## After phase 5
 ## After phase 5

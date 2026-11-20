@@ -1173,6 +1173,72 @@ fn lanes_asked_for_together_are_checked_in_one_run() {
 }
 
 #[test]
+fn commits_made_with_git_are_pulled_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (root, remote, clone) = (base.join("shop"), base.join("remote.git"), base.join("grace"));
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    // With no remote there is nowhere to bring commits from.
+    let none = kito(root, &["pull"]);
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("no git remote to bring commits from"));
+
+    git(&base, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+    let config = root.join(".kito/config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    let pushing = text.replace("# push = \"origin\"", &format!("push = {:?}", remote.to_str().unwrap()));
+    assert_ne!(pushing, text, "{text}");
+    fs::write(&config, pushing).unwrap();
+    ok(root, &["daemon", "stop"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::write(root.join("app.py"), "def a():\n    return 1\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+    let at_remote = |what: &dyn Fn(&str) -> bool| {
+        for _ in 0..500 {
+            let out = Command::new("git")
+                .current_dir(&remote)
+                .args(["rev-list", "--parents", "-n", "1", "main"])
+                .output();
+            if out.is_ok_and(|out| out.status.success() && what(String::from_utf8_lossy(&out.stdout).trim()))
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the remote never got there");
+    };
+    ok(root, &["pull"]);
+    at_remote(&|line| !line.is_empty());
+    assert!(ok(root, &["pull"]).contains("nothing to bring in from"));
+
+    // Grace commits with git and pushes.
+    git(&base, &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()]);
+    fs::write(clone.join("NOTES.md"), "made with git\n").unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-q", "-m", "a note"]);
+    git(&clone, &["push", "-q", "origin", "main"]);
+    let theirs = git(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+
+    let pulled = ok(root, &["pull"]);
+    assert!(
+        pulled.contains("1 commit of") && pulled.contains("merged into the main lane as ckpt#2"),
+        "{pulled}"
+    );
+    assert_eq!(fs::read_to_string(root.join("NOTES.md")).unwrap(), "made with git\n");
+    // It went back as a merge with her commit, which the remote takes.
+    at_remote(&|line| line.split_whitespace().nth(2) == Some(theirs.as_str()));
+    let log = ok(root, &["log", "-n", "3"]);
+    assert!(log.contains("◆ ckpt#2  merge of commits made with git: a note"), "{log}");
+    // Why the file is there: her commit says, under her name.
+    let why = ok(root, &["why", "NOTES.md"]);
+    assert!(why.contains("a note") && why.contains("by Ada"), "{why}");
+    assert!(ok(root, &["lanes"]).contains("No open lanes"), "the lane that brought it is closed");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn a_protected_main_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();

@@ -310,6 +310,9 @@ pub struct Status {
     pub pushed: Option<String>,
     #[serde(default)]
     pub push_error: Option<String>,
+    /// The lane where commits of the git remote wait to be merged.
+    #[serde(default)]
+    pub pull_waiting: Option<String>,
 }
 
 /// A file found changed in the directory of a protected main lane: its
@@ -1381,6 +1384,7 @@ impl Repo {
             verification: None,
             git_commit: None,
             approved_by: None,
+            git_merge: None,
         };
         self.store.put_checkpoint(&checkpoint)?;
         self.save_state()?;
@@ -1521,6 +1525,7 @@ impl Repo {
             last_refused: self.refusals.1.clone(),
             pushed: self.pushed.0.clone(),
             push_error: self.pushed.1.clone(),
+            pull_waiting: self.pull_waiting().map(|(_, lane)| lane.to_string()),
             ops_since_checkpoint,
             counters: self.counters.clone(),
         })

@@ -26,6 +26,7 @@ runnable demo.
 | 11 | The rules as behaviour: hooks that refuse an edit outside a lane or its scope, and the reasons told before code changes | done |
 | 12 | Encrypted connections and a sandbox per lane: a server known by its certificate; checks and lane commands that write only in their own copy | done |
 | 13 | Integration without waiting in line: lanes that do not depend on each other are checked in one run | done |
+| 14 | Git both ways: commits made with plain git are brought in through a lane, merged and pushed back | done |
 
 ## Crates
 
@@ -553,6 +554,47 @@ What the protection does not do is listed in
 [`docs/phases.md`](docs/phases.md): it undoes an edit within milliseconds
 rather than preventing it, and whoever runs the server can lift it.
 
+### Git both ways
+
+Not everybody on a team works through Kito. Somebody commits with plain
+git and pushes to the remote Kito pushes to. That used to stop the
+pushes, which are never forced, until the two histories were put together
+by hand. Now the commits the remote has and the main lane does not are
+brought in like any other work, through a lane, before every push:
+
+- the lane starts from the checkpoint the commits were made on, and each
+  commit is replayed in it under its own author, with its message as the
+  reason and its hash as the task;
+- the lane is integrated like every lane: merged function by function
+  with what the main lane did meanwhile, and checked;
+- the checkpoint of that integration goes to git as a merge with the
+  remote's last commit, so the remote takes the push and whoever works
+  with git pulls it as usual.
+
+```text
+*   2109afb git: merge of commits made with git: say which currency
+|\
+| * b9b01cb Grace: say which currency
+| * 10bfe60 Grace: whole cents off
+* | 46c34fd agent-a: prices in cents
+|/
+* b7e62d2 ada: a shop that adds up prices
+```
+
+`kito why` then answers for that code with the commit's message, under
+its author's name. Commits that conflict with what a lane did wait in
+their lane: `kito status` says so, nothing is pushed over them, and after
+`kito conflicts` and `kito resolve` this brings them in:
+
+```bash
+kito pull
+```
+
+It is also the way to bring commits in without waiting for the next
+integration. It needs a remote (`[git] push`, or `kito-server repo set
+<name> --push <remote>`); on a server it is run by whoever runs the
+server, in the repository's directory.
+
 ### Lanes checked together
 
 With checks that take time, lanes used to wait in line: ten agents that
@@ -637,6 +679,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo bench -p kito-store -p kito-diff
+```
+
+Phase 14 demo: somebody commits with plain git and pushes while an agent
+works on the same file; the commits are merged in and pushed back; one
+that conflicts waits for a decision (needs `git`).
+
+```bash
+scripts/demo-phase14.sh
 ```
 
 Phase 13 demo: five agents finish at the same time on a repository whose

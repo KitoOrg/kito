@@ -184,6 +184,9 @@ impl RawFile for FaultyFile {
 
     fn sync(&mut self) -> io::Result<()> {
         let left = &self.fs.faults.syncs_left;
+        // `fetch_update` is deprecated in favour of `try_update` from Rust
+        // 1.100; kept so the workspace still builds on 1.90.
+        #[allow(deprecated)]
         let granted = left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
                 u64::MAX => Some(n),

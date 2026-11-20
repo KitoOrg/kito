@@ -39,8 +39,14 @@ const BILLING: &str =
 /// The language server of the tests, which is sure of everything: built as
 /// an example of this crate.
 fn sure_server() -> String {
+    // target/<profile>/deps/… or, with newer cargo, deeper under
+    // target/<profile>/build/: the first directory above that holds it.
     let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().unwrap().parent().unwrap().join("examples/fake_language_server");
+    let path = exe
+        .ancestors()
+        .map(|dir| dir.join("examples/fake_language_server"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| exe.parent().unwrap().parent().unwrap().join("examples/fake_language_server"));
     assert!(
         path.is_file(),
         "{} is not built: `cargo test -p kitod` builds it, a single `--test` does not (then: `cargo build -p kitod --example fake_language_server`)",

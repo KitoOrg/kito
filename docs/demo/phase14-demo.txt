@@ -1,0 +1,97 @@
+# 1. Grace works with plain git, an agent works through Kito
+
+(grace) $ git log --oneline
+d8bd71d say which currency
+47ef996 whole cents off
+8a98597 a shop that adds up prices
+
+$ kito integrate 1
+lane/1: integrated as ckpt#2 (git d541c78988)
+
+
+# 2. Her commits are brought in, merged and pushed back
+
+$ kito log -n 4
+◆ ckpt#3  merge of commits made with git: say which currency  (git 0e318b1962)
+  9238a9f3  11-17 21:30  git      src/shop.py  +1 −1  discount changed  [integrate lane/2: say which currency]
+  6d5f22d3  11-17 21:30  git      NOTES.md     new    [integrate lane/2: say which currency]
+◆ ckpt#2  prices in cents  (git d541c78988)
+  624bfd5c  11-17 21:30  agent-a  src/shop.py  +1 −1  total changed
+◆ ckpt#1  a shop that adds up prices  (git 8a98597b40)
+  2df201d3  11-17 21:30  ada      src/shop.py  new    total, discount created
+
+$ cat src/shop.py
+def total(prices):
+    result = 0
+    for price in prices:
+        result += round(price * 100)
+    return result
+
+
+def discount(amount, percent):
+    cut = amount * percent // 100
+    return amount - cut
+
+$ git log --graph --oneline main     # at the remote
+*   0e318b1 git: merge of commits made with git: say which currency
+|\
+| * d8bd71d Grace: say which currency
+| * 47ef996 Grace: whole cents off
+* | d541c78 agent-a: prices in cents
+|/
+* 8a98597 ada: a shop that adds up prices
+
+
+# 3. Why her code is the way it is
+
+$ kito why src/shop.py:discount
+function discount  (src/shop.py)  lines 8-10
+
+Why it is the way it is, newest first:
+  1. whole cents off  (git 47ef9964c6)
+     body changed · by Grace for ada · lane/2 · ckpt#3 · 2026-11-17 21:30
+  2. a shop that adds up prices
+
+
+# 4. Grace pulls with git
+
+(grace) $ git pull && cat src/shop.py | head -5
+def total(prices):
+    result = 0
+    for price in prices:
+        result += round(price * 100)
+    return result
+
+
+# 5. A commit that conflicts with a lane waits for a decision
+
+(grace pushes "cut prices, do not round them"; an agent changes the same line)
+
+$ kito integrate lane/3
+lane/3: integrated as ckpt#4 (git 54e5777826)
+
+$ kito status | grep -A1 "Git push"
+Git push .......... /demo/remote.git (the last push failed: commits of /demo/remote.git wait to be merged in lane/4)
+                    commits made with git wait to be merged in lane/4: `kito conflicts`, then `kito pull`
+
+$ kito conflicts
+conflict#1   lane/4   body_body      total  (src/shop.py)  [to decide]
+
+$ kito resolve conflict#1 --main
+conflict#1 decided. Nothing else to decide: `kito integrate lane/4` applies it.
+
+$ kito pull
+the commits of /demo/remote.git change nothing the main lane does not have: the two histories are joined as ckpt#5
+lane/4: nothing to integrate
+
+$ git log --graph --oneline -n 4 main     # at the remote
+*   5f2f868 ada: commits made with git: nothing to change here
+|\
+| * b662e15 Grace: cut prices, do not round them
+* | 54e5777 agent-b: round half up
+|/
+*   0e318b1 git: merge of commits made with git: say which currency
+|\
+
+$ grep "result +=" src/shop.py     # what was decided
+        result += int(price * 100 + 0.5)

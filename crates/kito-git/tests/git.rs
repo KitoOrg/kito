@@ -77,6 +77,7 @@ impl Kito {
             verification: None,
             git_commit: None,
             approved_by: None,
+            git_merge: None,
         };
         self.store.put_checkpoint(&ck).unwrap();
         ck.id

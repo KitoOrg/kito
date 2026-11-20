@@ -285,7 +285,9 @@ fn commit_checkpoint(
     let signature = gix::actor::Signature { name: name.into(), email: email.into(), time };
     let commit = gix::objs::Commit {
         tree: tree_id,
-        parents: out.parent.into_iter().collect(),
+        // A checkpoint that brings in a commit made outside Kito is a
+        // merge with it: whoever has that commit can fast-forward to ours.
+        parents: out.parent.into_iter().chain(ck.git_merge.as_ref().map(object_id)).collect(),
         author: signature.clone(),
         committer: signature,
         encoding: None,

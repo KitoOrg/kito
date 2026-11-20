@@ -473,8 +473,9 @@ fn every_integration_is_pushed_to_the_git_remote() {
     assert_eq!(status["repo"]["pushed"], result["checkpoint"]);
     assert_eq!(status["repo"]["push_error"], Value::Null);
 
-    // A remote that moved on by itself is not overwritten: the push
-    // fails, it is said, and the integration stands.
+    // Somebody pushes to the remote with plain git. Nothing of theirs is
+    // overwritten, and nothing stops: before the next push their commit
+    // is brought in through a lane, merged, and the merge is pushed.
     let other = world.base.join("other-clone");
     git(&world.base, &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
     write(&other, "NOTES.md", "pushed to git directly\n");
@@ -484,11 +485,68 @@ fn every_integration_is_pushed_to_the_git_remote() {
     let theirs = git_out(&remote, &["rev-parse", "main"]).trim().to_owned();
     write(&work, "README.md", "# Shop\n\nPrices are in cents.\n");
     assert_eq!(integrate(&ada, "1")["result"], "integrated");
-    wait_for("the failure to be said", || events(&ada).contains("push_failed"));
-    assert_eq!(git_out(&remote, &["rev-parse", "main"]).trim(), theirs, "nothing was forced");
+    wait_for("their commit on the main lane", || {
+        read(&world.main(), "NOTES.md") == "pushed to git directly\n"
+    });
+    wait_for("the merge at the remote", || {
+        let parents = git_out(&remote, &["rev-list", "--parents", "-n", "1", "main"]);
+        let parents: Vec<&str> = parents.split_whitespace().collect();
+        parents.len() == 3 && parents[2] == theirs
+    });
+    assert!(git_out(&remote, &["show", "main:README.md"]).contains("in cents"));
+    assert_eq!(git_out(&remote, &["show", "main:NOTES.md"]), "pushed to git directly\n");
+    wait_for("the event", || events(&ada).contains("\"pulled\""));
     let status = call(&ada, "status", json!({}));
-    assert!(status["repo"]["push_error"].is_string(), "{status}");
-    assert!(read(&world.main(), "README.md").contains("in cents"));
+    assert_eq!(status["repo"]["push_error"], Value::Null, "{status}");
+    assert_eq!(status["repo"]["pull_waiting"], Value::Null);
+    // Why their file is there: their commit says, under their name.
+    let why = call(&ada, "why_graph", json!({ "target": "NOTES.md" }));
+    assert_eq!(why["reasons"][0]["why"], "straight to git");
+    assert_eq!(why["reasons"][0]["by"], "Ada");
+
+    // A commit that conflicts with what a lane did waits in its lane, and
+    // nothing is pushed over it until somebody decides.
+    git(&other, &["pull", "-q", "origin", "main"]);
+    let text = read(&other, "src/shop.ts");
+    write(&other, "src/shop.ts", &text.replace("price * quantity * 100", "price * quantity * 1000"));
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "thousandths"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let theirs = git_out(&remote, &["rev-parse", "main"]).trim().to_owned();
+    let text = read(&work, "src/shop.ts");
+    write(
+        &work,
+        "src/shop.ts",
+        &text.replace("price * quantity * 100", "Math.round(price * quantity * 100)"),
+    );
+    assert_eq!(integrate(&ada, "1")["result"], "integrated");
+    wait_for("the commits to wait", || call(&ada, "status", json!({}))["repo"]["pull_waiting"].is_string());
+    let status = call(&ada, "status", json!({}));
+    let waiting = status["repo"]["pull_waiting"].as_str().unwrap().to_owned();
+    wait_for("it to be said", || {
+        let error =
+            call(&ada, "status", json!({}))["repo"]["push_error"].as_str().unwrap_or_default().to_owned();
+        error.contains("wait to be merged")
+    });
+    assert_eq!(git_out(&remote, &["rev-parse", "main"]).trim(), theirs, "nothing was forced");
+    // Ada decides for what the lane did; whoever runs the server asks again.
+    let conflicts = call(&ada, "conflicts", json!({}));
+    let conflict = conflicts[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(conflicts[0]["lane"], waiting.as_str(), "{conflicts}");
+    call(&ada, "resolve_conflict", json!({ "conflict": conflict, "choice": "main" }));
+    let pulled = call(&world.main(), "pull", json!({}));
+    // Nothing of the commit was kept: the histories are joined all the
+    // same, so that the remote takes the pushes again.
+    assert!(pulled["message"].as_str().unwrap().contains("the two histories are joined"), "{pulled}");
+    assert_eq!(pulled["lane"], Value::Null);
+    wait_for("the merge at the remote", || {
+        let parents = git_out(&remote, &["rev-list", "--parents", "-n", "1", "main"]);
+        parents.split_whitespace().nth(2) == Some(theirs.as_str())
+    });
+    assert!(git_out(&remote, &["show", "main:src/shop.ts"]).contains("Math.round(price * quantity * 100)"));
+    assert_eq!(call(&ada, "status", json!({}))["repo"]["pull_waiting"], Value::Null);
+    // A client of the server does not start a pull itself.
+    assert!(refused(&ada, "pull", json!({})).contains("not something a client can ask"));
 
     // Pushing can be stopped.
     assert!(!ok(&world.dir, &["repo", "set", "shop", "--no-push"]).contains("pushes to"));
