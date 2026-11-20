@@ -500,7 +500,11 @@ async fn the_c_server_follows_a_symbol_into_a_lane() {
 
 #[tokio::test]
 async fn the_rust_server_follows_a_symbol_into_a_lane() {
-    if !installed("rust-analyzer") || !installed("cargo") {
+    // rustup puts a `rust-analyzer` on the path even when the component is
+    // not installed: it is installed if it answers.
+    let answers =
+        Command::new("rust-analyzer").arg("--version").output().is_ok_and(|out| out.status.success());
+    if !answers || !installed("cargo") {
         skip("rust-analyzer (or cargo)");
         return;
     }

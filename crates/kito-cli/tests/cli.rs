@@ -245,9 +245,13 @@ fn log_is_up_to_date_even_when_file_events_are_missing() {
     assert!(log.lines().next().unwrap().contains("TextEdit"), "kito log must show it right away:\n{log}");
     let log = ok(root, &["log"]);
     assert!(log.contains("note.txt") && log.contains("new, 2 saves"), "{log}");
-    let status = ok(root, &["daemon", "status"]);
-    assert!(status.contains("the operating system did not report 1 change"), "{status}");
-    assert!(status.contains("full scan every") && !status.contains("full scan every 60 s"), "{status}");
+    // inotify does not see a write through a link from outside; macOS's
+    // FSEvents does, and then nothing was missed.
+    if cfg!(target_os = "linux") {
+        let status = ok(root, &["daemon", "status"]);
+        assert!(status.contains("the operating system did not report 1 change"), "{status}");
+        assert!(status.contains("full scan every") && !status.contains("full scan every 60 s"), "{status}");
+    }
     ok(root, &["daemon", "stop"]);
 }
 
