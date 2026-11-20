@@ -29,6 +29,9 @@ const FORMAT: &str = "kito-store 2\n";
 /// marked as the current one, since from now on it may hold them.
 const FORMAT_WITHOUT_DELTAS: &str = "kito-store 1\n";
 const LOCK_FILE: &str = "lock";
+/// How long a lock that is held is asked for again before the store is
+/// said to be in use: longer than a fork takes to reach its exec.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
 const LOST_FOUND: &str = "lost+found";
 /// Records per transaction when the index is caught up or rebuilt.
 const INDEX_BATCH: usize = 20_000;
@@ -268,10 +271,21 @@ impl Store {
         let lock_path = dir.join(LOCK_FILE);
         let lock =
             OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).at(&lock_path)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(StoreError::Locked(dir.to_owned())),
-            Err(TryLockError::Error(e)) => return Err(e).at(&lock_path),
+        // The lock belongs to the open file, and a process forked by any
+        // thread of this one shares it until it executes its program: a
+        // store closed and opened again right away can find its own lock
+        // still held for a moment. It is asked again for a short while
+        // before the store is said to be in use (D-132).
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryLockError::WouldBlock) => return Err(StoreError::Locked(dir.to_owned())),
+                Err(TryLockError::Error(e)) => return Err(e).at(&lock_path),
+            }
         }
 
         remove_stray_tmp(dir).at(dir)?;

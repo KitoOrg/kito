@@ -37,6 +37,20 @@ fn only_one_writer_at_a_time() {
 }
 
 #[test]
+fn a_lock_let_go_a_moment_later_is_waited_for() {
+    // As when a process forked by another thread still shares the lock of
+    // a store just closed, until it executes its program.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::init(tmp.path()).unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(store);
+    });
+    Store::open(tmp.path()).unwrap();
+    holder.join().unwrap();
+}
+
+#[test]
 fn blobs_round_trip_deduplicate_and_compress() {
     let tmp = tempfile::tempdir().unwrap();
     let mut store = Store::init(tmp.path()).unwrap();

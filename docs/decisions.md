@@ -1214,3 +1214,15 @@ When a commit's file is not, in the lane, as the commit found it, the
 change is carried over by a three-way merge by lines. If that conflicts,
 nothing is brought in and the error says which commit and file: half a
 history replayed is worse than none.
+
+### D-132 · A held lock is asked for again for two seconds
+The lock of a store belongs to the open file, and a process forked by any
+thread shares it until it executes its program, whatever close-on-exec
+says. A store closed and opened again at once (`Repo::init` does it) could
+find its own lock still held by a child of another thread that was about
+to run git, and fail with `Locked`; the scope tests did whenever there
+were fewer test threads than tests. The store now asks again every 10 ms
+for up to 2 s before it says it is in use. A second daemon on the same
+store is still refused, two seconds later. Locks that a fork does not
+inherit (POSIX record locks) would not keep two opens in one process
+apart, which the store relies on.
