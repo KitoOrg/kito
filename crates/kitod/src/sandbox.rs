@@ -21,6 +21,7 @@
 //! these directories" is spelled as every sibling of the hidden ones, all
 //! the way up to the root: [`open_paths`].
 
+use kito_core::paths::Canonical as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -52,7 +53,7 @@ const DEVICES: [&str; 6] = ["/dev/null", "/dev/zero", "/dev/full", "/dev/random"
 
 /// The path with its links followed, if it exists.
 fn real(path: &Path) -> Option<PathBuf> {
-    path.canonicalize().ok()
+    path.canonical().ok()
 }
 
 /// Everything under `root` except `hidden` (real paths), as the fewest
@@ -417,7 +418,7 @@ mod tests {
     #[cfg(unix)]
     fn everything_but_what_is_hidden_is_spelled_as_its_siblings() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = tmp.path().canonical().unwrap();
         for dir in [
             "usr/bin",
             "srv/kito/repos/shop/.kito/verify",
@@ -453,7 +454,7 @@ mod tests {
     #[cfg(unix)]
     fn a_policy_is_settled_on_real_paths() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = tmp.path().canonical().unwrap();
         std::fs::create_dir(root.join("work")).unwrap();
         std::os::unix::fs::symlink(root.join("work"), root.join("link")).unwrap();
         let policy = Policy {

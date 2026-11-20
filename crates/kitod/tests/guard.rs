@@ -3,6 +3,7 @@
 //! for the reasons behind its lines, the same before an integration, and
 //! what a shell command changed where it should not have.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::Repo;
@@ -55,7 +56,7 @@ export function invoice(prices: number[]): string {
 fn shop() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     let mut repo = Repo::open(&root).unwrap();
     write(&root, ".gitignore", ".kito/\n");

@@ -2,6 +2,7 @@
 //! contents, the saves a writer sends, and what happens when the lane
 //! moved on in the meantime.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::files::Put;
@@ -49,7 +50,7 @@ export function discount(amount: number, percent: number): number {
 fn shop() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     let mut repo = Repo::open(&root).unwrap();
     write(&root, ".gitignore", ".kito/\nnode_modules/\n*.log\n");

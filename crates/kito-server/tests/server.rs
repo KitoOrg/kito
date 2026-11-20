@@ -1,5 +1,6 @@
 //! The real server, with the real daemons it starts for its repositories.
 
+use kito_core::paths::Canonical as _;
 use kitod::client::{Client, ClientError, Remote};
 use serde_json::{json, Value};
 use std::fs;
@@ -107,7 +108,7 @@ fn token_in(printed: &str) -> String {
 impl World {
     fn new() -> World {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
+        let base = tmp.path().canonical().unwrap();
         let dir = base.join("server");
         assert!(ok(&base, &["init", dir.to_str().unwrap()]).contains("Kito server created"));
         let shop = source(&base, "shop-src", "src/shop.ts", SHOP);

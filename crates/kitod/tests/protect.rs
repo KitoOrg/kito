@@ -1,6 +1,7 @@
 //! A protected main lane: it changes when a lane is integrated, and in no
 //! other way.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::Repo;
@@ -46,7 +47,7 @@ export function discount(amount: number, percent: number): number {
 fn shop() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     let mut repo = Repo::open(&root).unwrap();
     write(&root, ".gitignore", ".kito/\nnode_modules/\n*.log\n");
@@ -200,7 +201,7 @@ fn what_a_protected_main_lane_refuses_and_how_it_is_opened_again() {
 #[test]
 fn checks_that_must_be_confined_do_not_run_where_they_cannot_be() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     std::env::remove_var("KITOD_BIN");
     drop(Repo::init(&root).unwrap());
     let config = root.join(".kito/config.toml");

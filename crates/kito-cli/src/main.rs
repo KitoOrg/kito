@@ -5,6 +5,7 @@
 //! store, because they are needed before a daemon makes sense.
 
 use clap::{Parser, Subcommand};
+use kito_core::paths::Canonical as _;
 use kito_integrate::{ConflictInfo, IntegrationResult, JobState, Outcome as Integration};
 use kitod::client::{find_root, Client, ClientError, Remote};
 use kitod::identity::{self, Identity};
@@ -543,7 +544,7 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> 
 
 fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
-    let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+    let root = root.canonical().map_err(|e| format!("{}: {e}", root.display()))?;
     not_connected(&root)?;
     // The import works directly on the store: the daemon, if there is one, steps aside.
     stop_daemon(&root)?;
@@ -1053,9 +1054,9 @@ fn cmd_log(
 fn repo_relative(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let abs = std::env::current_dir().map_err(fail)?.join(path);
     // The file may no longer exist: resolve the directory that contains it.
-    let abs = match abs.canonicalize() {
+    let abs = match abs.canonical() {
         Ok(resolved) => resolved,
-        Err(_) => match (abs.parent().and_then(|p| p.canonicalize().ok()), abs.file_name()) {
+        Err(_) => match (abs.parent().and_then(|p| p.canonical().ok()), abs.file_name()) {
             (Some(dir), Some(name)) => dir.join(name),
             _ => abs,
         },
@@ -1290,8 +1291,8 @@ fn cmd_lane_run(cli: &Cli, lane: &str, network: bool, command: &[String]) -> Res
         format!("{lane} has no working copy on this machine: `kito lane attach {lane} --write`")
     })?;
     // Where the command was asked from, if that is inside the lane.
-    let here = std::env::current_dir().ok().and_then(|dir| dir.canonicalize().ok());
-    let inside = here.filter(|dir| workdir.canonicalize().is_ok_and(|work| dir.starts_with(work)));
+    let here = std::env::current_dir().ok().and_then(|dir| dir.canonical().ok());
+    let inside = here.filter(|dir| workdir.canonical().is_ok_and(|work| dir.starts_with(work)));
     let (program, args) = command.split_first().ok_or("no command to run")?;
     let mut confined = kitod::sandbox::lane_command(&root, &workdir, network)?;
     if let Some(dir) = inside {
@@ -1467,7 +1468,7 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_
     let me: Value = client.call("server.whoami", json!({})).map_err(fail)?;
     std::fs::create_dir_all(&dir).map_err(fail)?;
     remote.save(&dir).map_err(fail)?;
-    let dir = dir.canonicalize().map_err(fail)?;
+    let dir = dir.canonical().map_err(fail)?;
     // The main lane's files come first, so that the directory is the
     // project; then what Claude Code needs, added to what the project has.
     let main: Result<Value, String> = Client::connect_or_start(&dir)

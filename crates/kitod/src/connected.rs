@@ -10,6 +10,7 @@
 use crate::client::{ClientError, Remote};
 use crate::mirror::{dir_name, unreachable, Mirror, MirrorInfo, Upstream};
 use crate::rpc::{self, Request, Response};
+use kito_core::paths::Canonical as _;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -582,7 +583,7 @@ fn serve_client(daemon: &Arc<Daemon>, (read, mut writer): crate::ipc::Halves) {
 /// Serves a directory connected to a repository on a server, until told
 /// to stop.
 pub fn serve(root: &Path) -> Result<(), String> {
-    let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+    let root = root.canonical().map_err(|e| format!("{}: {e}", root.display()))?;
     let remote =
         Remote::load(&root).ok_or_else(|| format!("{} is not connected to a server", root.display()))?;
     let kito = root.join(kito_store::STORE_DIR);

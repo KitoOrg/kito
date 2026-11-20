@@ -23,6 +23,7 @@
 //! integrated. With `--file`, `before-edit` is for any other tool: it
 //! answers in words, and leaves with 2 when the edit should not be made.
 
+use kito_core::paths::Canonical as _;
 use kitod::client::{Client, REMOTE_FILE};
 use kitod::guard::{EditAnswer, ShellReport};
 use kitod::scope::BoardLane;
@@ -60,7 +61,7 @@ fn settled(path: &Path) -> PathBuf {
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
     let mut there = plain.clone();
     loop {
-        if let Ok(real) = there.canonicalize() {
+        if let Ok(real) = there.canonical() {
             return missing.iter().rev().fold(real, |path, part| path.join(part));
         }
         match (there.file_name().map(ToOwned::to_owned), there.parent().map(Path::to_owned)) {
@@ -407,7 +408,7 @@ mod tests {
     #[test]
     fn a_file_is_placed_by_the_repository_around_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = tmp.path().canonical().unwrap();
         assert_eq!(place_of(&root.join("src/a.py")), Place::Elsewhere);
 
         std::fs::create_dir_all(root.join(".kito/lanes/a/work/src")).unwrap();

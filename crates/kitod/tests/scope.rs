@@ -1,6 +1,7 @@
 //! The scope of a lane: declared before the first edit, checked against
 //! what the lane changes, and compared with what the other lanes are on.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::scope::Overlap;
@@ -64,7 +65,7 @@ const TYPES: &str = "export interface Item {\n  name: string;\n  price: number;\
 fn shop_with(config: &str) -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     if !config.is_empty() {
         fs::write(root.join(".kito/config.toml"), config).unwrap();

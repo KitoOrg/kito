@@ -2,6 +2,7 @@
 //! changes only through lanes, checks that run on the server, and the git
 //! remote that gets every integration.
 
+use kito_core::paths::Canonical as _;
 use kitod::client::{Client, Remote};
 use serde_json::{json, Value};
 use std::fs;
@@ -114,7 +115,7 @@ fn token_in(printed: &str) -> String {
 impl World {
     fn new() -> World {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
+        let base = tmp.path().canonical().unwrap();
         let dir = base.join("server");
         ok(&base, &["init", dir.to_str().unwrap()]);
         let source = base.join("shop-src");

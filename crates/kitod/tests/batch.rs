@@ -1,6 +1,7 @@
 //! Lanes that ask to be integrated at the same time: the ones that do not
 //! depend on each other are checked in one run of the repository's checks.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::Repo;
@@ -38,7 +39,7 @@ const SHOP: &str = "export function total(prices: number[]): number {\n  return 
 fn shop(batch: usize) -> (tempfile::TempDir, PathBuf, PathBuf, Repo) {
     isolate();
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let root = base.join("shop");
     fs::create_dir(&root).unwrap();
     drop(Repo::init(&root).unwrap());

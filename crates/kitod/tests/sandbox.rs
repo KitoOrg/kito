@@ -2,6 +2,7 @@
 //! copy of the merged result, do not read Kito's own data or what the
 //! repository hides, and open no TCP connection.
 
+use kito_core::paths::Canonical as _;
 use kito_integrate::Outcome;
 use kitod::Repo;
 use std::fs;
@@ -64,7 +65,7 @@ fn results(root: &Path) -> Vec<(String, bool)> {
 fn shop(mode: &str, network: bool) -> (tempfile::TempDir, PathBuf, Repo, std::net::TcpListener) {
     setup();
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let root = base.join("shop");
     fs::create_dir(&root).unwrap();
     write(&base, "keys/deploy.key", "a secret\n");

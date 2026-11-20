@@ -1,6 +1,7 @@
 //! Permanent lanes (ADR 0001): a `staging` next to `main`, with
 //! checkpoints of its own, its own git branch and its own checks.
 
+use kito_core::paths::Canonical as _;
 use kito_core::LaneId;
 use kito_integrate::Outcome;
 use kitod::lanes::Stack;
@@ -42,7 +43,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 fn app(config: &str) -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     if !config.is_empty() {
         let path = root.join(".kito/config.toml");

@@ -1,6 +1,7 @@
 //! Commits made outside Kito, with plain git, are brought into the main
 //! lane through a lane, and the result goes back to the remote.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::Repo;
@@ -61,7 +62,7 @@ struct World {
 fn world() -> World {
     isolate();
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let (root, remote, grace) = (base.join("shop"), base.join("remote.git"), base.join("grace"));
     fs::create_dir(&root).unwrap();
     drop(Repo::init(&root).unwrap());

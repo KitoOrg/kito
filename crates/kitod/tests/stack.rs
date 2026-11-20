@@ -1,6 +1,7 @@
 //! Lanes on lanes (ADR 0001): a lane opened on top of another that has not
 //! landed, landing on it or, once it has landed, further down.
 
+use kito_core::paths::Canonical as _;
 use kito_core::LaneId;
 use kito_integrate::Outcome;
 use kitod::lanes::{LaneInfo, Stack};
@@ -37,7 +38,7 @@ const UI: &str = "export function page(): string {\n  return \"home\";\n}\n";
 fn app() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut repo = Repo::init(&root).unwrap();
     write(&root, ".gitignore", ".kito/\n");
     write(&root, "src/api.ts", API);

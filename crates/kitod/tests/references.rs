@@ -1,6 +1,7 @@
 //! Level 2 in an integration: a rename made on one side reaches the uses
 //! the other side has of the symbol, or asks.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::{IntegrationResult, Outcome};
 use kitod::integrate::{Decision, Preparation};
@@ -65,7 +66,7 @@ const NO_SERVER: &str = "[semantic]\nservers = {}\n";
 fn project(semantic: &str) -> (tempfile::TempDir, PathBuf, Repo, PathBuf, PathBuf) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut repo = Repo::init(&root).unwrap();
     write(&root, ".kito/config.toml", &format!("[git]\nexport_on_checkpoint = false\n{semantic}"));
     repo.reload_config().unwrap();
@@ -280,7 +281,7 @@ fn indexed(name: &str) -> PathBuf {
 fn an_imported_index_carries_a_rename_without_a_language_server() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut repo = Repo::init(&root).unwrap();
     write(&root, ".kito/config.toml", &format!("[git]\nexport_on_checkpoint = false\n{NO_SERVER}"));
     repo.reload_config().unwrap();

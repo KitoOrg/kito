@@ -5,6 +5,7 @@
 mod common;
 
 use common::World;
+use kito_core::paths::Canonical as _;
 use kito_core::{Lang, RefSource};
 use kito_semantic::{Error, LspConfig, LspProvider, Semantic, SemanticProvider};
 use std::path::{Path, PathBuf};
@@ -220,7 +221,7 @@ fn skip(what: &str) {
 #[cfg_attr(not(unix), allow(dead_code))]
 fn typescript_package() -> Option<PathBuf> {
     let out = Command::new("sh").args(["-c", "command -v tsc"]).output().ok()?;
-    let tsc = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim()).canonicalize().ok()?;
+    let tsc = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim()).canonical().ok()?;
     let package = tsc.parent()?.parent()?.to_owned();
     package.join("lib/tsserver.js").is_file().then_some(package)
 }

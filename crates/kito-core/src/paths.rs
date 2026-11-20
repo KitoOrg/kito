@@ -34,6 +34,38 @@ pub fn join_portable(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
     }
 }
 
+/// `canonicalize`, without the `\\?\` Windows puts before what it returns:
+/// git and most programs do not take such paths. Kept only where a path
+/// needs it (longer than 260 characters). On Unix, `canonicalize`.
+pub trait Canonical {
+    fn canonical(&self) -> std::io::Result<PathBuf>;
+}
+
+impl Canonical for Path {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        let found = self.canonicalize()?;
+        if !cfg!(windows) {
+            return Ok(found);
+        }
+        let text = found.to_string_lossy();
+        let plain = match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+            (Some(share), _) => format!(r"\\{share}"),
+            (None, Some(rest)) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+            _ => return Ok(found),
+        };
+        Ok(match plain.len() < 260 {
+            true => PathBuf::from(plain),
+            false => found,
+        })
+    }
+}
+
+impl Canonical for PathBuf {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        self.as_path().canonical()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

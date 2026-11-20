@@ -84,6 +84,11 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
 /// Makes the entries of a directory durable (creations, renames, removals).
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    // Windows cannot open a directory to flush it, and has nothing to
+    // flush: NTFS journals its directory entries (ADR 0002).
+    if cfg!(windows) {
+        return Ok(());
+    }
     File::open(dir)?.sync_all()
 }
 

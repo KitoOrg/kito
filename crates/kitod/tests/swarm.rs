@@ -1,6 +1,7 @@
 //! Lanes through the real daemon: agents save in their working copies, ask
 //! for integration over the socket and read the result.
 
+use kito_core::paths::Canonical as _;
 use kito_integrate::{ConflictInfo, IntegrationResult, JobState, Outcome};
 use kitod::client::Client;
 use kitod::lanes::LaneInfo;
@@ -22,7 +23,7 @@ fn start(root: &Path) -> Client {
 
 fn stop(root: &Path, client: &mut Client) {
     let _: Value = client.call("shutdown", json!({})).unwrap();
-    let socket = kitod::rpc::socket_path(&root.canonicalize().unwrap());
+    let socket = kitod::rpc::socket_path(&root.canonical().unwrap());
     let deadline = Instant::now() + Duration::from_secs(20);
     while socket.exists() {
         assert!(Instant::now() < deadline, "the daemon did not stop");
@@ -90,7 +91,7 @@ fn new_repo() -> tempfile::TempDir {
 #[test]
 fn agents_work_in_their_lanes_and_integrate_through_the_daemon() {
     let tmp = new_repo();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut client = start(&root);
     let _: Value = client.call("sync", json!({})).unwrap();
 
@@ -183,7 +184,7 @@ fn agents_work_in_their_lanes_and_integrate_through_the_daemon() {
 #[test]
 fn conflicts_verification_and_explicit_renames_over_the_socket() {
     let tmp = new_repo();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut client = start(&root);
     let _: Value = client.call("sync", json!({})).unwrap();
     let (alice, alice_dir) = open(&mut client, "alice", "absolute totals");

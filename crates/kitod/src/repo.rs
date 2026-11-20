@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::identity::{self, Identity};
 use crate::ignore::IgnoreRules;
 use crate::semantic::{self, Why};
+use kito_core::paths::Canonical as _;
 use kito_core::{
     codec, Author, BlobId, Checkpoint, CheckpointId, FileMode, Hlc, HlcClock, Intent, IntentId, LaneId, Op,
     OpId, OpKind, SymbolId, SymbolTable, Tree, TreeEntry,
@@ -643,7 +644,7 @@ impl Repo {
     /// Opens the repository in `root` and rebuilds the state of the main
     /// lane and of the open lanes.
     pub fn open(root: &Path) -> Result<Repo> {
-        let root = root.canonicalize().map_err(Error::io(root))?;
+        let root = root.canonical().map_err(Error::io(root))?;
         let store_dir = root.join(STORE_DIR);
         let store = Store::open(&store_dir)?;
         let config = Config::load(&store_dir).map_err(Error::Config)?;

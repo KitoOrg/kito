@@ -14,6 +14,7 @@
 
 use crate::text::{offset_at, position_at};
 use crate::{Error, Result, SemanticProvider, Snapshot, Usage};
+use kito_core::paths::Canonical as _;
 use kito_core::{Lang, Location, RefSource, Reference, SymbolId};
 use kito_parse::lang_for_path;
 use serde::{Deserialize, Serialize};
@@ -170,7 +171,7 @@ impl LspProvider {
     /// A server for the repository at `root`. Nothing is started yet.
     pub fn new(name: &str, config: LspConfig, root: &Path) -> LspProvider {
         // Servers answer with real paths: links in the root are resolved.
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+        let root = root.canonical().unwrap_or_else(|_| root.to_owned());
         LspProvider {
             name: name.to_owned(),
             config,

@@ -8,6 +8,7 @@
 //! worked on from here.
 
 use crate::rpc::{self, Request, Response, RpcError};
+use kito_core::paths::Canonical as _;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -148,7 +149,7 @@ pub enum ClientError {
 /// Walks up from `start` until it finds the directory that contains
 /// `.kito/`: a repository, or a directory connected to one on a server.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
-    let start = start.canonicalize().ok()?;
+    let start = start.canonical().ok()?;
     start
         .ancestors()
         .find(|dir| {

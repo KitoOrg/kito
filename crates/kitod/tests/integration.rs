@@ -1,5 +1,6 @@
 //! Integration, without the daemon: lanes become part of the main lane.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::integrate::Decision;
@@ -62,7 +63,7 @@ export function discount(amount: number, percent: number): number {
 fn shop() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut repo = Repo::init(&root).unwrap();
     write(&root, ".gitignore", ".kito/\n");
     write(&root, "src/shop.ts", SHOP);

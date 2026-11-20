@@ -1,5 +1,6 @@
 //! The real daemon (`kitod` binary), driven through the JSON-RPC socket.
 
+use kito_core::paths::Canonical as _;
 use kitod::client::Client;
 use kitod::repo::{CheckpointResult, LogItem};
 use kitod::rpc::DaemonStatus;
@@ -18,7 +19,7 @@ fn start(root: &Path) -> Client {
 
 fn stop(root: &Path, client: &mut Client) {
     let _: Value = client.call("shutdown", json!({})).unwrap();
-    let socket = kitod::rpc::socket_path(&root.canonicalize().unwrap());
+    let socket = kitod::rpc::socket_path(&root.canonical().unwrap());
     wait_until("the daemon to shut down", || !socket.exists());
 }
 

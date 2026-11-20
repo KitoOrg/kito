@@ -1,5 +1,6 @@
 //! What a server keeps: its configuration, its people, its repositories.
 
+use kito_core::paths::Canonical as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -111,7 +112,7 @@ fn check_name(what: &str, name: &str) -> Result<(), String> {
 impl Server {
     pub fn init(dir: &Path) -> Result<Server, String> {
         std::fs::create_dir_all(dir.join(REPOS_DIR)).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+        let dir = dir.canonical().map_err(|e| format!("{}: {e}", dir.display()))?;
         if dir.join(CONFIG_FILE).exists() {
             return Err(format!("{} is a server already", dir.display()));
         }
@@ -121,7 +122,7 @@ impl Server {
     }
 
     pub fn open(dir: &Path) -> Result<Server, String> {
-        let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+        let dir = dir.canonical().map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join(CONFIG_FILE);
         let text = std::fs::read_to_string(&path).map_err(|_| {
             format!("{} is not a Kito server (run `kito-server init` there, or give --dir)", dir.display())

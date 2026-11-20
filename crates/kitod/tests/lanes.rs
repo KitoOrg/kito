@@ -1,5 +1,6 @@
 //! Lanes, without the daemon: working copies of their own, captured apart.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kitod::Repo;
 use std::fs;
@@ -45,7 +46,7 @@ fn repo_with_files() -> (tempfile::TempDir, Repo) {
 #[test]
 fn a_lane_has_a_working_copy_of_its_own_and_is_captured_apart() {
     let (tmp, mut repo) = repo_with_files();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let main_ops = repo.status().unwrap().ops;
 
     // No checkpoint yet: the first one is made for the lane to be filed under.
@@ -105,7 +106,7 @@ fn a_lane_has_a_working_copy_of_its_own_and_is_captured_apart() {
 #[test]
 fn lanes_survive_a_restart_and_a_lost_working_copy() {
     let (tmp, mut repo) = repo_with_files();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let first = repo.open_lane("one", None, None, "work", &kitod::scope::everything()).unwrap();
     let second = repo.open_lane("two", None, None, "work", &kitod::scope::everything()).unwrap();
     let (one, two) = (LaneId(1), LaneId(2));
@@ -160,7 +161,7 @@ fn lanes_survive_a_restart_and_a_lost_working_copy() {
 #[test]
 fn intents_closing_and_bases() {
     let (tmp, mut repo) = repo_with_files();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     repo.checkpoint("first").unwrap();
     write(&root, "README.md", "# Demo, second version\n");
     repo.checkpoint("second").unwrap();
@@ -232,7 +233,7 @@ fn intents_closing_and_bases() {
 fn shared_paths_are_linked_not_copied() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let mut repo = Repo::init(&root).unwrap();
     write(&root, ".gitignore", ".kito/\nnode_modules/\n");
     write(&root, "src/app.ts", "export const app = 1;\n");

@@ -6,6 +6,7 @@
 //! is there while the daemon serves, and gone once its store is closed,
 //! which is what `kito daemon stop` waits for.
 
+use kito_core::paths::Canonical as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,7 @@ pub type Stream = std::fs::File;
 /// directory, whatever path they took to it.
 #[cfg(windows)]
 pub fn pipe_name(root: &Path) -> String {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let root = root.canonical().unwrap_or_else(|_| root.to_owned());
     let lowered = root.to_string_lossy().to_lowercase();
     format!(r"\\.\pipe\kito-{}", kito_core::Hash::of(lowered.as_bytes()).short())
 }

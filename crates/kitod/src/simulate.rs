@@ -17,6 +17,7 @@
 //! a decision.
 
 use crate::client::Client;
+use kito_core::paths::Canonical as _;
 use kito_integrate::{IntegrationResult, JobState, Outcome};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -373,7 +374,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 /// Runs the simulation on the repository in `root`, whose daemon is running
 /// and whose main lane holds [`project`]`(plan.agents)`.
 pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let root = root.canonical().map_err(|e| e.to_string())?;
     let mut report = Report { agents: plan.agents, rounds: plan.rounds, ..Report::default() };
 
     // Every agent opens its lane.

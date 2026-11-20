@@ -1,6 +1,7 @@
 //! Why code is the way it is: the reasons of a function, of a file and of
 //! lines, what else changed for a reason, who uses what, and the search.
 
+use kito_core::paths::Canonical as _;
 use kito_core::*;
 use kito_integrate::Outcome;
 use kitod::why::WhyGraph;
@@ -54,7 +55,7 @@ export function invoice(prices: number[]): string {
 fn shop() -> (tempfile::TempDir, PathBuf, Repo) {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     drop(Repo::init(&root).unwrap());
     let mut repo = Repo::open(&root).unwrap();
     write(&root, ".gitignore", ".kito/\n");
@@ -339,7 +340,7 @@ fn git(dir: &Path, args: &[&str]) {
 fn code_older_than_kito_has_the_reasons_git_recorded() {
     isolate_identity();
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     // A repository with a history of its own, before Kito.
     write(&root, "src/shop.ts", SHOP);
     write(&root, "src/billing.ts", BILLING);

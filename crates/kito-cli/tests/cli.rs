@@ -1,5 +1,6 @@
 //! The real CLI (`kito`), with the real daemon it starts by itself.
 
+use kito_core::paths::Canonical as _;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -395,7 +396,7 @@ fn why_follows_a_function_through_a_rename_and_a_move() {
 #[test]
 fn lanes_integration_and_conflicts_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let root = root.as_path();
     ok(root, &["init"]);
     let shop = "export function total(items: Item[]): number {\n  let sum = 0;\n  for (const item of items) {\n    sum += item.price * item.quantity;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = Math.round((amount * percent) / 100);\n  return amount - cut;\n}\n";
@@ -736,7 +737,7 @@ fn scopes_the_board_and_who_is_on_what_from_the_command_line() {
 #[test]
 fn why_tells_the_reasons_of_code_and_reasons_are_found_by_their_words() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let root = root.as_path();
     ok(root, &["init"]);
     let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = (amount * percent) / 100;\n  return amount - cut;\n}\n";
@@ -906,7 +907,7 @@ fn refusal(answer: &(Value, i32, String)) -> String {
 #[test]
 fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let root = root.as_path();
     ok(root, &["init"]);
     let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  const cut = (amount * percent) / 100;\n  return amount - cut;\n}\n";
@@ -1034,7 +1035,7 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
 #[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn a_command_runs_confined_to_its_lane() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let root = root.as_path();
     ok(root, &["init"]);
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
@@ -1103,7 +1104,7 @@ fn a_command_runs_confined_to_its_lane() {
 #[test]
 fn lanes_asked_for_together_are_checked_in_one_run() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let root = base.join("shop");
     fs::create_dir(&root).unwrap();
     let root = root.as_path();
@@ -1180,7 +1181,7 @@ fn lanes_asked_for_together_are_checked_in_one_run() {
 #[test]
 fn a_staging_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let root = base.join("app");
     let remote = base.join("remote.git");
     fs::create_dir(&root).unwrap();
@@ -1242,7 +1243,7 @@ fn a_staging_lane_from_the_command_line() {
 #[test]
 fn lanes_on_lanes_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let root = base.join("app");
     fs::create_dir(&root).unwrap();
     let root = root.as_path();
@@ -1303,7 +1304,7 @@ fn lanes_on_lanes_from_the_command_line() {
 #[test]
 fn commits_made_with_git_are_pulled_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let (root, remote, clone) = (base.join("shop"), base.join("remote.git"), base.join("grace"));
     fs::create_dir(&root).unwrap();
     let root = root.as_path();
@@ -1369,7 +1370,7 @@ fn commits_made_with_git_are_pulled_from_the_command_line() {
 #[test]
 fn a_protected_main_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     let root = root.as_path();
     ok(root, &["init"]);
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
@@ -1449,7 +1450,7 @@ fn kito_server() -> PathBuf {
 #[test]
 fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let serverdir = base.join("server");
     let run = |args: &[&str]| -> String {
         let out = Command::new(kito_server())

@@ -1,5 +1,6 @@
 //! The swarm simulator on a small swarm: no fake conflict, every real one found.
 
+use kito_core::paths::Canonical as _;
 use kitod::client::Client;
 use kitod::simulate::{project, run, Plan};
 use kitod::Repo;
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 fn six_agents_four_rounds_and_the_three_real_conflicts() {
     std::env::set_var("KITOD_BIN", env!("CARGO_BIN_EXE_kitod"));
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     Repo::init(&root).unwrap().close().unwrap();
     let plan = Plan { agents: 6, rounds: 4, real_conflicts: true, snapshots: None };
     fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
