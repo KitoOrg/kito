@@ -44,7 +44,9 @@ fn shop(batch: usize) -> (tempfile::TempDir, PathBuf, PathBuf, Repo) {
     fs::create_dir(&root).unwrap();
     drop(Repo::init(&root).unwrap());
     let runs = base.join("runs.txt");
-    let check = format!("echo run >> {}; ! grep -rq BROKEN --include=*.txt --include=*.ts .", runs.display());
+    // With `/`: to `sh` a `\` is an escape, also on Windows.
+    let counted = runs.display().to_string().replace('\\', "/");
+    let check = format!("echo run >> {counted}; ! grep -rq BROKEN --include=*.txt --include=*.ts .");
     let config = root.join(".kito/config.toml");
     let text = fs::read_to_string(&config).unwrap();
     let text = text

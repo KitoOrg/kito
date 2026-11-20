@@ -53,7 +53,21 @@ fn path_of(uri: &str) -> PathBuf {
             at += 1;
         }
     }
-    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    // On Windows a URI's path is `/C:/repo/a.ts`: the path is `C:\repo\a.ts`.
+    if cfg!(windows) && text.as_bytes().get(2) == Some(&b':') {
+        return PathBuf::from(text[1..].replace('/', "\\"));
+    }
+    PathBuf::from(text)
+}
+
+/// The URI of a path, as `path_of` reads it back.
+fn uri_of(path: &Path) -> String {
+    let text = path.display().to_string();
+    match cfg!(windows) {
+        true => format!("file:///{}", text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/")),
+        false => format!("file://{text}"),
+    }
 }
 
 fn on_disk(dir: &Path, out: &mut BTreeMap<PathBuf, String>) {
@@ -104,8 +118,10 @@ pub fn main() {
                 std::fs::OpenOptions::new().create(true).append(true).open(root.join(".fake-lsp-log"))
             {
                 let about = params["textDocument"]["uri"].as_str().map(path_of);
-                let about =
-                    about.as_ref().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string());
+                let about = about
+                    .as_ref()
+                    .and_then(|p| p.strip_prefix(&root).ok())
+                    .map(|p| p.display().to_string().replace('\\', "/"));
                 let _ = writeln!(log, "{method} {}", about.unwrap_or_default());
             }
         }
@@ -161,7 +177,7 @@ pub fn main() {
                         };
                         if wanted && !word.is_empty() {
                             places.push(json!({
-                                "uri": format!("file://{}", path.display()),
+                                "uri": uri_of(path),
                                 "range": {
                                     "start": { "line": at_line, "character": at_column },
                                     "end": { "line": at_line, "character": at_column + word.encode_utf16().count() }

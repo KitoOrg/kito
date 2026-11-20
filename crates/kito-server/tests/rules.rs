@@ -87,9 +87,10 @@ fn write(root: &Path, path: &str, content: &str) {
     fs::write(file, content).unwrap();
 }
 
-/// Waits until `done` says so; fails after ten seconds.
+/// Waits until `done` says so; fails after thirty seconds (a pull, its
+/// checks and the push take a while on a slow runner).
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !done() {
         assert!(Instant::now() < deadline, "still waiting for {what}");
         std::thread::sleep(Duration::from_millis(2));

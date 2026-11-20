@@ -1607,7 +1607,9 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     // in the lane on the server once `sync` has answered.
     let there = serverdir.join("repos/shop/.kito/lanes/1/work");
     let work = here.join(".kito/lanes/1/work");
-    assert!(opened.contains(&format!("Working copy: {}", work.display())), "{opened}");
+    // As the system writes it: on Windows with `\` all through.
+    let shown = work.components().collect::<PathBuf>();
+    assert!(opened.contains(&format!("Working copy: {}", shown.display())), "{opened}");
     assert_eq!(fs::read_to_string(work.join("src/shop.py")).unwrap(), SHOP_PY);
     let cents = SHOP_PY.replace("price * quantity", "round(price * 100) * quantity");
     assert_ne!(cents, SHOP_PY);

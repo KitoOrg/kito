@@ -1,6 +1,7 @@
 //! The real MCP server, spoken to as a client would: JSON-RPC on its
 //! standard input and output.
 
+use kito_core::paths::Canonical as _;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -119,7 +120,7 @@ const SHOP: &str = "export function total(items: Item[]): number {\n  let sum = 
 
 fn new_repo() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = tmp.path().canonical().unwrap();
     kitod::Repo::init(&root).unwrap().close().unwrap();
     fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\n").unwrap();
     fs::create_dir(root.join("src")).unwrap();
@@ -571,7 +572,7 @@ fn kito_server() -> PathBuf {
 #[test]
 fn the_tools_reach_a_repository_kept_by_a_server() {
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
+    let base = tmp.path().canonical().unwrap();
     let serverdir = base.join("server");
     let run = |args: &[&str]| -> String {
         let out = Command::new(kito_server())

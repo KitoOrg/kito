@@ -255,14 +255,32 @@ fn mirror(dir: &Path, lane: &str) -> Value {
 /// Kills the daemon of a connected directory as a crash would.
 fn kill(dir: &Path) {
     let pid = call(dir, "mirror_status", json!({}))["pid"].as_u64().unwrap();
-    let status = Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap();
-    assert!(status.success());
-    // Killed, it stays as a process nobody waited for: it is a child of
-    // this test, which started it.
-    wait_for("the daemon to be gone", || {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        stat.rsplit(')').next().is_none_or(|rest| rest.trim_start().starts_with('Z') || rest.is_empty())
-    });
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap();
+        assert!(status.success());
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output().unwrap();
+        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    }
+    wait_for("the daemon to be gone", || gone(pid));
+}
+
+/// Killed, a daemon stays as a process nobody waited for on Linux: it is a
+/// child of this test, which started it.
+#[cfg(unix)]
+fn gone(pid: u64) -> bool {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    stat.rsplit(')').next().is_none_or(|rest| rest.trim_start().starts_with('Z') || rest.is_empty())
+}
+
+#[cfg(windows)]
+fn gone(pid: u64) -> bool {
+    let filter = format!("PID eq {pid}");
+    let listed = Command::new("tasklist").args(["/NH", "/FI", &filter]).output().unwrap();
+    !String::from_utf8_lossy(&listed.stdout).contains(&format!(" {pid} "))
 }
 
 #[test]

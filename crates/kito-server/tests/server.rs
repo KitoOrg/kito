@@ -355,10 +355,10 @@ fn a_lane_opened_by_one_client_is_seen_by_another_within_a_second() {
     let mut elsewhere = connect(&address, &world.ada, "site");
     assert_eq!(elsewhere.call_value("lanes", json!({})).unwrap(), json!([]));
     assert_eq!(elsewhere.call_value("events", json!({})).unwrap()["next"], 0);
-    assert!(elsewhere.call_value("status", json!({})).unwrap()["repo"]["root"]
-        .as_str()
-        .unwrap()
-        .ends_with("/site"));
+    assert!(std::path::Path::new(
+        elsewhere.call_value("status", json!({})).unwrap()["repo"]["root"].as_str().unwrap()
+    )
+    .ends_with("site"));
 }
 
 #[test]
