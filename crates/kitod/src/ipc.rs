@@ -6,6 +6,7 @@
 //! is there while the daemon serves, and gone once its store is closed,
 //! which is what `kito daemon stop` waits for.
 
+#[cfg(windows)]
 use kito_core::paths::Canonical as _;
 use std::io;
 use std::path::{Path, PathBuf};
