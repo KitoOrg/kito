@@ -64,6 +64,15 @@ and stopped through its pipe (`shutdown`) or Ctrl-C, not a signal.
 `PATH` (Git for Windows has one), else with `cmd /C`. The configuration's
 commands are the user's: what shell they are written for is theirs to know.
 
+**The daemon holds nothing of whoever started it.** A Windows process
+inherits every inheritable handle of the one that starts it, its standard
+pipes included, whatever it is given as its own: a daemon started by
+`kito` would keep open the pipes of the program that ran `kito`, which
+would wait for them for ever. Before starting it, `kito` marks its
+standard handles as not inherited (`SetHandleInformation`). It is the one
+`unsafe` call outside `kito-store` (`kitod/src/detach.rs`): Rust has no
+stable way to say which handles a child inherits.
+
 **No sandbox on Windows** for now: `[sandbox] mode = "auto"` runs unconfined
 and says so; `"required"` refuses, as on macOS.
 

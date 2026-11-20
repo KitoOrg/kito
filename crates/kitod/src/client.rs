@@ -372,6 +372,8 @@ fn spawn_daemon(root: &Path) -> Result<std::process::Child, ClientError> {
         .map_err(|e| ClientError::Spawn(e.to_string()))?;
     let err = log.try_clone().map_err(|e| ClientError::Spawn(e.to_string()))?;
     let binary = daemon_binary();
+    // The daemon outlives this process: it must not hold its pipes.
+    crate::detach::keep_standard_handles();
     let mut command = Command::new(&binary);
     command.arg("--repo").arg(root).stdin(Stdio::null()).stdout(log).stderr(err);
     // A process group of its own: the daemon outlives the CLI's terminal.

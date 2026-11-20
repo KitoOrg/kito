@@ -6,6 +6,7 @@
 pub mod client;
 pub mod config;
 pub mod connected;
+pub mod detach;
 pub mod error;
 pub mod files;
 pub mod fsinfo;

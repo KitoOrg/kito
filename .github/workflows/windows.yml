@@ -11,9 +11,11 @@ env:
 jobs:
   test:
     runs-on: windows-latest
+    # A test that hangs is not waited for for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets --locked
-      - run: cargo test --workspace --locked --no-fail-fast
+      - run: cargo test --workspace --locked --no-fail-fast -- --test-threads 4
