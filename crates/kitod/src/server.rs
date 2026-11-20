@@ -409,6 +409,36 @@ impl Daemon {
                         self.with_repo(|repo| repo.reasons(&about, limit)).map_err(internal)?,
                     ))
                 }
+                // Notes on code (ADR 0003).
+                "add_note" => {
+                    let lane = lane_or_main()?;
+                    let (on, note) = (text("on")?, text("text")?);
+                    let person = params.get("on_behalf_of").and_then(person_of);
+                    // Written by an agent for a person, or by the person.
+                    let (by, person) = match optional("agent").filter(|agent| !agent.trim().is_empty()) {
+                        Some(agent) => (Some(kito_core::Author::agent(agent.trim())), person),
+                        None => (person, None),
+                    };
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.add_note(lane, on, note, by, person)).map_err(internal)?,
+                    ))
+                }
+                "notes" => {
+                    let lane = lane_or_main()?;
+                    let on = optional("on");
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.notes(lane, on.as_deref())).map_err(internal)?,
+                    ))
+                }
+                "remove_note" => {
+                    let id: kito_core::NoteId = text("note")?
+                        .parse()
+                        .map_err(|e: kito_core::IdParseError| (rpc::INVALID_PARAMS, e.to_string()))?;
+                    let by = params.get("on_behalf_of").and_then(person_of);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.remove_note(id, by)).map_err(internal)?,
+                    ))
+                }
                 "checkpoint" => {
                     let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
@@ -900,6 +930,14 @@ impl Daemon {
                 ("edit_refused", lane.or(Some("main".to_owned())), person, what)
             }
             "set_intent" => ("intent", lane, person, text(params, "summary").unwrap_or_default()),
+            "add_note" => {
+                let what = format!(
+                    "{}: {}",
+                    text(value, "on").unwrap_or_default(),
+                    text(value, "text").unwrap_or_default()
+                );
+                ("noted", lane, person, what)
+            }
             "rename_symbol" => {
                 let what = format!(
                     "{} → {}",

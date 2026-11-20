@@ -11,8 +11,8 @@ use crate::objects::{Packs, Stored};
 use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
 use kito_core::{
-    codec, BlobId, Checkpoint, CheckpointId, Conflict, ConflictId, Intent, IntentId, Lane, LaneId, Op, OpId,
-    SymbolId,
+    codec, BlobId, Checkpoint, CheckpointId, Conflict, ConflictId, Intent, IntentId, Lane, LaneId, Note,
+    NoteId, Op, OpId, SymbolId,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -114,6 +114,7 @@ pub struct RecoveryReport {
     pub intents: LogRecovery,
     pub lanes: LogRecovery,
     pub conflicts: LogRecovery,
+    pub notes: LogRecovery,
     pub index: IndexRecovery,
 }
 
@@ -126,6 +127,7 @@ impl RecoveryReport {
             + self.intents.discarded_bytes
             + self.lanes.discarded_bytes
             + self.conflicts.discarded_bytes
+            + self.notes.discarded_bytes
     }
 }
 
@@ -220,6 +222,7 @@ pub struct Store {
     intents: IntentLog,
     lanes: KeyedLog<LaneId, Lane>,
     conflicts: KeyedLog<ConflictId, Conflict>,
+    notes: KeyedLog<NoteId, Note>,
     index: Index,
     pending: Pending,
     /// The blobs read or written last: a new version of a file is stored as
@@ -355,6 +358,19 @@ impl Store {
             &lost_found,
             floor.map(|w| w.conflicts_end),
         )?;
+        // Notes on code (ADR 0003): a log of their own, which an older
+        // version does not open. It is not part of the index's watermark:
+        // a note is durable once `put_note` returns, and nothing in the
+        // index points at it.
+        let (notes, notes_recovery) = KeyedLog::open(
+            &dir.join("notes"),
+            LogKind::Notes,
+            "note",
+            |note: &Note| note.id,
+            &*opts.fs,
+            &lost_found,
+            None,
+        )?;
         let ends = SmallLogs {
             checkpoints: checkpoints.len(),
             intents: intents.len(),
@@ -374,6 +390,7 @@ impl Store {
             intents,
             lanes,
             conflicts,
+            notes,
             index,
             pending: Pending::default(),
             recent: Mutex::new(Recent::default()),
@@ -385,6 +402,7 @@ impl Store {
                 intents: intents_recovery,
                 lanes: lanes_recovery,
                 conflicts: conflicts_recovery,
+                notes: notes_recovery,
                 index: index_recovery,
             },
             index_dirty: false,
@@ -857,6 +875,28 @@ impl Store {
 
     pub fn next_conflict_id(&self) -> ConflictId {
         ConflictId(self.conflicts.last_key().map_or(1, |id| id.0 + 1))
+    }
+
+    // --------------------------------------------------------------- notes
+
+    /// Records (or updates: a removal) a note on code durably (ADR 0003).
+    pub fn put_note(&mut self, note: &Note) -> Result<()> {
+        self.check()?;
+        let put = self.notes.put(note);
+        self.guard(put)
+    }
+
+    pub fn note(&self, id: NoteId) -> Option<&Note> {
+        self.notes.get(id)
+    }
+
+    /// Every note ever written, in ID order, removed ones included.
+    pub fn notes(&self) -> impl DoubleEndedIterator<Item = &Note> {
+        self.notes.iter()
+    }
+
+    pub fn next_note_id(&self) -> NoteId {
+        NoteId(self.notes.last_key().map_or(1, |id| id.0 + 1))
     }
 
     /// The index takes note of the confirmed length of the logs it does not

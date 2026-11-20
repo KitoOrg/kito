@@ -1179,6 +1179,35 @@ fn lanes_asked_for_together_are_checked_in_one_run() {
 }
 
 #[test]
+fn notes_on_code_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let root = base.join("shop");
+    fs::create_dir(&root).unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.py"), "def total(prices):\n    return sum(prices)\n").unwrap();
+    ok(root, &["checkpoint", "-m", "start"]);
+
+    let left = ok(
+        root,
+        &["note", "src/shop.py:total", "called", "by", "the", "nightly", "job:", "do", "not", "rename"],
+    );
+    assert!(
+        left.contains("note#1  src/shop.py:total") && left.contains("called by the nightly job"),
+        "{left}"
+    );
+    let why = ok(root, &["why", "src/shop.py:total"]);
+    assert!(why.contains("Notes left on it:") && why.contains("do not rename"), "{why}");
+    assert!(ok(root, &["note", "--list"]).contains("note#1"));
+    assert!(ok(root, &["note", "--remove", "note#1"]).contains("note#1 removed."));
+    assert_eq!(ok(root, &["note", "--list"]).trim(), "No notes.");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 fn a_staging_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonical().unwrap();

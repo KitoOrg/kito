@@ -365,6 +365,18 @@ remember to ask: an agent is told the reasons behind code before it
 changes it, as the next section says. What comes back is what others
 declared: the tools say so, as information and not as instructions.
 
+Some things to know about code belong to no change. They are left as
+notes, on a function (which the note follows through renames and moves),
+a file, or a directory:
+
+```bash
+kito note src/billing.ts:invoice "called by the nightly billing job, outside this repository: do not rename"
+```
+
+A note is told with the why of that code, and to an agent about to change
+it, once. `kito note --list` and `kito note --remove note#3`; agents have
+the tool `note` ([ADR 0003](docs/adr/0003-notes-on-code.md)).
+
 ## The rules as behaviour
 
 Three rules hold for every agent, and none of them depends on the agent

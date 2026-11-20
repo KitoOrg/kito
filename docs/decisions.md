@@ -1309,6 +1309,17 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-146 · A note is told once, with the reasons
+An agent about to change code with a note on it is told the note, in the
+same answer as the reasons, and the edit is held back once, as for the
+reasons (phase 11). Notes are remembered as told with the reasons; the
+answers to `open_lane` and `extend_scope` count as telling them. A note
+on lines is the note of the function they are in: lines move with every
+edit, functions keep their identity. The notes log is not part of the
+index's watermark: a note is durable once written, and nothing in the
+index points at it, so an older binary that ignores the file loses
+nothing else.
+
 ### D-145 · An intent that says nothing is refused
 The intent is what the next agent is told before it changes the code:
 "wip" or "fix" tells it nothing. An intent made only of words that say

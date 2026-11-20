@@ -12,6 +12,12 @@ Phase 18 (the why graph, better), part 1:
   refused when a lane is opened or an intent is set: it is what the next
   agent is told before it changes the code. Intents Kito writes itself
   (git commit subjects, integrations) are taken as they are.
+- Notes on code ([ADR 0003](docs/adr/0003-notes-on-code.md)): `kito note
+  <target> "<text>"`, `--list`, `--remove`, and the MCP tool `note`. A note
+  on a function follows it through renames and moves; notes on a file or
+  a directory are told for what is in it. They are shown with the why of
+  that code (`annotations`), and an agent about to change it is told them
+  once, with the reasons.
 
 Windows (ADR 0002), under way: Kito builds for Windows; its tests do not
 pass there yet.

@@ -149,6 +149,25 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 20, value_name = "N")]
         limit: usize,
     },
+    /// Leave a note on a function, a file or a directory: something to know
+    /// about that code that no change says ("called by the nightly job: do
+    /// not rename"). It is told with the why of that code
+    Note {
+        /// <file>:<function>, a file, a directory (src/billing/), or lines
+        /// (the function they are in)
+        target: Option<String>,
+        /// What to know about it
+        text: Vec<String>,
+        /// The code as this lane has it (default: the main lane)
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
+        /// List the notes, all or those on the target
+        #[arg(long, conflicts_with = "remove")]
+        list: bool,
+        /// Remove a note (note#3): it stays in the history, no longer shown
+        #[arg(long, value_name = "NOTE")]
+        remove: Option<String>,
+    },
     /// Wait until every save has been recorded
     Sync {
         /// Only the saves of this lane
@@ -708,6 +727,14 @@ fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>, graph: bool, uses: bo
         None => println!("file {}", text(about, "file")),
     }
 
+    // What people and agents left on it: first, it is what they meant to be read.
+    let annotations = answer["annotations"].as_array().cloned().unwrap_or_default();
+    if !annotations.is_empty() {
+        println!();
+        println!("Notes left on it:");
+        annotations.iter().for_each(|note| println!("  {}", note_line(note)));
+    }
+
     let reasons = answer["reasons"].as_array().cloned().unwrap_or_default();
     println!();
     match reasons.is_empty() {
@@ -826,6 +853,56 @@ fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>, graph: bool, uses: bo
     for note in strings(&answer["notes"]) {
         println!();
         println!("Note: {note}");
+    }
+    Ok(())
+}
+
+/// `note#3  src/shop.ts:total  (ada for bob): the text`.
+fn note_line(note: &Value) -> String {
+    let text = |key: &str| note[key].as_str().unwrap_or_default().to_owned();
+    let who = match note["for"].as_str() {
+        Some(person) => format!("{} for {person}", text("by")),
+        None => text("by"),
+    };
+    let gone =
+        if note["gone"].as_bool() == Some(true) { ", on a function that no longer exists" } else { "" };
+    format!("{}  {}  ({who}{gone}): {}", text("id"), text("on"), text("text"))
+}
+
+/// Leaves a note on code, lists the notes, or removes one (ADR 0003).
+fn cmd_note(
+    cli: &Cli,
+    target: &Option<String>,
+    text: &[String],
+    lane: &Option<String>,
+    list: bool,
+    remove: &Option<String>,
+) -> Outcome {
+    let mut client = daemon(cli)?;
+    let shown: Value = match (remove, list, target) {
+        (Some(note), _, _) => client.call("remove_note", json!({ "note": note })).map_err(fail)?,
+        (None, true, _) | (None, false, None) => {
+            client.call("notes", json!({ "on": target, "lane": lane })).map_err(fail)?
+        }
+        (None, false, Some(target)) if text.is_empty() => {
+            return Err(fail(format!("what to say about {target}: kito note {target} \"<text>\"")));
+        }
+        (None, false, Some(target)) => client
+            .call("add_note", json!({ "on": target, "text": text.join(" "), "lane": lane }))
+            .map_err(fail)?,
+    };
+    if cli.json {
+        print_json(&shown);
+        return Ok(());
+    }
+    match (remove, shown.as_array()) {
+        (Some(_), _) => println!("{} removed.", shown["id"].as_str().unwrap_or_default()),
+        (None, Some(notes)) if notes.is_empty() => println!("No notes."),
+        (None, Some(notes)) => notes.iter().for_each(|note| println!("{}", note_line(note))),
+        (None, None) => {
+            println!("{}", note_line(&shown));
+            println!("It is told with the why of that code, to whoever is about to change it.");
+        }
     }
     Ok(())
 }
@@ -2439,6 +2516,7 @@ fn main() -> ExitCode {
         Cmd::Why { target, lane, history: true, .. } => cmd_history(&cli, target, lane),
         Cmd::Why { target, lane, graph, uses, .. } => cmd_why(&cli, target, lane, *graph, *uses),
         Cmd::Reasons { words, limit } => cmd_reasons(&cli, words, *limit),
+        Cmd::Note { target, text, lane, list, remove } => cmd_note(&cli, target, text, lane, *list, remove),
         Cmd::Sync { lane } => cmd_sync(&cli, lane),
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),

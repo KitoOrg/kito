@@ -42,6 +42,10 @@ const ALLOWED: &[&str] = &[
     "before_edit",
     "reasons_behind",
     "after_shell",
+    // Notes on code (ADR 0003).
+    "add_note",
+    "notes",
+    "remove_note",
 ];
 
 /// Of those, what somebody who may only read can ask.
@@ -60,6 +64,7 @@ const READ: &[&str] = &[
     "get_blobs",
     "why_graph",
     "reasons",
+    "notes",
     // Asked before an edit and after a command: the answer changes nothing
     // of the repository.
     "before_edit",

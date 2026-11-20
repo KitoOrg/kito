@@ -302,6 +302,10 @@ pub struct WhyGraph {
     /// What the answer leaves out, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The notes people and agents left on it, on its file and on the
+    /// directories above (ADR 0003).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<crate::notes::NoteInfo>,
 }
 
 /// A reason found by its words, with what it changed.
@@ -326,13 +330,13 @@ pub struct ReasonHit {
 
 /// What is asked about, as it is written: `src/shop.ts:total`, `src/shop.ts`,
 /// `src/shop.ts:12`, `src/shop.ts:12-20`.
-enum Asked {
+pub(crate) enum Asked {
     Symbol(PathBuf, String),
     File(PathBuf),
     Lines(PathBuf, u32, u32),
 }
 
-fn parse_target(text: &str) -> Result<Asked> {
+pub(crate) fn parse_target(text: &str) -> Result<Asked> {
     let text = text.trim();
     if text.is_empty() {
         return Err(Error::Other("ask about a function (file:name), a file, or lines (file:12-20)".into()));
@@ -1130,6 +1134,7 @@ impl Repo {
             in_progress: self.in_progress(lane, &target),
             decisions: self.decisions(|conflict| conflict.symbol == Some(id)),
             notes,
+            annotations: self.notes_for(lane, Some(id), &entry.file),
         })
     }
 
@@ -1227,6 +1232,7 @@ impl Repo {
             decisions: self
                 .decisions(|conflict| conflict.symbol.is_none() && conflict.file.as_deref() == Some(file)),
             notes,
+            annotations: self.notes_for(lane, None, file),
         })
     }
 

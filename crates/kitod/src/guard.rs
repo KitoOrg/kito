@@ -62,6 +62,9 @@ pub struct ScopeWhy {
     /// What was decided about it when two lanes disagreed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<Decision>,
+    /// The notes left on it (ADR 0003).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<crate::notes::NoteInfo>,
 }
 
 /// The answer to "may this edit be made?".
@@ -80,6 +83,9 @@ pub struct EditAnswer {
     /// The reasons behind the lines the edit replaces, not told before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<Reason>,
+    /// The notes left on that code, not told before (ADR 0003).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<crate::notes::NoteInfo>,
 }
 
 /// A reason behind code a lane replaced.
@@ -220,6 +226,29 @@ impl Repo {
             .collect()
     }
 
+    /// Of some notes, the ones a lane has not been told (ADR 0003).
+    fn untold_notes(
+        &mut self,
+        lane: LaneId,
+        notes: Vec<crate::notes::NoteInfo>,
+    ) -> Vec<crate::notes::NoteInfo> {
+        let told = self.told_reasons(lane);
+        let mut seen = BTreeSet::new();
+        notes.into_iter().filter(|note| !told.contains(&note.id) && seen.insert(note.id.clone())).collect()
+    }
+
+    /// Remembers that a lane was told these notes, with the reasons.
+    pub(crate) fn tell_notes(&mut self, lane: LaneId, notes: &[crate::notes::NoteInfo]) {
+        if notes.is_empty() || !self.lanes.contains_key(&lane) {
+            return;
+        }
+        let told = self.told_reasons(lane);
+        told.extend(notes.iter().map(|note| note.id.clone()));
+        if let Ok(bytes) = serde_json::to_vec(told) {
+            let _ = std::fs::write(self.told_file(lane), bytes);
+        }
+    }
+
     /// Remembers that a lane was told these reasons: by an answer of this
     /// module, or because its agent asked why by itself.
     pub fn tell(&mut self, lane: LaneId, reasons: &[Reason]) {
@@ -281,11 +310,25 @@ impl Repo {
                     None => user.symbol.clone(),
                 })
                 .collect();
-            if reasons.is_empty() && used_by.is_empty() && graph.decisions.is_empty() {
+            let annotations = graph.annotations;
+            if reasons.is_empty()
+                && used_by.is_empty()
+                && graph.decisions.is_empty()
+                && annotations.is_empty()
+            {
                 continue;
             }
             self.tell(lane, &reasons);
-            told.push(ScopeWhy { item, reasons, earlier, used_by, used_by_more, decisions: graph.decisions });
+            self.tell_notes(lane, &annotations);
+            told.push(ScopeWhy {
+                item,
+                reasons,
+                earlier,
+                used_by,
+                used_by_more,
+                decisions: graph.decisions,
+                annotations,
+            });
         }
         let mut notes = Vec::new();
         if directories > 0 {
@@ -396,16 +439,27 @@ impl Repo {
         }
         let reasons = self.reasons_of_lines(lane, path, asked)?;
         let reasons: Vec<Reason> = self.untold(lane, reasons).into_iter().map(short).collect();
-        if reasons.is_empty() {
+        let notes = self.notes_on_lines(lane, path, asked);
+        let notes = self.untold_notes(lane, notes);
+        if reasons.is_empty() && notes.is_empty() {
             return Ok(ok);
         }
         self.tell(lane, &reasons);
+        self.tell_notes(lane, &notes);
         let what = match whole {
             true => format!("{file}"),
             false => format!("these lines of {file}"),
         };
-        let mut message =
-            format!("Kito: this edit was held back once. Before you change {what}, this is why they are the way they are:\n");
+        let mut message = format!("Kito: this edit was held back once. Before you change {what}:\n");
+        if !notes.is_empty() {
+            message.push_str("Notes left on this code:\n");
+            for note in &notes {
+                message.push_str(&format!("- {} on {} ({}): {}\n", note.id, note.on, note.by, note.text));
+            }
+        }
+        if !reasons.is_empty() {
+            message.push_str("This is why it is the way it is:\n");
+        }
         for reason in reasons.iter().take(REASONS_PER_REFUSAL) {
             message.push_str(&format!("- {}\n", line_of(reason)));
         }
@@ -420,7 +474,7 @@ impl Repo {
              same edit again: it goes through. If it undoes one of them on purpose, say so in your \
              intent (set_intent), so that whoever reads this code next knows. The `why` tool tells more.",
         );
-        Ok(EditAnswer { reasons, ..refused("why", message) })
+        Ok(EditAnswer { reasons, annotations: notes, ..refused("why", message) })
     }
 
     /// The reasons behind what a lane replaced or removed that it was not

@@ -210,6 +210,11 @@ counter_id!(
     ConflictId,
     "conflict"
 );
+counter_id!(
+    /// Sequence number of a note on code (`note#3`, ADR 0003).
+    NoteId,
+    "note"
+);
 
 #[cfg(test)]
 mod tests {

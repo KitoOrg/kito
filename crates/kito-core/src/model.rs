@@ -562,6 +562,40 @@ pub struct Verification {
     pub duration_ms: u64,
 }
 
+/// A short text attached to code without changing it: a reason that
+/// belongs to no change ("called by the nightly billing job: do not
+/// rename"). ADR 0003.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: crate::NoteId,
+    pub on: NoteTarget,
+    pub text: String,
+    /// Who wrote it: a person, or an agent.
+    pub by: Author,
+    /// Whom the agent works for, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<Author>,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// The lane it was written in, if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneId>,
+    /// Who removed it, and when: it is kept, and no longer shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<(Author, u64)>,
+}
+
+/// What a note is on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteTarget {
+    /// A function or a class: the note follows it through renames and
+    /// moves. `file` and `name` are where it was and what it was called
+    /// when the note was written.
+    Symbol { id: SymbolId, file: PathBuf, name: String },
+    /// A file, or a directory and everything under it.
+    Path(PathBuf),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: CheckpointId,
