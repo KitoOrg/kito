@@ -46,7 +46,8 @@ pub struct Policy {
     pub env: BTreeMap<String, String>,
 }
 
-/// Devices every program expects to be able to write to.
+/// Devices every program expects to be able to write to (Landlock, so Linux).
+#[cfg(target_os = "linux")]
 const DEVICES: [&str; 6] = ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"];
 
 /// The path with its links followed, if it exists.

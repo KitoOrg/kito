@@ -11,6 +11,8 @@ env:
 jobs:
   test:
     strategy:
+      # Each platform's answer, even when the other fails.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
