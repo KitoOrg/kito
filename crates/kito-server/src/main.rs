@@ -588,7 +588,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 // server they reach is this one.
                 println!("They connect with:");
                 println!(
-                    "  kito connect <host>:<port> <repository> --token {token} --fingerprint {}",
+                    "  kito connect <host>:<port>/<repository> --token {token} --fingerprint {}",
                     tls::fingerprint(&server.dir)?
                 );
             } else if let Some(identity) = &identity {
@@ -599,7 +599,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 );
                 println!("They connect with:");
                 println!(
-                    "  kito connect <host>:<port> <repository> --sign-in {method} --fingerprint {}",
+                    "  kito connect <host>:<port>/<repository> --sign-in {method} --fingerprint {}",
                     tls::fingerprint(&server.dir)?
                 );
             }

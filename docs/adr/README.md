@@ -43,4 +43,5 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0011 · One way to add an assistant, and the ones a machine has](0011-one-way-to-add-an-assistant.md)
 - [0012 · Instructions: what agents are told, kept by Kito and out of the project](0012-instructions.md)
+- [0013 · Connecting by one address, signed in in the browser](0013-connect-by-address.md)
   (accepted)

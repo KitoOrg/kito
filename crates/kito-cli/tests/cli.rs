@@ -2437,7 +2437,8 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     // he has: the command waits meanwhile.
     fs::remove_file(&at_hello).unwrap();
     let (dir, at) = (base.clone(), address.clone());
-    let waiting = std::thread::spawn(move || kito(&dir, &["connect", &at, "shop", "--sign-in", "hello"]));
+    // One address, and the only way the server offers: like `git clone`.
+    let waiting = std::thread::spawn(move || kito(&dir, &["clone", &format!("kito://{at}/shop")]));
     std::thread::sleep(std::time::Duration::from_millis(1200));
     assert!(!base.join("shop").exists(), "connected before anybody signed in");
     fs::write(&at_hello, "bob").unwrap();

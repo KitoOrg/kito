@@ -1351,6 +1351,15 @@ what is written outside the marks afterwards stays local. Instructions
 have no history of their own: an event says each change, which is enough
 for something that is told rather than built.
 
+### D-167 · The terminal is asked what the flags used to say
+`kito connect` takes one address, asks the server how to sign in, opens
+the browser, and asks at the terminal whether a self-made certificate is
+the server meant ([ADR 0013](adr/0013-connect-by-address.md)), because the
+person asked for connecting as GitHub's tools do. Asking only at a
+terminal keeps scripts and agents where they were: with nobody to answer,
+nothing is trusted or chosen that was not said, except the one way to
+sign in a server offers, which is no choice.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

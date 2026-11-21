@@ -588,9 +588,10 @@ who somebody is, the server says what they may do.
 ```console
 $ kito-server user add bob --identity github:bob --role write
 bob added: whoever signs in as github:bob is bob. No token.
-$ kito connect kito.example.com:7421 shop --sign-in github --fingerprint sha256:…
+$ kito connect kito.example.com/shop
 To sign in with github, open https://github.com/login/device
 and enter the code ABCD-1234
+(opened in your browser)
 Waiting until you have...
 shop is connected to `shop` on kito.example.com:7421 as bob.
 ```
@@ -768,7 +769,17 @@ main lane come into it and are kept as the server has them, and from then
 on `kito` in that directory works as it does in a repository:
 
 ```bash
-kito connect host:7421 shop --token kito_... --fingerprint sha256:...
+kito connect kito.example.com/shop      # or kito clone; kito://host:port/shop
+```
+
+With no token, Kito asks the server how to sign in, lets you pick at the
+terminal (a way in the browser, or pasting the token `user add` printed)
+and opens the page. A server whose certificate is its own is shown by its
+fingerprint, once, for you to say it is yours. Said on the command line,
+for a script:
+
+```bash
+kito connect host:7421/shop --token kito_... --fingerprint sha256:...
 ```
 
 ```bash

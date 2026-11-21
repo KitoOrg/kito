@@ -299,6 +299,22 @@ impl Client {
     /// 0006). `tell` is given, once, where the person goes and what they
     /// enter there (`open`, `code`); this waits while they do. The answer
     /// is the token of a session, who it is for and the days it lasts.
+    /// The ways to sign in that the remote's server offers: each a method
+    /// and what it says of itself.
+    pub fn sign_in_methods(remote: &Remote) -> Result<Vec<(String, String)>, ClientError> {
+        let mut client = Client::reach(remote)?;
+        let said = client.say(remote, &json!({ "sign_in": { "version": PROTOCOL } }))?;
+        Ok(said["methods"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|way| {
+                let method = way["method"].as_str()?.to_owned();
+                Some((method, way["about"].as_str().unwrap_or_default().to_owned()))
+            })
+            .collect())
+    }
+
     pub fn sign_in(
         remote: &Remote,
         method: &str,

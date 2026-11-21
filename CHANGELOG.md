@@ -4,6 +4,18 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.28.0]
+
+Connecting as GitHub's tools do (phase 27,
+[ADR 0013](docs/adr/0013-connect-by-address.md)).
+
+- **`kito connect kito.example.com/shop`**: one address; `kito clone` is
+  the same command.
+- **Signing in in the browser**: with no token, Kito asks the server how
+  to sign in, lets you pick (or paste a token) and opens the page.
+- **Who the server is**: a public certificate needs no flag; a self-made
+  one is shown once at the terminal, and kept when you say it is yours.
+
 ## [0.27.0]
 
 What agents are told is kept by Kito and shared, not part of the

@@ -199,6 +199,21 @@ pub fn connect(stream: TcpStream, host: &str, trust: &Trust) -> Result<Ends, Str
     Ok((Box::new(BufReader::new(shared.clone())), Box::new(shared)))
 }
 
+/// `true` if the server at `host` presents a certificate that a public
+/// authority vouches for, for that name.
+pub fn vouched(stream: TcpStream, host: &str) -> bool {
+    let Ok((mut connection, _)) = session(host, &Trust::Authority) else { return false };
+    let mut stream = stream;
+    while connection.is_handshaking() {
+        if connection.complete_io(&mut stream).is_err() {
+            return false;
+        }
+    }
+    connection.send_close_notify();
+    let _ = connection.complete_io(&mut stream);
+    true
+}
+
 /// The fingerprint of the certificate the server at `host` presents,
 /// whatever it is: to show it, or to keep it for a server on this machine.
 pub fn presented(stream: TcpStream, host: &str) -> Result<String, String> {

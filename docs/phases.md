@@ -2605,6 +2605,34 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 27 · connecting by one address — done
+
+Connecting needed the server, the repository, a token or a way to sign
+in, and a fingerprint. The person asked for `kito connect <url of repo>`
+with the browser opening by itself, and `kito clone`. Released as 0.28.0
+([ADR 0013](adr/0013-connect-by-address.md), D-167).
+
+### What is there
+
+- `kito connect kito.example.com/shop` (`kito://host:port/shop`; 7421
+  by default), and `kito clone`, the same command.
+- No token given: the server says how to sign in; at a terminal the
+  person picks, or pastes a token; the browser opens on the page.
+- A self-made certificate of another machine is shown and asked about
+  at a terminal; a public one is known by its name without a flag.
+
+### How it was tested
+
+- Unit tests of the address forms.
+- `kito-cli/tests/cli.rs`: `kito clone kito://<server>/shop` with no
+  token and no `--sign-in`, signed in the only way the server offers.
+
+### Known limitations
+
+- **The questions at a terminal and the browser are not tested** by the
+  suite: they need a terminal. With nobody there, nothing changed.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 26 · instructions as metadata — done
 
 What agents were told lived in `CLAUDE.md` and `AGENTS.md`, recorded and

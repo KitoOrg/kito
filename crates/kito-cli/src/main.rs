@@ -343,13 +343,20 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Connect a directory to a repository kept by a Kito server
+    /// Connect a directory to a repository kept by a Kito server:
+    /// `kito connect kito.example.com/shop`
+    #[command(visible_alias = "clone")]
     Connect {
-        /// The server: host:port, or ssh://user@host/path/of/the/server
+        /// The repository's address: host[:port]/repository (or
+        /// kito://host[:port]/repository; the port is 7421 when none is
+        /// said). Also the server alone, then the repository: host:port
+        /// shop, ssh://user@host/path/of/the/server shop
+        #[arg(value_name = "ADDRESS")]
         server: String,
-        /// The repository on the server
+        /// The repository, when the address is of the server alone; else
+        /// the directory
         #[arg(value_name = "REPO")]
-        name: String,
+        name: Option<String>,
         /// The directory to connect (default: a new one named as the repository)
         dir: Option<PathBuf>,
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
@@ -2863,19 +2870,171 @@ fn remote_for(
             ..Remote::default()
         });
     }
-    let token = token
-        .clone()
-        .or_else(|| std::env::var("KITO_TOKEN").ok())
-        .filter(|token| !token.trim().is_empty())
-        .ok_or(
-            "a server reached as host:port wants a token (--token, or $KITO_TOKEN), or --sign-in <method>",
-        )?;
-    Ok(Remote {
-        server: Some(server.to_owned()),
-        repo: repo.to_owned(),
-        token: Some(token),
-        ..Remote::default()
-    })
+    // None: asked of the server once it is known to be the one meant
+    // (`signed_in`).
+    let token =
+        token.clone().or_else(|| std::env::var("KITO_TOKEN").ok()).filter(|token| !token.trim().is_empty());
+    Ok(Remote { server: Some(server.to_owned()), repo: repo.to_owned(), token, ..Remote::default() })
+}
+
+/// The port of a Kito server when an address says none.
+const DEFAULT_PORT: u16 = 7421;
+
+/// What `kito connect` was given, as the server, the repository and the
+/// directory: one address (`kito.example.com/shop`,
+/// `kito://host:port/shop`), or the server and then the repository.
+fn address_of(
+    given: &str,
+    second: Option<&str>,
+    dir: Option<PathBuf>,
+) -> Result<(String, String, Option<PathBuf>), String> {
+    let plain = given.strip_prefix("kito://").unwrap_or(given);
+    let one_address = !given.starts_with("ssh://") && plain.contains('/');
+    if !one_address {
+        let repo = second.ok_or_else(|| {
+            format!("say the repository too: `kito connect {given}/<repository>`, or `kito connect {given} <repository>`")
+        })?;
+        return Ok((given.to_owned(), repo.to_owned(), dir));
+    }
+    if given.starts_with("http://") || given.starts_with("https://") {
+        return Err(format!(
+            "{given} is the address of a web page: give the server's own, as `kito connect host[:port]/<repository>`"
+        ));
+    }
+    if dir.is_some() {
+        return Err("an address names the repository already: give only the directory after it".into());
+    }
+    let (host, repo) = plain.trim_end_matches('/').split_once('/').unwrap_or((plain, ""));
+    if host.is_empty() || repo.is_empty() || repo.contains('/') {
+        return Err(format!("{given}: an address is host[:port]/<repository>"));
+    }
+    // A port said, or not: `[::1]:7421`, `host:7421`, `host`.
+    let has_port = host.rsplit_once(':').is_some_and(|(before, port)| {
+        port.parse::<u16>().is_ok() && (!before.contains(':') || before.ends_with(']'))
+    });
+    let server = match has_port {
+        true => host.to_owned(),
+        false => format!("{host}:{DEFAULT_PORT}"),
+    };
+    Ok((server, repo.to_owned(), second.map(PathBuf::from)))
+}
+
+/// Opens a page in the person's browser, when somebody is there to see it.
+/// Answers whether it was opened.
+fn open_in_browser(url: &str) -> bool {
+    if std::env::var_os("KITO_NO_BROWSER").is_some_and(|value| !value.is_empty()) || !assistants::can_ask() {
+        return false;
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return false;
+    }
+    let quiet = |program: &str, args: &[&str]| {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    if let Some(browser) = std::env::var_os("BROWSER").filter(|browser| !browser.is_empty()) {
+        return quiet(&browser.to_string_lossy(), &[url]);
+    }
+    if cfg!(target_os = "macos") {
+        return quiet("open", &[url]);
+    }
+    if cfg!(windows) {
+        return quiet("cmd", &["/C", "start", "", url]);
+    }
+    let wsl =
+        std::fs::read_to_string("/proc/version").is_ok_and(|text| text.to_lowercase().contains("microsoft"));
+    (wsl && (quiet("wslview", &[url]) || quiet("cmd.exe", &["/C", "start", "", url])))
+        || quiet("xdg-open", &[url])
+}
+
+/// Reads what is typed at the terminal without showing it.
+fn read_secret(prompt: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    let tty = std::fs::File::open("/dev/tty").ok();
+    #[cfg(unix)]
+    let stty = |arg: &str| {
+        if let Some(tty) = tty.as_ref().and_then(|tty| tty.try_clone().ok()) {
+            let _ = std::process::Command::new("stty").arg(arg).stdin(tty).status();
+        }
+    };
+    #[cfg(unix)]
+    stty("-echo");
+    let mut line = String::new();
+    let read = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line);
+    #[cfg(unix)]
+    stty("echo");
+    eprintln!();
+    read.map_err(|e| e.to_string())?;
+    Ok(line.trim().to_owned())
+}
+
+/// The remote with who the person is: the token given, a way to sign in
+/// the server offers (the only one, or the one chosen at the terminal),
+/// or a token pasted at the terminal.
+fn signed_in(remote: Remote, sign_in: &Option<String>) -> Result<Remote, String> {
+    if let Some(method) = sign_in {
+        return sign_in_to(remote, method).map(|(remote, _)| remote);
+    }
+    if remote.server.is_none() || remote.token.is_some() {
+        return Ok(remote);
+    }
+    let ways = Client::sign_in_methods(&remote).map_err(fail)?;
+    let asking = assistants::can_ask();
+    let paste = |mut remote: Remote| -> Result<Remote, String> {
+        let token = read_secret("Paste the token the server gave you (`kito-server user add` prints it): ")?;
+        if token.is_empty() {
+            return Err("no token was given: nothing is connected".into());
+        }
+        remote.token = Some(token);
+        Ok(remote)
+    };
+    match ways.as_slice() {
+        [] if asking => paste(remote),
+        [] => Err(format!(
+            "{} wants a token (--token, or $KITO_TOKEN): it offers no way to sign in in a browser",
+            remote.place()
+        )),
+        [(method, _)] if !asking => sign_in_to(remote, method).map(|(remote, _)| remote),
+        _ if !asking => {
+            let names: Vec<&str> = ways.iter().map(|(method, _)| method.as_str()).collect();
+            Err(format!(
+                "{} offers more than one way to sign in: say which with --sign-in ({}), or give --token",
+                remote.place(),
+                names.join(", ")
+            ))
+        }
+        _ => {
+            eprintln!("How do you want to sign in to {}?", remote.place());
+            for (n, (method, about)) in ways.iter().enumerate() {
+                let about = if about.is_empty() { format!("with {method}") } else { about.clone() };
+                eprintln!("  {}. {about}, in your browser", n + 1);
+            }
+            eprintln!("  {}. Paste a token", ways.len() + 1);
+            eprint!("[1] ");
+            let mut answer = String::new();
+            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)
+                .map_err(|e| e.to_string())?;
+            let chosen = match answer.trim() {
+                "" => 1,
+                number => number.parse::<usize>().map_err(|_| format!("`{number}` is none of them"))?,
+            };
+            match chosen {
+                n if (1..=ways.len()).contains(&n) => {
+                    sign_in_to(remote, &ways[n - 1].0).map(|(remote, _)| remote)
+                }
+                n if n == ways.len() + 1 => paste(remote),
+                n => Err(format!("`{n}` is none of them")),
+            }
+        }
+    }
 }
 
 /// Says how the server is known to be the one meant, before anything is
@@ -2908,6 +3067,31 @@ fn trusted(
         remote.fingerprint = Some(presented);
         return Ok(remote);
     }
+    // Vouched for by a public authority, for its name: known by it.
+    let vouched = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(10))
+        .is_ok_and(|stream| {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            kitod::tls::vouched(stream, &host)
+        });
+    if vouched {
+        remote.authority = true;
+        return Ok(remote);
+    }
+    // Asked once, as ssh does, and kept from then on.
+    if assistants::can_ask() {
+        eprintln!(
+            "{} has a certificate of its own, with fingerprint\n  {presented}\nCompare it with what              `kito-server fingerprint` prints on the server.",
+            remote.place()
+        );
+        eprint!("Is it the server you mean? [y/N] ");
+        let mut answer = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer);
+        if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            remote.fingerprint = Some(presented);
+            return Ok(remote);
+        }
+        return Err("nothing was sent to it, and nothing is connected".into());
+    }
     Err(format!(
         "{} is on another machine, and nothing says it is the server you mean. It presents a certificate \
          with fingerprint\n  {presented}\nIf that is what `kito-server fingerprint` prints on the server, \
@@ -2922,9 +3106,13 @@ fn trusted(
 /// enter is said on standard error: what a command prints stays its own.
 fn sign_in_to(mut remote: Remote, method: &str) -> Result<(Remote, Value), String> {
     let mut tell = |how: &Value| {
-        eprintln!("To sign in with {method}, open {}", how["open"].as_str().unwrap_or("?"));
+        let page = how["open"].as_str().unwrap_or("?");
+        eprintln!("To sign in with {method}, open {page}");
         if let Some(code) = how["code"].as_str() {
             eprintln!("and enter the code {code}");
+        }
+        if open_in_browser(page) {
+            eprintln!("(opened in your browser)");
         }
         eprintln!("Waiting until you have...");
     };
@@ -4140,16 +4328,12 @@ fn run() -> ExitCode {
         } => {
             let chosen = Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants };
             // Who the server is comes first: nobody signs in to another.
-            let how = remote_for(server, name, token, sign_in)
-                .and_then(|remote| trusted(remote, fingerprint, *authority, *plain))
-                .and_then(|remote| match sign_in {
-                    Some(method) => sign_in_to(remote, method).map(|(remote, _)| remote),
-                    None => Ok(remote),
-                });
-            match how {
-                Ok(remote) => cmd_connect(&cli, remote, name, dir, &chosen),
-                Err(e) => Err(e),
-            }
+            address_of(server, name.as_deref(), dir.clone()).and_then(|(server, name, dir)| {
+                remote_for(&server, &name, token, sign_in)
+                    .and_then(|remote| trusted(remote, fingerprint, *authority, *plain))
+                    .and_then(|remote| signed_in(remote, sign_in))
+                    .and_then(|remote| cmd_connect(&cli, remote, &name, &dir, &chosen))
+            })
         }
         Cmd::SignIn { method } => cmd_sign_in(&cli, method),
         Cmd::Repos => cmd_repos(&cli),
@@ -4213,6 +4397,19 @@ mod tests {
         assert_eq!((ssh.server, ssh.token, ssh.repo.as_str()), (None, None, "shop"));
         assert!(remote_for("ssh://ada@host", "shop", &None, &None).is_err());
         // Signing in is for a server reached as host:port, and wants no token.
+        let address = |given: &str, second: Option<&str>| super::address_of(given, second, None);
+        assert_eq!(address("kito.example.com/shop", None).unwrap().0, "kito.example.com:7421");
+        assert_eq!(
+            address("kito://kito.example.com:9000/shop/", None).unwrap(),
+            ("kito.example.com:9000".into(), "shop".into(), None)
+        );
+        assert_eq!(address("[::1]:7421/shop", None).unwrap().0, "[::1]:7421");
+        assert_eq!(address("host/shop", Some("here")).unwrap().2, Some(std::path::PathBuf::from("here")));
+        assert_eq!(address("host:7421", Some("shop")).unwrap(), ("host:7421".into(), "shop".into(), None));
+        assert_eq!(address("ssh://ada@host/srv/kito", Some("shop")).unwrap().1, "shop");
+        assert!(address("host:7421", None).unwrap_err().contains("say the repository too"));
+        assert!(address("https://kito.example.com/shop", None).unwrap_err().contains("web page"));
+        assert!(address("host/a/b", None).is_err() && address("/shop", None).is_err());
         let signs = remote_for("kito.example.com:7421", "shop", &None, &Some("github".into())).unwrap();
         assert_eq!((signs.token, signs.sign_in.as_deref()), (None, Some("github")));
         assert!(remote_for("ssh://ada@host/srv/kito", "shop", &None, &Some("github".into())).is_err());
