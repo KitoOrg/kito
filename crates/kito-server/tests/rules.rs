@@ -128,8 +128,11 @@ impl World {
         git(&source, &["add", "-A"]);
         git(&source, &["commit", "-q", "-m", "start"]);
         ok(&dir, &["repo", "add", "shop", "--from", source.to_str().unwrap()]);
-        let ada = token_in(&ok(&dir, &["user", "add", "ada", "--email", "ada@example.com"]));
-        let bob = token_in(&ok(&dir, &["user", "add", "bob", "--role", "write"]));
+        let ada = token_in(&ok(
+            &dir,
+            &["user", "add", "ada", "--email", "ada@example.com", "--repo", "shop:integrate"],
+        ));
+        let bob = token_in(&ok(&dir, &["user", "add", "bob", "--repo", "shop:write"]));
         let mut world = World {
             _tmp: tmp,
             base,
@@ -260,10 +263,13 @@ fn events(dir: &Path) -> String {
 #[test]
 fn who_may_read_who_may_write_and_who_may_integrate() {
     let mut world = World::new();
-    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--role", "read"]));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:read"]));
     let users = ok(&world.dir, &["user", "list"]);
-    assert!(users.contains("ada <ada@example.com>: * (integrate)"), "{users}");
-    assert!(users.contains("bob: * (write)") && users.contains("carol: * (read)"), "{users}");
+    assert!(users.contains("ada <ada@example.com> (member): shop (integrate)"), "{users}");
+    assert!(
+        users.contains("bob (member): shop (write)") && users.contains("carol (member): shop (read)"),
+        "{users}"
+    );
     let (ada, bob) = (world.ada.clone(), world.bob.clone());
     let (ada, bob, carol) =
         (desk(&mut world, "ada", &ada), desk(&mut world, "bob", &bob), desk(&mut world, "carol", &carol));
@@ -309,7 +315,7 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
 
     // A lane is its owner's: another writer does not close it or speak
     // for it. Somebody who may integrate decides for any lane.
-    let dave = token_in(&ok(&world.dir, &["user", "add", "dave", "--role", "write"]));
+    let dave = token_in(&ok(&world.dir, &["user", "add", "dave", "--repo", "shop:write"]));
     let dave = desk(&mut world, "dave", &dave);
     for (method, params) in [
         ("close_lane", json!({ "lane": "1" })),
@@ -355,8 +361,8 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
 
     // What a person may do can change, for one repository too: it holds
     // for the connections made from then on.
-    ok(&world.dir, &["user", "role", "bob", "integrate", "--repo", "shop"]);
-    assert!(ok(&world.dir, &["user", "list"]).contains("bob: * (write), shop (integrate)"));
+    ok(&world.dir, &["grant", "bob", "shop", "integrate"]);
+    assert!(ok(&world.dir, &["user", "list"]).contains("bob (member): shop (integrate)"));
     call(&bob, "shutdown", json!({}));
     wait_for("bob's daemon to stop", || Client::connect(&bob).is_err());
     write(&work, "README.md", "# Shop\n\nPrices are in cents.\n");
@@ -367,7 +373,7 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
 #[test]
 fn the_checks_run_on_the_server_and_a_failing_one_stops_a_lane() {
     let mut world = World::new();
-    // No client can change them: they are set where the repository is.
+    // Only a maintainer changes them from a client; on the server's machine, anybody.
     let said = ok(
         &world.dir,
         &["repo", "set", "shop", "--check", "! grep -rq FIXME src", "--check", "test -f README.md"],
@@ -377,7 +383,10 @@ fn the_checks_run_on_the_server_and_a_failing_one_stops_a_lane() {
     let (ada, bob) = (world.ada.clone(), world.bob.clone());
     let (ada, bob) = (desk(&mut world, "ada", &ada), desk(&mut world, "bob", &bob));
     let said = refused(&ada, "configure", json!({ "checks": [] }));
-    assert!(said.contains("not something a client can ask"), "{said}");
+    assert!(
+        said.contains("only a maintainer of this repository may `configure`: ada may integrate"),
+        "{said}"
+    );
 
     // A lane that fails a check goes nowhere, whoever asks: not into the
     // main lane, and not into the queue of those that wait for approval.
@@ -566,8 +575,8 @@ fn a_lane_is_reviewed_on_the_server_and_then_somebody_integrates_it() {
     let said = ok(&world.dir, &["repo", "set", "shop", "--approvals", "1"]);
     assert!(said.contains("1 approval"), "{said}");
     assert!(ok(&world.dir, &["repo", "list"]).contains("1 approval"));
-    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--role", "write"]));
-    let dave = token_in(&ok(&world.dir, &["user", "add", "dave", "--role", "read"]));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:write"]));
+    let dave = token_in(&ok(&world.dir, &["user", "add", "dave", "--repo", "shop:read"]));
     let (ada, bob) = (world.ada.clone(), world.bob.clone());
     let (ada, bob) = (desk(&mut world, "ada", &ada), desk(&mut world, "bob", &bob));
     let (carol, dave) = (desk(&mut world, "carol", &carol), desk(&mut world, "dave", &dave));

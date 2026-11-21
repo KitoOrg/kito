@@ -1574,7 +1574,7 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     git(&src, &["commit", "-q", "-m", "start"]);
     run(&["init", serverdir.to_str().unwrap()]);
     run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
-    let token = run(&["user", "add", "ada"]);
+    let token = run(&["user", "add", "ada", "--repo", "shop:integrate"]);
     let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
     /// The server, stopped when the test ends, however it ends.
     struct Serving(std::process::Child);
@@ -1777,7 +1777,7 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
 
     // The rules of a team. Bob may write and not integrate: his lane is
     // merged and checked, and waits for ada, who may.
-    let bob = run(&["user", "add", "bob", "--role", "write"]);
+    let bob = run(&["user", "add", "bob", "--repo", "shop:write"]);
     let bob = bob.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
     ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob]);
     let bobdir = base.join("bob-dir");
@@ -2398,7 +2398,7 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     let plugin = hello_plugin(&base, SIGNS);
     run(&["plugin", "add", "--path", plugin.to_str().unwrap()]);
     run(&["plugin", "enable", "hello"]);
-    run(&["user", "add", "bob", "--identity", "hello:bob"]);
+    run(&["user", "add", "bob", "--identity", "hello:bob", "--repo", "shop:integrate"]);
     struct Serving(std::process::Child);
     impl Drop for Serving {
         fn drop(&mut self) {
@@ -2527,7 +2527,7 @@ fn a_directory_connected_to_a_server_runs_the_plugins_the_server_lets_it() {
     run(&["plugin", "add", "--path", plugin.to_str().unwrap()]);
     // Enabled for the server alone, it runs nowhere else.
     run(&["plugin", "enable", "hello"]);
-    let token = run(&["user", "add", "ada"]);
+    let token = run(&["user", "add", "ada", "--repo", "shop:integrate"]);
     let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
     struct Serving(std::process::Child);
     impl Drop for Serving {

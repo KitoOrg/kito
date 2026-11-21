@@ -116,8 +116,21 @@ impl World {
         let site = source(&base, "site-src", "src/index.ts", "export const title = \"site\";\n");
         ok(&dir, &["repo", "add", "shop", "--from", shop.to_str().unwrap()]);
         ok(&dir, &["repo", "add", "site", "--from", site.to_str().unwrap()]);
-        let ada = token_in(&ok(&dir, &["user", "add", "ada", "--email", "ada@example.com"]));
-        let bob = token_in(&ok(&dir, &["user", "add", "bob", "--repo", "shop"]));
+        let ada = token_in(&ok(
+            &dir,
+            &[
+                "user",
+                "add",
+                "ada",
+                "--email",
+                "ada@example.com",
+                "--repo",
+                "shop:integrate",
+                "--repo",
+                "site:integrate",
+            ],
+        ));
+        let bob = token_in(&ok(&dir, &["user", "add", "bob", "--repo", "shop:integrate"]));
         World { _tmp: tmp, dir, ada, bob, serving: None, said: String::new() }
     }
 
@@ -200,7 +213,11 @@ fn people_repositories_and_tokens() {
         "shop  [main protected, no checks]\nsite  [main protected, no checks]\n"
     );
     let users = ok(&world.dir, &["user", "list"]);
-    assert!(users.contains("ada <ada@example.com>: *") && users.contains("bob: shop"), "{users}");
+    assert!(
+        users.contains("ada <ada@example.com> (member): shop (integrate), site (integrate)")
+            && users.contains("bob (member): shop (integrate)"),
+        "{users}"
+    );
     // The history of the git repository came along.
     assert!(world.repo("shop").join("src/shop.ts").is_file());
 
@@ -411,7 +428,7 @@ fn a_person_added_while_the_server_runs_is_known_at_once() {
     let address = world.serve();
     assert!(refusal(Client::remote(&remote(&address, "kito_not_yet", "shop"), true))
         .contains("not one the server knows"));
-    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "site"]));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "site:integrate"]));
     let mut client = connect(&address, &carol, "site");
     let me: Value = client.call("server.whoami", json!({})).unwrap();
     assert_eq!(me["user"], "carol");
@@ -532,7 +549,7 @@ fn what_agents_are_told_is_the_server_s_and_its_kitchen_comes_first() {
         server(&world.dir, &["repo", "set", "shop", "--kitchen", "nowhere"]).output().unwrap().status.code()
             != Some(0)
     );
-    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop", "--role", "read"]));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:read"]));
 
     let address = world.serve();
     let mut ada = connect(&address, &world.ada, "shop");
@@ -576,4 +593,95 @@ fn what_agents_are_told_is_the_server_s_and_its_kitchen_comes_first() {
     assert!(!world.repo("shop").join("instructions").exists());
     let bad = bob.call_value("instructions_set", json!({ "name": "../../etc/x", "text": "no" }));
     assert!(bad.unwrap_err().to_string().contains("is not the name of an instruction"));
+}
+
+#[test]
+fn a_person_has_a_role_in_each_repository_and_one_on_the_server() {
+    let mut world = World::new();
+    let dave = token_in(&ok(&world.dir, &["user", "add", "dave"]));
+    let added = ok(&world.dir, &["user", "add", "erin", "--repo", "shop:maintain"]);
+    let erin = token_in(&added);
+    assert!(added.contains("kito connect <host>:<port>/shop --token"), "{added}");
+    let wrong = server(&world.dir, &["user", "add", "frank", "--role", "write"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("`write` is a role in a repository"));
+    let address = world.serve();
+
+    // A member given nothing may use nothing.
+    let none = refusal(Client::remote(&remote(&address, &dave, "shop"), true));
+    assert!(none.contains("there is no repository `shop` for dave"), "{none}");
+
+    // A maintainer says who uses the repository, and changes its rules.
+    let mut maintainer = connect(&address, &erin, "shop");
+    let members = maintainer.call_value("server.members", json!({})).unwrap();
+    let roles: Vec<(String, String)> = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["user"].as_str().unwrap().to_owned(), m["role"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            ("ada".into(), "integrate".into()),
+            ("bob".into(), "integrate".into()),
+            ("erin".into(), "maintain".into())
+        ]
+    );
+    let granted = maintainer.call_value("server.grant", json!({ "user": "dave", "role": "read" })).unwrap();
+    assert_eq!(granted["changed"], true);
+    let mut reader = connect(&address, &dave, "shop");
+    let no = reader.call_value("server.grant", json!({ "user": "dave", "role": "maintain" })).unwrap_err();
+    assert!(no.to_string().contains("only a maintainer of `shop`"), "{no}");
+    let rules = maintainer.call_value("configure", json!({ "approvals": 1 })).unwrap();
+    assert_eq!(rules["approvals"], 1);
+    let mut integrator = connect(&address, &world.bob, "shop");
+    let no = integrator.call_value("configure", json!({ "approvals": 0 })).unwrap_err();
+    assert!(no
+        .to_string()
+        .contains("only a maintainer of this repository may `configure`: bob may integrate"));
+    // Given in one repository, nothing in another.
+    assert!(refusal(Client::remote(&remote(&address, &erin, "site"), true)).contains("no repository `site`"));
+    maintainer.call_value("server.grant", json!({ "user": "dave" })).unwrap();
+    assert!(refusal(Client::remote(&remote(&address, &dave, "shop"), true)).contains("no repository"));
+
+    // The server's people are for its admins; admins and owners for its owners.
+    let no = maintainer.call_value("server.people", json!({})).unwrap_err();
+    assert!(no.to_string().contains("only an admin of this server"), "{no}");
+    ok(&world.dir, &["user", "role", "erin", "admin"]);
+    let mut admin = connect(&address, &erin, "site");
+    let people = admin.call_value("server.people", json!({})).unwrap();
+    assert_eq!(people.as_array().unwrap().len(), 4);
+    let frank = admin.call_value("server.people_add", json!({ "user": "frank" })).unwrap();
+    assert!(frank["token"].as_str().unwrap().starts_with("kito_"));
+    let no = admin.call_value("server.people_add", json!({ "user": "gus", "role": "admin" })).unwrap_err();
+    assert!(no.to_string().contains("only an owner"), "{no}");
+    let no = admin.call_value("server.people_role", json!({ "user": "ada", "role": "owner" })).unwrap_err();
+    assert!(no.to_string().contains("only an owner"), "{no}");
+    admin.call_value("server.people_remove", json!({ "user": "frank" })).unwrap();
+    ok(&world.dir, &["user", "role", "erin", "owner"]);
+    let mut owner = connect(&address, &erin, "site");
+    owner.call_value("server.people_role", json!({ "user": "ada", "role": "admin" })).unwrap();
+    let list = ok(&world.dir, &["user", "list"]);
+    assert!(
+        list.contains(
+            "ada <ada@example.com> (admin): every repository; given shop (integrate), site (integrate)"
+        ),
+        "{list}"
+    );
+    assert!(list.contains("dave (member): no repository"), "{list}");
+}
+
+#[test]
+fn a_server_written_before_roles_per_repository_is_read_as_it_was_meant() {
+    let world = World::new();
+    let path = world.dir.join("server.toml");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\n[users.old]\ntoken = \"x\"\nrepos = [\"*\"]\nrole = \"write\"\nroles = { site = \"read\" }\nadmin = true\n");
+    text.push_str("\n[users.few]\ntoken = \"y\"\nrepos = [\"shop\"]\n");
+    fs::write(&path, text).unwrap();
+    let list = ok(&world.dir, &["user", "list"]);
+    assert!(list.contains("old (admin): every repository; given shop (write), site (read)"), "{list}");
+    assert!(list.contains("few (member): shop (integrate)"), "{list}");
+    let kept = fs::read_to_string(&path).unwrap();
+    assert!(!kept.contains("repos =") && kept.contains("server_role = \"admin\""), "{kept}");
 }

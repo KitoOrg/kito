@@ -31,7 +31,7 @@ mod tls;
 use clap::{Parser, Subcommand};
 use kitod::client::Client;
 use serde_json::{json, Value};
-use state::{Role, Server, User};
+use state::{Role, Server, ServerRole, User};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -117,6 +117,16 @@ enum Cmd {
         #[command(subcommand)]
         command: UserCmd,
     },
+    /// Let a person use a repository, as read, write, integrate or
+    /// maintain (ADR 0014); again to change it
+    Grant {
+        name: String,
+        repo: String,
+        /// read, write, integrate, maintain
+        role: String,
+    },
+    /// Take a repository away from a person
+    Revoke { name: String, repo: String },
     /// Print the fingerprint of the server's certificate: what clients
     /// connect with (`kito connect ... --fingerprint`)
     Fingerprint,
@@ -205,36 +215,22 @@ enum UserCmd {
         name: String,
         #[arg(long)]
         email: Option<String>,
-        /// A repository the person may use; once per repository (default: all)
-        #[arg(long = "repo", value_name = "NAME")]
+        /// A repository they may use, and as what: shop (write),
+        /// shop:read, shop:integrate, shop:maintain. Again for more
+        #[arg(long = "repo", value_name = "REPO[:ROLE]")]
         repos: Vec<String>,
-        /// What they may do: read (see and follow), write (open lanes and
-        /// work in them; their integrations wait for approval), integrate
-        #[arg(long, value_enum, default_value = "integrate")]
-        role: Role,
+        /// Their role on the server: member (the repositories given),
+        /// admin (every repository, and the people), owner
+        #[arg(long, default_value = "member")]
+        role: String,
         /// Who they are for a plugin that signs people in, as
         /// <method>:<login> (github:bob): they sign in, and have no token
         #[arg(long, value_name = "METHOD:LOGIN")]
         identity: Option<String>,
     },
-    /// Change what a person may do: everywhere, or in one repository
-    Role {
-        name: String,
-        #[arg(value_enum)]
-        role: Role,
-        /// Only in this repository
-        #[arg(long, value_name = "NAME")]
-        repo: Option<String>,
-    },
-    /// Let a person change the server itself from a browser: install,
-    /// enable, disable and remove its plugins. Nobody may unless said here
-    Admin {
-        name: String,
-        /// They no longer may
-        #[arg(long)]
-        off: bool,
-    },
-    /// List the people, the repositories each may use and what they may do
+    /// Change a person's role on the server: member, admin, owner
+    Role { name: String, role: String },
+    /// List the people, their role on the server, and what they may do where
     List,
     /// Remove a person: their token stops working
     Remove { name: String },
@@ -576,11 +572,23 @@ fn run(cli: &Cli) -> Result<(), String> {
             // Who that is, asked of the plugin now: what is kept does not
             // change when they rename themselves there.
             let identity = identity.as_deref().map(|identity| server.look_up(identity)).transpose()?;
-            let token = server.add_user(name, email.clone(), repos, *role, identity.as_ref())?;
+            let role = ServerRole::of_word(role)?;
+            let access = repos
+                .iter()
+                .map(|given| match given.split_once(':') {
+                    Some((repo, role)) => Role::of_word(role).map(|role| (repo.to_owned(), role)),
+                    None => Ok((given.clone(), Role::Write)),
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let token = server.add_user(name, email.clone(), &access, role, identity.as_ref())?;
             server.tell(
                 "user_added",
                 json!({ "user": name, "role": role.word(), "what": format!("{name} ({})", role.word()) }),
             );
+            let first = access.first().map(|(repo, _)| repo.as_str()).unwrap_or("<repository>");
+            if access.is_empty() && role == ServerRole::Member {
+                println!("{name} may use no repository yet: `kito-server grant {name} <repository> <role>`.");
+            }
             if let Some(token) = &token {
                 println!("{name} added. Their token, shown this once:");
                 println!("{token}");
@@ -588,7 +596,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 // server they reach is this one.
                 println!("They connect with:");
                 println!(
-                    "  kito connect <host>:<port>/<repository> --token {token} --fingerprint {}",
+                    "  kito connect <host>:<port>/{first} --token {token} --fingerprint {}",
                     tls::fingerprint(&server.dir)?
                 );
             } else if let Some(identity) = &identity {
@@ -599,38 +607,57 @@ fn run(cli: &Cli) -> Result<(), String> {
                 );
                 println!("They connect with:");
                 println!(
-                    "  kito connect <host>:<port>/<repository> --sign-in {method} --fingerprint {}",
+                    "  kito connect <host>:<port>/{first} --sign-in {method} --fingerprint {}",
                     tls::fingerprint(&server.dir)?
                 );
             }
         }
-        Cmd::User { command: UserCmd::Role { name, role, repo } } => {
+        Cmd::User { command: UserCmd::Role { name, role } } => {
             let mut server = Server::open(&dir_of(cli))?;
-            server.set_role(name, *role, repo.as_deref())?;
-            let place = repo.as_ref().map(|repo| format!(" in {repo}")).unwrap_or_default();
+            let role = ServerRole::of_word(role)?;
+            server.set_server_role(name, role)?;
             server.tell(
                 "role_changed",
-                json!({ "user": name, "role": role.word(), "repo": repo, "what": format!("{name}: {}{place}", role.word()) }),
+                json!({ "user": name, "server_role": role.word(), "what": format!("{name}: {}", role.word()) }),
             );
-            match repo {
-                Some(repo) => println!("{name} may {} in `{repo}`.", role.word()),
-                None => println!("{name} may {}.", role.word()),
+            match role {
+                ServerRole::Member => {
+                    println!("{name} is a member: the repositories given them, nothing else.")
+                }
+                ServerRole::Admin => println!(
+                    "{name} is an admin: every repository as maintain, its people, and the server's plugins."
+                ),
+                ServerRole::Owner => {
+                    println!("{name} is an owner: as an admin, and names admins and owners.")
+                }
             }
         }
-        Cmd::User { command: UserCmd::Admin { name, off } } => {
+        Cmd::Grant { name, repo, role } => {
             let mut server = Server::open(&dir_of(cli))?;
-            server.set_admin(name, !*off)?;
-            let what = if *off { "is no longer an administrator" } else { "is an administrator" };
-            server.tell(
-                "role_changed",
-                json!({ "user": name, "admin": !*off, "what": format!("{name} {what}") }),
-            );
-            match off {
-                false => println!(
-                    "{name} is an administrator of this server: they may install, enable, disable and remove \
-                     its plugins from a browser."
-                ),
-                true => println!("{name} is no longer an administrator of this server."),
+            let role = Role::of_word(role)?;
+            let changed = server.grant(name, repo, Some(role))?;
+            if changed {
+                server.tell(
+                    "role_changed",
+                    json!({ "user": name, "repo": repo, "role": role.word(), "what": format!("{name} may {} in {repo}", role.word()) }),
+                );
+            }
+            println!("{name} may {} in `{repo}`.", role.word());
+        }
+        Cmd::Revoke { name, repo } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            match server.grant(name, repo, None)? {
+                true => {
+                    server.tell(
+                        "role_changed",
+                        json!({ "user": name, "repo": repo, "role": null, "what": format!("{name} may no longer use {repo}") }),
+                    );
+                    println!("{name} may no longer use `{repo}`.");
+                }
+                false => println!("{name} was not given `{repo}`: nothing changed."),
+            }
+            if server.config.users.get(name.as_str()).is_some_and(|user| user.is_admin()) {
+                println!("As an admin of the server they still may use it.");
             }
         }
         Cmd::User { command: UserCmd::List } => {
@@ -640,19 +667,27 @@ fn run(cli: &Cli) -> Result<(), String> {
             }
             for (name, user) in &server.config.users {
                 let email = user.email.as_deref().map(|email| format!(" <{email}>")).unwrap_or_default();
-                // What they may do where: the repositories they may use,
-                // then the ones where it is something else.
-                let mut places: Vec<String> =
-                    user.repos.iter().map(|repo| format!("{repo} ({})", user.role_in(repo).word())).collect();
-                let named = user.roles.iter().filter(|(repo, _)| !user.repos.contains(*repo));
-                places.extend(named.map(|(repo, role)| format!("{repo} ({})", role.word())));
+                // What they may do where.
+                let places: Vec<String> =
+                    user.access.iter().map(|(repo, role)| format!("{repo} ({})", role.word())).collect();
+                let places = match (places.is_empty(), user.is_admin()) {
+                    (_, true) => vec![format!(
+                        "every repository{}",
+                        if places.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; given {}", places.join(", "))
+                        }
+                    )],
+                    (true, false) => vec!["no repository".to_owned()],
+                    (false, false) => places,
+                };
                 // Who they sign in as, by the login it had when added.
                 let signs = match user.logins.is_empty() {
                     true => String::new(),
                     false => format!(" [{}]", user.logins.join(", ")),
                 };
-                let admin = if user.admin { " (administrator)" } else { "" };
-                println!("{name}{email}{signs}{admin}: {}", places.join(", "));
+                println!("{name}{email}{signs} ({}): {}", user.server_role.word(), places.join(", "));
             }
         }
         Cmd::User { command: UserCmd::Remove { name } } => {

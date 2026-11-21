@@ -614,7 +614,7 @@ fn the_tools_reach_a_repository_kept_by_a_server() {
     }
     run(&["init", serverdir.to_str().unwrap()]);
     run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
-    let token = run(&["user", "add", "ada"]);
+    let token = run(&["user", "add", "ada", "--repo", "shop:integrate"]);
     let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
 
     /// The server, stopped when the test ends, however it ends.

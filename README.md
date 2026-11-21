@@ -586,7 +586,7 @@ People sign in through a plugin as well (`[sign_in]`): the plugin says
 who somebody is, the server says what they may do.
 
 ```console
-$ kito-server user add bob --identity github:bob --role write
+$ kito-server user add bob --identity github:bob --repo shop:write
 bob added: whoever signs in as github:bob is bob. No token.
 $ kito connect kito.example.com/shop
 To sign in with github, open https://github.com/login/device
@@ -635,8 +635,8 @@ $ kito plugin disable kitchen         # it takes out what it wrote here
 $ kito plugin remove kitchen
 ```
 
-On a server, the people its machine named administrators (`kito-server
-user admin <name>`) do the same from a browser (`/-/admin/plugins`, the
+On a server, its admins (`kito-server user role <name> admin`) do the
+same from a browser (`/-/admin/plugins`, the
 page is in `kito-web`): by name, from the server's registry, and nothing
 else. The registry at kito.sh lists nothing yet.
 
@@ -753,12 +753,12 @@ kito-server --dir /srv/kito repo add shop --from /path/to/a/git/repository
 ```
 
 ```bash
-kito-server --dir /srv/kito user add ada --email ada@example.com
+kito-server --dir /srv/kito user add ada --email ada@example.com --repo shop:integrate
 ```
 
 `user add` prints the person's token once; the server keeps only what it
-hashes to. `--repo <name>` limits a person to some repositories, and
-`--role` says what they may do there (see "The rules of a team").
+hashes to. `--repo shop:<role>` gives a repository, and `--role` says the
+person's role on the server (see "The rules of a team").
 
 ```bash
 kito-server --dir /srv/kito serve
@@ -888,16 +888,41 @@ kito-server --dir /srv/kito repo set shop --check "npm test" --push origin
 kito-server --dir /srv/kito repo list
 ```
 
-People have roles. `read` sees and follows; `write` opens lanes and works
-in them; `integrate` brings lanes into the main lane:
+Each person has a role in each repository they may use, and nothing in
+the others:
+
+| Role in a repository | What it lets a person do |
+| --- | --- |
+| `read` | See lanes and follow them |
+| `write` | Open lanes and work in them; their integrations wait |
+| `integrate` | Bring lanes into the main lane |
+| `maintain` | Change the repository's rules, and say who uses it |
+
+And a role on the server: `member` (the repositories given them), `admin`
+(every repository as `maintain`, the people, the server's plugins) or
+`owner` (as an admin, and names admins and owners).
 
 ```bash
-kito-server --dir /srv/kito user add bob --role write
+kito-server --dir /srv/kito user add bob --repo shop:write    # --repo shop alone is write
+kito-server --dir /srv/kito grant bob shop integrate          # again to change it
+kito-server --dir /srv/kito revoke bob shop
+kito-server --dir /srv/kito user role ada admin               # member, admin, owner
 ```
 
+From a directory connected to the repository:
+
 ```bash
-kito-server --dir /srv/kito user role bob integrate --repo shop
+kito members                 # who may use it, and as what
+kito grant bob write         # maintainers and admins
+kito revoke bob
+kito people                  # admins: everybody on the server
+kito people add carol        # prints the token once
+kito people role carol admin # owners
 ```
+
+A server written before 0.29 is read as it was meant: each repository a
+person had (`*`: every repository it has then) with the role they had in
+it, and its administrators as admins.
 
 When somebody who may write asks for a lane to be integrated, it is
 merged and checked as for anybody, so conflicts and failing checks come

@@ -117,8 +117,8 @@ impl Served {
         let mut repo = kitod::Repo::open(&shop).unwrap();
         repo.checkpoint("first version").unwrap();
         repo.close().unwrap();
-        let ada = token_in(&ok(&dir, &["user", "add", "ada"]));
-        let carol = token_in(&ok(&dir, &["user", "add", "carol", "--role", "read"]));
+        let ada = token_in(&ok(&dir, &["user", "add", "ada", "--repo", "shop:integrate"]));
+        let carol = token_in(&ok(&dir, &["user", "add", "carol", "--repo", "shop:read"]));
         setup(&dir);
         let mut child =
             server(&dir, &["serve", "--plain", "--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
@@ -416,10 +416,12 @@ fn somebody_signs_in_in_a_browser_as_who_a_plugin_says_they_are() {
         install_hello(dir, SIGNS);
         ok(dir, &["plugin", "enable", "hello"]);
         // Who the plugin says `bob` is, is bob here: no token is made.
-        let said = ok(dir, &["user", "add", "bob", "--identity", "hello:bob", "--role", "write"]);
+        let said = ok(dir, &["user", "add", "bob", "--identity", "hello:bob", "--repo", "shop:write"]);
         assert!(said.contains("whoever signs in as hello:bob is bob. No token."), "{said}");
         assert!(said.contains("--sign-in hello") && !said.contains("kito_"), "{said}");
-        assert!(ok(dir, &["user", "list"]).contains("bob <bob@hello.example> [hello:bob]: * (write)"));
+        assert!(
+            ok(dir, &["user", "list"]).contains("bob <bob@hello.example> [hello:bob] (member): shop (write)")
+        );
         // The plugin is asked who that is, and an identity is one person's.
         let unknown = server(dir, &["user", "add", "ghost", "--identity", "hello:nobody"]).output().unwrap();
         assert!(String::from_utf8_lossy(&unknown.stderr)
@@ -565,9 +567,9 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
         // The plugin that serves the pages is installed as `hello`: the one
         // of the registry replaces it later, so it is kept under its own name.
         registry_with_hello(dir);
-        let said = ok(dir, &["user", "admin", "ada"]);
-        assert!(said.contains("ada is an administrator of this server"), "{said}");
-        assert!(ok(dir, &["user", "list"]).contains("ada (administrator): * (integrate)"));
+        let said = ok(dir, &["user", "role", "ada", "admin"]);
+        assert!(said.contains("ada is an admin"), "{said}");
+        assert!(ok(dir, &["user", "list"]).contains("ada (admin): every repository"));
     });
     let session = |token: &str| {
         let opened = served.request("POST", "/-/session", &[], Some(&json!({ "token": token })));
@@ -666,6 +668,6 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
     assert!(ask(json!({ "action": "remove", "name": "hello" })).body.contains("is not installed"));
 
     // An administrator who is one no longer is refused at once.
-    ok(&served.dir, &["user", "admin", "ada", "--off"]);
+    ok(&served.dir, &["user", "role", "ada", "member"]);
     assert_eq!(served.request("GET", "/-/admin/plugins", &page, None).status, 403);
 }

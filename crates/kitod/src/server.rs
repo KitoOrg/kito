@@ -2255,5 +2255,5 @@ fn role_of(params: &Value) -> Option<&str> {
 /// `true` unless a server said the person may not integrate. On the
 /// machine of the repository whoever can reach it may.
 fn integrates(params: &Value) -> bool {
-    role_of(params).is_none_or(|role| role == "integrate")
+    role_of(params).is_none_or(|role| role == "integrate" || role == "maintain")
 }

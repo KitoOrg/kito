@@ -127,8 +127,11 @@ impl World {
         git(&source, &["add", "-A"]);
         git(&source, &["commit", "-q", "-m", "start"]);
         ok(&dir, &["repo", "add", "shop", "--from", source.to_str().unwrap()]);
-        let ada = token_in(&ok(&dir, &["user", "add", "ada", "--email", "ada@example.com"]));
-        let bob = token_in(&ok(&dir, &["user", "add", "bob"]));
+        let ada = token_in(&ok(
+            &dir,
+            &["user", "add", "ada", "--email", "ada@example.com", "--repo", "shop:integrate"],
+        ));
+        let bob = token_in(&ok(&dir, &["user", "add", "bob", "--repo", "shop:integrate"]));
         let mut world = World {
             _tmp: tmp,
             base,
@@ -664,7 +667,7 @@ fn an_agent_is_held_to_the_rules_from_a_connected_directory() {
 
     // Somebody who may only read may ask, and is answered: the main
     // directory is not theirs to edit either. What tells a lane is not for them.
-    ok(&world.dir, &["user", "role", "bob", "read"]);
+    ok(&world.dir, &["grant", "bob", "shop", "read"]);
     let desk = world.connect("desk", &bob);
     assert_eq!(call(&desk, "before_edit", json!({ "path": "README.md" }))["kind"], "main");
     let no = refused(&desk, "reasons_behind", json!({ "lane": "lane/1" }));

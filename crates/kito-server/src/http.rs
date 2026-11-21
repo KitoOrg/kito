@@ -11,7 +11,7 @@
 //! token, or for whoever a plugin that signs people in says they are
 //! (`/-/sign-in/<method>`).
 
-use crate::state::{identity_of, Server, ENV_SERVER_DIR, SESSION_PREFIX};
+use crate::state::{identity_of, Role, Server, ENV_SERVER_DIR, SESSION_PREFIX};
 use axum::body::Body;
 use axum::extract::{Path as Segment, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -166,9 +166,11 @@ async fn me(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
         .repos()
         .into_iter()
         .filter(|repo| who.user.may_use(repo))
-        .map(|repo| json!({ "name": repo, "role": who.user.role_in(&repo).word() }))
+        .map(|repo| json!({ "name": repo, "role": who.user.role_in(&repo).map(Role::word) }))
         .collect();
-    answered(json!({ "user": who.name, "email": who.user.email, "repos": repos, "admin": who.user.admin }))
+    answered(
+        json!({ "user": who.name, "email": who.user.email, "repos": repos, "admin": who.user.is_admin(), "role": who.user.server_role.word() }),
+    )
 }
 
 /// Who asks, if they are an administrator of the server and the request
@@ -186,7 +188,7 @@ fn administrator(
     if who.by_cookie && headers.get("x-kito").is_none() {
         return Err((StatusCode::FORBIDDEN, "not a request of a page of this server"));
     }
-    match who.user.admin {
+    match who.user.is_admin() {
         true => Ok(who),
         false => Err((
             StatusCode::FORBIDDEN,

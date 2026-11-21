@@ -1360,6 +1360,18 @@ terminal keeps scripts and agents where they were: with nobody to answer,
 nothing is trusted or chosen that was not said, except the one way to
 sign in a server offers, which is no choice.
 
+### D-168 · A role per repository, and three on the server
+A person has a role in each repository and none for everywhere, and
+`member`, `admin` or `owner` on the server
+([ADR 0014](adr/0014-roles.md)), because the person asked that
+permissions be per repository and the server have roles. `maintain` is
+the role that was missing: changing a repository's rules and its people
+was only possible on the server's machine. Admins may use every
+repository rather than be given each, since they can give it to
+themselves anyway. The commands were cut to `grant` and `revoke` for
+repositories and `user role` for the server, at the person's asking.
+Adding repositories stays on the server's machine: it clones and imports.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

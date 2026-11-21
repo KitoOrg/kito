@@ -138,7 +138,9 @@ impl Default for Config {
 
 /// What a person may do in a repository. Each role can do what the ones
 /// before it can.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// See the lanes, the board and the history, and follow lanes.
@@ -149,6 +151,8 @@ pub enum Role {
     /// Integrate lanes, their own and those that wait; decide for any lane.
     #[default]
     Integrate,
+    /// Change the repository's rules and who may use it (ADR 0014).
+    Maintain,
 }
 
 impl Role {
@@ -157,11 +161,59 @@ impl Role {
             Role::Read => "read",
             Role::Write => "write",
             Role::Integrate => "integrate",
+            Role::Maintain => "maintain",
+        }
+    }
+
+    pub fn of_word(word: &str) -> Result<Role, String> {
+        match word {
+            "read" => Ok(Role::Read),
+            "write" => Ok(Role::Write),
+            "integrate" => Ok(Role::Integrate),
+            "maintain" => Ok(Role::Maintain),
+            other => Err(format!("`{other}` is no role in a repository: read, write, integrate or maintain")),
+        }
+    }
+}
+
+/// What a person may do on the server itself (ADR 0014).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerRole {
+    /// The repositories they were given.
+    #[default]
+    Member,
+    /// Every repository, as `maintain`; people, and the server's plugins.
+    Admin,
+    /// As an admin, and names admins and owners.
+    Owner,
+}
+
+impl ServerRole {
+    pub fn word(self) -> &'static str {
+        match self {
+            ServerRole::Member => "member",
+            ServerRole::Admin => "admin",
+            ServerRole::Owner => "owner",
+        }
+    }
+
+    pub fn of_word(word: &str) -> Result<ServerRole, String> {
+        match word {
+            "member" => Ok(ServerRole::Member),
+            "admin" => Ok(ServerRole::Admin),
+            "owner" => Ok(ServerRole::Owner),
+            "read" | "write" | "integrate" | "maintain" => Err(format!(
+                "`{word}` is a role in a repository: give it with --repo <repository>:{word}, or `grant`"
+            )),
+            other => Err(format!("`{other}` is no role on the server: member, admin or owner")),
         }
     }
 
     fn is_default(&self) -> bool {
-        *self == Role::default()
+        *self == ServerRole::default()
     }
 }
 
@@ -173,13 +225,19 @@ pub struct User {
     pub email: Option<String>,
     /// The hash of their token: the token itself is nowhere on the server.
     pub token: String,
-    /// The repositories they may use; `*` is all of them.
-    pub repos: Vec<String>,
-    /// What they may do in them.
-    #[serde(skip_serializing_if = "Role::is_default")]
-    pub role: Role,
-    /// What they may do in the repositories where it is something else.
+    /// What they may do on the server itself.
+    #[serde(skip_serializing_if = "ServerRole::is_default")]
+    pub server_role: ServerRole,
+    /// The repositories they may use, and what they may do in each.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub access: BTreeMap<String, Role>,
+    /// Before ADR 0014: the repositories (`*`: all), the role in them, and
+    /// the roles that were something else. Read once, written no more.
+    #[serde(skip_serializing)]
+    pub repos: Vec<String>,
+    #[serde(skip_serializing)]
+    pub role: Role,
+    #[serde(skip_serializing)]
     pub roles: BTreeMap<String, Role>,
     /// Who they are for the plugins that sign people in: `github:583231`
     /// (ADR 0006). The login it had when it was added is for people to read.
@@ -187,20 +245,50 @@ pub struct User {
     pub identities: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub logins: Vec<String>,
-    /// They may change the server itself from somewhere else than its
-    /// machine: its plugins (ADR 0008). Said on the server's machine only.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    /// Before ADR 0014: they could manage the server's plugins.
+    #[serde(skip_serializing)]
     pub admin: bool,
 }
 
 impl User {
     pub fn may_use(&self, repo: &str) -> bool {
-        self.repos.iter().any(|allowed| allowed == "*" || allowed == repo)
+        self.role_in(repo).is_some()
     }
 
-    /// What the person may do in a repository.
-    pub fn role_in(&self, repo: &str) -> Role {
-        self.roles.get(repo).copied().unwrap_or(self.role)
+    /// What the person may do in a repository; `None`: they may not use it.
+    pub fn role_in(&self, repo: &str) -> Option<Role> {
+        match self.access.get(repo) {
+            Some(role) => Some(*role),
+            None => (self.server_role >= ServerRole::Admin).then_some(Role::Maintain),
+        }
+    }
+
+    /// They manage the server: people, repositories given, plugins.
+    pub fn is_admin(&self) -> bool {
+        self.server_role >= ServerRole::Admin
+    }
+
+    /// What was written before ADR 0014, as it was meant: `true` if
+    /// anything was. `all`: the repositories the server has.
+    fn read_as_meant(&mut self, all: &[String]) -> bool {
+        if self.repos.is_empty() && self.roles.is_empty() && !self.admin {
+            return false;
+        }
+        for repo in std::mem::take(&mut self.repos) {
+            let repos = match repo == "*" {
+                true => all.to_vec(),
+                false => vec![repo],
+            };
+            for repo in repos {
+                let role = self.roles.get(&repo).copied().unwrap_or(self.role);
+                self.access.entry(repo).or_insert(role);
+            }
+        }
+        self.roles.clear();
+        if std::mem::take(&mut self.admin) {
+            self.server_role = self.server_role.max(ServerRole::Admin);
+        }
+        true
     }
 }
 
@@ -247,7 +335,17 @@ impl Server {
             format!("{} is not a Kito server (run `kito-server init` there, or give --dir)", dir.display())
         })?;
         let config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Server { dir, config })
+        let mut server = Server { dir, config };
+        // Written before ADR 0014: read as it was meant, written back so.
+        let all = server.repos();
+        let mut changed = false;
+        for user in server.config.users.values_mut() {
+            changed |= user.read_as_meant(&all);
+        }
+        if changed {
+            server.save()?;
+        }
+        Ok(server)
     }
 
     /// Writes the configuration: it holds what tokens hash to, and is
@@ -343,16 +441,16 @@ impl Server {
         &mut self,
         name: &str,
         email: Option<String>,
-        repos: &[String],
-        role: Role,
+        access: &[(String, Role)],
+        server_role: ServerRole,
         identity: Option<&Identity>,
     ) -> Result<Option<String>, String> {
         check_name("user", name)?;
         if self.config.users.contains_key(name) {
             return Err(format!("{name} is a user already: remove them first to give them a new token"));
         }
-        for repo in repos {
-            if repo != "*" && self.repo(repo).is_none() {
+        for (repo, _) in access {
+            if self.repo(repo).is_none() {
                 return Err(format!("there is no repository `{repo}` on this server"));
             }
         }
@@ -360,10 +458,6 @@ impl Server {
         // The system's randomness, on every platform (ADR 0002).
         getrandom::getrandom(&mut bytes).map_err(|e| format!("no randomness to make a token from: {e}"))?;
         let token = format!("kito_{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        let repos = match repos.is_empty() {
-            true => vec!["*".to_owned()],
-            false => repos.to_vec(),
-        };
         if let Some(taken) = identity.and_then(|identity| self.user_by_identity(identity)) {
             return Err(format!("{} is {taken} already", identity.map(Identity::key).unwrap_or_default()));
         }
@@ -371,44 +465,59 @@ impl Server {
             email: email.or_else(|| identity.and_then(|identity| identity.email.clone())),
             // Nothing hashes to nothing: with an identity there is no token.
             token: identity.map_or_else(|| hash_of(&token), |_| String::new()),
-            repos,
-            role,
-            roles: BTreeMap::new(),
-            admin: false,
+            server_role,
+            access: access.iter().cloned().collect(),
             identities: identity.iter().map(|identity| identity.key()).collect(),
             logins: identity
                 .iter()
                 .map(|identity| format!("{}:{}", identity.provider, identity.login))
                 .collect(),
+            ..User::default()
         };
         self.config.users.insert(name.to_owned(), user);
         self.save()?;
         Ok(identity.is_none().then_some(token))
     }
 
-    /// Says whether a person is an administrator of the server.
-    pub fn set_admin(&mut self, name: &str, admin: bool) -> Result<(), String> {
+    /// Changes what a person may do on the server itself.
+    pub fn set_server_role(&mut self, name: &str, role: ServerRole) -> Result<(), String> {
         let user =
             self.config.users.get_mut(name).ok_or_else(|| format!("{name} is not a user of this server"))?;
-        user.admin = admin;
+        user.server_role = role;
         self.save()
     }
 
-    /// Changes what a person may do: everywhere, or in one repository.
-    pub fn set_role(&mut self, name: &str, role: Role, repo: Option<&str>) -> Result<(), String> {
-        if let Some(repo) = repo.filter(|repo| self.repo(repo).is_none()) {
+    /// Gives a person a repository, with a role in it; `None` takes it
+    /// away. Answers whether anything changed.
+    pub fn grant(&mut self, name: &str, repo: &str, role: Option<Role>) -> Result<bool, String> {
+        if self.repo(repo).is_none() {
             return Err(format!("there is no repository `{repo}` on this server"));
         }
         let user =
             self.config.users.get_mut(name).ok_or_else(|| format!("{name} is not a user of this server"))?;
-        match repo {
-            Some(repo) => drop(user.roles.insert(repo.to_owned(), role)),
-            None => {
-                user.role = role;
-                user.roles.clear();
-            }
+        let before = user.access.get(repo).copied();
+        match role {
+            Some(role) => drop(user.access.insert(repo.to_owned(), role)),
+            None => drop(user.access.remove(repo)),
         }
-        self.save()
+        let changed = before != user.access.get(repo).copied();
+        if changed {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// Who may use a repository, and as what: those given it, and the
+    /// admins.
+    pub fn members(&self, repo: &str) -> Vec<(String, Role, bool)> {
+        self.config
+            .users
+            .iter()
+            .filter_map(|(name, user)| {
+                let given = user.access.contains_key(repo);
+                user.role_in(repo).map(|role| (name.clone(), role, !given))
+            })
+            .collect()
     }
 
     pub fn remove_user(&mut self, name: &str) -> Result<(), String> {

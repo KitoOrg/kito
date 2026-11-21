@@ -1,0 +1,43 @@
+== 1. People and what they may use
+
+$ kito-server --dir /demo/server user add carol --role write
+kito-server: `write` is a role in a repository: give it with --repo <repository>:write, or `grant`
+
+$ kito-server --dir /demo/server grant bob site read
+bob may read in `site`.
+
+$ kito-server --dir /demo/server user list
+ada (admin): every repository
+bob (member): shop (write), site (read)
+erin (member): shop (maintain)
+
+== 2. A maintainer, from a connected directory
+
+$ kito members
+Who may use `shop` on 127.0.0.1:7421:
+  ada              maintain  (an admin of the server)
+  bob              write
+  erin             maintain
+
+$ kito grant bob integrate
+bob may integrate in `shop` from their next connection.
+
+$ kito people
+kito: only an admin of this server may manage its people: erin is a member
+
+== 3. An admin, from a connected directory
+
+$ kito people add dave
+dave added to 127.0.0.1:7421, as member.
+Their token, shown this once:
+kito_…
+`kito grant dave <role>` in a directory connected to a repository lets them use it.
+
+$ kito people role dave owner
+kito: only an owner of this server names its admins and owners
+
+$ kito people
+ada              admin   every repository
+bob              member  shop (integrate), site (read)
+dave             member  no repository given
+erin             member  shop (maintain)

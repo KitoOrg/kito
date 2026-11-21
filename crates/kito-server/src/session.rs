@@ -91,6 +91,9 @@ const READ: &[&str] = &[
     "sync",
 ];
 
+/// What only a maintainer of the repository may ask (ADR 0014).
+const MAINTAIN: &[&str] = &["protect", "configure"];
+
 /// The code of "there is no such repository for this person".
 pub const NO_SUCH_REPO: i64 = -32023;
 
@@ -111,8 +114,14 @@ pub fn ask(
     let root = server.repo(repo).filter(|_| user.may_use(repo)).ok_or_else(|| {
         (NO_SUCH_REPO, format!("there is no repository `{repo}` for {name} on this server"))
     })?;
-    let role = user.role_in(repo);
-    if !ALLOWED.contains(&method) {
+    let role = user.role_in(repo).unwrap_or(Role::Read);
+    if MAINTAIN.contains(&method) && role < Role::Maintain {
+        return Err((
+            rpc::REFUSED,
+            format!("only a maintainer of this repository may `{method}`: {name} may {}", role.word()),
+        ));
+    }
+    if !ALLOWED.contains(&method) && !MAINTAIN.contains(&method) {
         return Err((
             rpc::METHOD_NOT_FOUND,
             format!("`{method}` is not something a client can ask through the server"),
@@ -301,7 +310,7 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
 
     // What the person may do in the repository goes with every request:
     // the repository's daemon applies it.
-    let role = repo.as_ref().map(|(repo, _)| user.role_in(repo));
+    let role = repo.as_ref().and_then(|(repo, _)| user.role_in(repo));
     let person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
     // The connection to the repository's daemon, made when first needed.
     let mut daemon: Option<Client> = None;
@@ -354,7 +363,25 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                         Err((code, why)) => Response::err(request.id, code, why),
                     }
                 }
-                method if !ALLOWED.contains(&method) => Response::err(
+                // Who may use the server's repositories, and as what (ADR 0014).
+                method if method.starts_with("server.") && PEOPLE.contains(&method) => {
+                    let here = repo.as_ref().map(|(repo, _)| repo.as_str());
+                    match people(server, &name, &user, here, role, method, &request.params) {
+                        Ok(value) => Response::ok(request.id, value),
+                        Err((code, why)) => Response::err(request.id, code, why),
+                    }
+                }
+                method if MAINTAIN.contains(&method) && role.is_some_and(|role| role < Role::Maintain) => {
+                    Response::err(
+                        request.id,
+                        rpc::REFUSED,
+                        format!(
+                            "only a maintainer of this repository may `{method}`: {name} may {}",
+                            role.map(Role::word).unwrap_or("read")
+                        ),
+                    )
+                }
+                method if !ALLOWED.contains(&method) && !MAINTAIN.contains(&method) => Response::err(
                     request.id,
                     rpc::METHOD_NOT_FOUND,
                     format!("`{method}` is not something a client can ask through the server"),
@@ -385,6 +412,135 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
         if send(writer, &response).is_err() {
             return;
         }
+    }
+}
+
+/// The server's people, asked from a connected directory.
+const PEOPLE: &[&str] = &[
+    "server.members",
+    "server.grant",
+    "server.people",
+    "server.people_add",
+    "server.people_remove",
+    "server.people_role",
+];
+
+/// Answers one of `PEOPLE`, as `name` with what they may do: `here` the
+/// repository of the session, `role` theirs in it.
+fn people(
+    server: &Server,
+    name: &str,
+    user: &User,
+    here: Option<&str>,
+    role: Option<Role>,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
+    use crate::state::ServerRole;
+    let refused = |why: String| (rpc::REFUSED, why);
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
+    };
+    // What changed since this client connected counts.
+    let mut now = Server::open(&server.dir).map_err(|e| (rpc::INTERNAL_ERROR, e))?;
+    let admin = user.is_admin();
+    let owner = user.server_role == ServerRole::Owner;
+    match method {
+        "server.members" => {
+            let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
+            let members: Vec<Value> = now
+                .members(repo)
+                .into_iter()
+                .map(|(person, role, by_server)| json!({ "user": person, "role": role.word(), "admin": by_server }))
+                .collect();
+            Ok(json!({ "repo": repo, "members": members }))
+        }
+        "server.grant" => {
+            let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
+            if role < Some(Role::Maintain) {
+                return Err(refused(format!(
+                    "only a maintainer of `{repo}` may say who uses it: {name} may {}",
+                    role.map(Role::word).unwrap_or("nothing")
+                )));
+            }
+            let person = text("user")?;
+            let given = match params.get("role").and_then(Value::as_str) {
+                Some(word) => Some(Role::of_word(word).map_err(|why| (rpc::INVALID_PARAMS, why))?),
+                None => None,
+            };
+            let changed = now.grant(person, repo, given).map_err(refused)?;
+            let what = match given {
+                Some(given) => format!("{person} may {} in {repo}", given.word()),
+                None => format!("{person} may no longer use {repo}"),
+            };
+            if changed {
+                now.tell("role_changed", json!({ "user": person, "repo": repo, "role": given.map(Role::word), "by": name, "what": what }));
+            }
+            Ok(json!({ "user": person, "repo": repo, "role": given.map(Role::word), "changed": changed }))
+        }
+        _ if !admin => {
+            Err(refused(format!("only an admin of this server may manage its people: {name} is a member")))
+        }
+        "server.people" => {
+            let people: Vec<Value> = now
+                .config
+                .users
+                .iter()
+                .map(|(person, them)| {
+                    let access: serde_json::Map<String, Value> =
+                        them.access.iter().map(|(repo, role)| (repo.clone(), json!(role.word()))).collect();
+                    json!({ "user": person, "email": them.email, "role": them.server_role.word(), "access": access, "logins": them.logins })
+                })
+                .collect();
+            Ok(json!(people))
+        }
+        "server.people_add" => {
+            let person = text("user")?;
+            let given = match params.get("role").and_then(Value::as_str) {
+                Some(word) => ServerRole::of_word(word).map_err(|why| (rpc::INVALID_PARAMS, why))?,
+                None => ServerRole::Member,
+            };
+            if given >= ServerRole::Admin && !owner {
+                return Err(refused("only an owner of this server names its admins and owners".to_owned()));
+            }
+            let identity = match params.get("identity").and_then(Value::as_str) {
+                Some(identity) => Some(now.look_up(identity).map_err(refused)?),
+                None => None,
+            };
+            let email = params.get("email").and_then(Value::as_str).map(str::to_owned);
+            let token = now.add_user(person, email, &[], given, identity.as_ref()).map_err(refused)?;
+            now.tell("user_added", json!({ "user": person, "role": given.word(), "by": name, "what": format!("{person} ({})", given.word()) }));
+            Ok(
+                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": crate::tls::fingerprint(&now.dir).ok() }),
+            )
+        }
+        "server.people_remove" | "server.people_role" => {
+            let person = text("user")?;
+            let theirs = now.config.users.get(person).map(|them| them.server_role);
+            let theirs = theirs.ok_or_else(|| refused(format!("{person} is not a user of this server")))?;
+            if theirs >= ServerRole::Admin && !owner {
+                return Err(refused(format!("{person} is an {}: only an owner changes them", theirs.word())));
+            }
+            if method == "server.people_remove" {
+                now.remove_user(person).map_err(refused)?;
+                now.tell("user_removed", json!({ "user": person, "by": name, "what": person }));
+                return Ok(json!({ "user": person, "removed": true }));
+            }
+            let given = ServerRole::of_word(text("role")?).map_err(|why| (rpc::INVALID_PARAMS, why))?;
+            if given >= ServerRole::Admin && !owner {
+                return Err(refused("only an owner of this server names its admins and owners".to_owned()));
+            }
+            now.set_server_role(person, given).map_err(refused)?;
+            now.tell("role_changed", json!({ "user": person, "server_role": given.word(), "by": name, "what": format!("{person}: {}", given.word()) }));
+            Ok(json!({ "user": person, "role": given.word() }))
+        }
+        _ => Err((
+            rpc::METHOD_NOT_FOUND,
+            format!("`{method}` is not something a client can ask through the server"),
+        )),
     }
 }
 

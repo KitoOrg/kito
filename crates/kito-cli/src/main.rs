@@ -135,6 +135,27 @@ enum AssistantCmd {
 }
 
 #[derive(Subcommand)]
+enum PeopleCmd {
+    /// Add a person to the server: their token is printed once
+    Add {
+        name: String,
+        /// member (the default), admin, owner
+        #[arg(long, default_value = "member")]
+        role: String,
+        #[arg(long)]
+        email: Option<String>,
+        /// Who they are for a way to sign in, as <method>:<login>: they
+        /// sign in, and have no token
+        #[arg(long, value_name = "METHOD:LOGIN")]
+        identity: Option<String>,
+    },
+    /// Remove a person from the server
+    Remove { name: String },
+    /// Change a person's role on the server: member, admin, owner
+    Role { name: String, role: String },
+}
+
+#[derive(Subcommand)]
 enum InstructionsCmd {
     /// What every assistant is told here, and where each part comes from
     List,
@@ -174,6 +195,18 @@ enum Cmd {
     Assistant {
         #[command(subcommand)]
         command: AssistantCmd,
+    },
+    /// Who may use the repository this directory is connected to, and as what
+    Members,
+    /// Let a person use this repository: read, write, integrate, maintain
+    /// (maintainers and admins)
+    Grant { name: String, role: String },
+    /// Take this repository away from a person
+    Revoke { name: String },
+    /// The people of the server this directory is connected to (admins)
+    People {
+        #[command(subcommand)]
+        command: Option<PeopleCmd>,
     },
     /// What the assistants are told here: kept by Kito and shared, not in
     /// the project's files
@@ -3225,6 +3258,112 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
     Ok(())
 }
 
+/// The server this directory is connected to, asked as its person: about
+/// the repository (`repo`), or about the server.
+fn server_here(cli: &Cli, repo: bool) -> Result<(Remote, Client), String> {
+    let root = root_of(cli)?;
+    let remote = Remote::load(&root)
+        .ok_or("this directory is a repository of its own: who may use it is for a server to say")?;
+    let client = Client::remote(&remote, repo).map_err(fail)?;
+    Ok((remote, client))
+}
+
+/// `kito members` (ADR 0014).
+fn cmd_members(cli: &Cli) -> Outcome {
+    let (remote, mut client) = server_here(cli, true)?;
+    let said: Value = client.call("server.members", json!({})).map_err(fail)?;
+    if cli.json {
+        print_json(&said);
+        return Ok(());
+    }
+    println!("Who may use `{}` on {}:", remote.repo, remote.place());
+    for member in said["members"].as_array().into_iter().flatten() {
+        let by = if member["admin"] == true { "  (an admin of the server)" } else { "" };
+        println!(
+            "  {:<16} {}{by}",
+            member["user"].as_str().unwrap_or("?"),
+            member["role"].as_str().unwrap_or("?")
+        );
+    }
+    Ok(())
+}
+
+/// `kito grant <name> <role>` and `kito revoke <name>`.
+fn cmd_grant(cli: &Cli, name: &str, role: Option<&String>) -> Outcome {
+    let (remote, mut client) = server_here(cli, true)?;
+    let said: Value = client.call("server.grant", json!({ "user": name, "role": role })).map_err(fail)?;
+    if cli.json {
+        print_json(&said);
+        return Ok(());
+    }
+    match (role, said["changed"] == true) {
+        (Some(role), true) => println!("{name} may {role} in `{}` from their next connection.", remote.repo),
+        (Some(role), false) => println!("{name} may {role} in `{}` already.", remote.repo),
+        (None, true) => println!("{name} may no longer use `{}`.", remote.repo),
+        (None, false) => println!("{name} was not given `{}`: nothing changed.", remote.repo),
+    }
+    Ok(())
+}
+
+/// `kito people`: the server's people, for its admins.
+fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
+    let (remote, mut client) = server_here(cli, false)?;
+    let said: Value = match command {
+        None => client.call("server.people", json!({})),
+        Some(PeopleCmd::Add { name, role, email, identity }) => client.call(
+            "server.people_add",
+            json!({ "user": name, "role": role, "email": email, "identity": identity }),
+        ),
+        Some(PeopleCmd::Remove { name }) => client.call("server.people_remove", json!({ "user": name })),
+        Some(PeopleCmd::Role { name, role }) => {
+            client.call("server.people_role", json!({ "user": name, "role": role }))
+        }
+    }
+    .map_err(fail)?;
+    if cli.json {
+        print_json(&said);
+        return Ok(());
+    }
+    match command {
+        None => {
+            for person in said.as_array().into_iter().flatten() {
+                let access: Vec<String> = person["access"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(repo, role)| format!("{repo} ({})", role.as_str().unwrap_or("?")))
+                    .collect();
+                let admin = matches!(person["role"].as_str(), Some("admin" | "owner"));
+                let access = match (access.is_empty(), admin) {
+                    (true, true) => "every repository".to_owned(),
+                    (true, false) => "no repository given".to_owned(),
+                    (false, true) => format!("every repository; given {}", access.join(", ")),
+                    (false, false) => access.join(", "),
+                };
+                println!(
+                    "{:<16} {:<7} {access}",
+                    person["user"].as_str().unwrap_or("?"),
+                    person["role"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        Some(PeopleCmd::Add { name, .. }) => {
+            println!("{name} added to {}, as {}.", remote.place(), said["role"].as_str().unwrap_or("member"));
+            if let Some(token) = said["token"].as_str() {
+                println!("Their token, shown this once:\n{token}");
+            }
+            println!("`kito grant {name} <role>` in a directory connected to a repository lets them use it.");
+        }
+        Some(PeopleCmd::Remove { name }) => {
+            println!("{name} removed: their token and their sessions no longer work.")
+        }
+        Some(PeopleCmd::Role { name, role }) => {
+            println!("{name} is {role} on {} from their next connection.", remote.place())
+        }
+    }
+    Ok(())
+}
+
 fn cmd_repos(cli: &Cli) -> Outcome {
     let root = root_of(cli)?;
     let remote = Remote::load(&root)
@@ -4290,6 +4429,10 @@ fn run() -> ExitCode {
         ),
         Cmd::Claude => cmd_claude(&cli),
         Cmd::Instructions { command } => cmd_instructions(&cli, command.as_ref()),
+        Cmd::Members => cmd_members(&cli),
+        Cmd::Grant { name, role } => cmd_grant(&cli, name, Some(role)),
+        Cmd::Revoke { name } => cmd_grant(&cli, name, None),
+        Cmd::People { command } => cmd_people(&cli, command.as_ref()),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),

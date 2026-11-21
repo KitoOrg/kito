@@ -2605,6 +2605,44 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 28 · roles per repository and on the server — done
+
+A person had one role for every repository they could use, and the
+server had an `admin` flag for its plugins. The person asked for
+permissions per repository, roles on the server, and simple commands.
+Released as 0.29.0 ([ADR 0014](adr/0014-roles.md), D-168).
+
+### What is there
+
+- Roles in a repository: `read`, `write`, `integrate`, `maintain`
+  (its rules and its people). Roles on the server: `member`, `admin`,
+  `owner`.
+- `kito-server grant <name> <repo> <role>`, `revoke <name> <repo>`,
+  `user add --repo shop[:role]… --role <server role>`, `user role`.
+  `user admin` is gone.
+- In a connected directory: `kito members`, `kito grant`, `kito revoke`;
+  `kito people [add|remove|role]` for admins. A maintainer may
+  `protect` and `configure` through the server.
+- A server written before is read as it was meant and written back.
+
+### How it was tested
+
+- `kito-server/tests/server.rs`: a member given nothing; a maintainer
+  who lists, grants, revokes and configures; an integrator refused
+  `configure`; an admin who manages people and may not name admins; an
+  owner who may; an old `server.toml` read as it was meant.
+- The tests of the server, the client, kito-mcp, kito-web, kito-kitchen,
+  kito-github and kito-oidc, moved to the new commands.
+- `scripts/demo-phase28.sh`, kept in `docs/demo/phase28-demo.txt`.
+
+### Known limitations
+
+- **Adding and removing repositories** is on the server's machine only.
+- **A change of role counts from the person's next connection.**
+- **The demos of phases 20 to 22** use `user admin` and `--role write`,
+  which are gone; their kept output stays as it was.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 27 · connecting by one address — done
 
 Connecting needed the server, the repository, a token or a way to sign

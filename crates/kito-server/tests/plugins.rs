@@ -161,16 +161,16 @@ fn a_plugin_is_told_what_happens_on_the_server() {
 
     // After the fact, in order, and only the kinds it listed.
     ok(&dir, &["repo", "add", "shop"]);
-    ok(&dir, &["user", "add", "bob", "--role", "write"]);
-    ok(&dir, &["user", "role", "bob", "read", "--repo", "shop"]);
+    ok(&dir, &["user", "add", "bob", "--repo", "shop:write"]);
+    ok(&dir, &["grant", "bob", "shop", "read"]);
     ok(&dir, &["repo", "set", "shop", "--approvals", "1"]);
     ok(&dir, &["user", "remove", "bob"]);
     assert_eq!(
         told().lines().collect::<Vec<_>>(),
         [
             "repo_added shop",
-            "user_added bob (write)",
-            "role_changed bob: read in shop",
+            "user_added bob (member)",
+            "role_changed bob may read in shop",
             "repo_changed shop  [main open to direct edits, no checks, 1 approval]",
             "user_removed bob",
         ]

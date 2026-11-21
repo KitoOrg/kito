@@ -4,6 +4,22 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.29.0]
+
+Roles per repository, and roles on the server (phase 28,
+[ADR 0014](docs/adr/0014-roles.md)).
+
+- **A role in each repository**: `read`, `write`, `integrate`, and the
+  new `maintain`, who changes its rules and says who uses it.
+  `kito-server grant <name> <repo> <role>` and `revoke`; `user add
+  --repo shop:write`.
+- **A role on the server**: `member`, `admin`, `owner`
+  (`kito-server user add --role`, `user role`). `user admin` is gone.
+- **From a connected directory**: `kito members`, `kito grant`,
+  `kito revoke`, and `kito people` for admins.
+- A person added with no repository may use none until granted one; an
+  existing server is read as it was meant.
+
 ## [0.28.0]
 
 Connecting as GitHub's tools do (phase 27,
