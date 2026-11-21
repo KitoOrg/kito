@@ -6,19 +6,23 @@ of a version are its section here.
 
 ## [Unreleased]
 
-Plugins ([ADR 0005](docs/adr/0005-plugins.md)), under way:
+## [0.20.0]
 
-- A plugin is a program, `kito-<name>`, with a `kito-plugin.toml`. `kito
-  plugin add --path <dir>` installs one for you; `kito plugin enable
+Plugins (phase 19, [ADR 0005](docs/adr/0005-plugins.md)): what does not
+belong in Kito is added by programs of their own.
+
+- **A plugin is a program**, `kito-<name>`, with a `kito-plugin.toml`.
+  `kito plugin add --path <dir>` installs one for you; `kito plugin enable
   <name>` lets it run in a repository, with the permissions it asks for
   (`--only read,write` gives less); `list`, `info`, `disable`, `remove`.
   Nothing of a plugin runs in a repository that did not enable it.
-- A command a plugin declares is a command of Kito there: `kito web`.
-- The daemon answers a plugin what the repository gave it (`read`,
-  `write`, `integrate`, `admin`) and refuses the rest, naming the
-  permission that is missing. Each plugin has a key of its own.
-- The daemon's methods are a numbered API, version 1, written down in
+- **Permissions**: the daemon knows a plugin by a key of its own and
+  answers it what the repository gave it (`read`, `write`, `integrate`,
+  `admin`), refusing the rest and naming the permission that is missing.
+- **The daemon's API**, version 1, is written down in
   [docs/api.md](docs/api.md); `ping` answers `api`.
+- **Commands**: a command a plugin declares is a command of Kito in the
+  repositories that enabled it (`kito web`).
 - **Gates**: a plugin's `[[gate]]` is asked before a lane is integrated,
   after the checks, in the same confined copy: it answers pass, fail
   (the lane's checks failed, naming the gate) or wait (the lane waits,
@@ -28,10 +32,17 @@ Plugins ([ADR 0005](docs/adr/0005-plugins.md)), under way:
   one at a time and in order, after the fact. What a plugin last failed
   at is in `kito status` and `kito plugin list`, and told as
   `plugin_failed`.
+- **Tools for agents**: a plugin's `[[tool]]` is offered by `kito-mcp`
+  as `kito.<plugin>.<tool>`, after Kito's own and saying whose it is.
+- **Assistants**: a plugin with `[assistant]` sets a coding assistant up
+  for Kito: `kito assistant add | remove | list`. Claude Code is still
+  set up by Kito itself.
 - An integration that waits says `it waits: …` (for its review, or for a
-  gate). Events name their lane `lane/1` however it was typed.
-- Not yet: installing from a release by name, tools for agents,
-  assistants.
+  gate). Events name their lane `lane/1` however it was typed. `kito`
+  runs on a thread with a stack of its own (it overflowed the main
+  thread's on Windows).
+- Not yet: installing a plugin by name from a release; plugins in a
+  directory connected to a server.
 
 ## [0.19.0]
 

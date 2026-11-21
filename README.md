@@ -31,6 +31,7 @@ runnable demo.
 | 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch and checks | done |
 | 17 | Review of a lane ([ADR 0004](docs/adr/0004-review-of-a-lane.md)): its diff, comments its agent is told, verdicts, approvals before integration; data and questions, no interface | done |
 | 18 | The why graph, better: intents that say nothing refused, notes on code ([ADR 0003](docs/adr/0003-notes-on-code.md)), lines followed across file renames | done |
+| 19 | Plugins ([ADR 0005](docs/adr/0005-plugins.md)): programs that add commands, gates of integration, event handlers, tools for agents and assistants, within the permissions a repository gives them; the daemon's API, numbered | done |
 | — | Windows ([ADR 0002](docs/adr/0002-windows.md)): the tests pass there, in CI; no sandbox, no partial-save detection | done |
 
 ## Crates
@@ -442,7 +443,8 @@ exported commit (`Reviewed-by:`). Agents have the tools `lane_diff`,
 
 What does not belong in Kito is added by plugins: programs of their own,
 which ask the daemon what `kito` asks ([ADR 0005](docs/adr/0005-plugins.md)).
-The web client is one, not part of Kito.
+A web client is one; so is what sets up a coding assistant other than
+Claude Code. Neither is part of Kito.
 
 ```bash
 kito plugin add --path ./kito-web   # installed for you
@@ -451,13 +453,60 @@ kito web                            # its command, now one of Kito's here
 kito plugin list
 ```
 
-A plugin is `kito-<name>` and a `kito-plugin.toml` that says what it asks
-for and what it adds. Nothing of it runs in a repository that did not
-enable it, and the daemon answers it only what the repository gave it:
-`read`, `write`, `integrate`, `admin`. What a program may ask the daemon,
-and under which permission, is in [docs/api.md](docs/api.md): the
-daemon's API, version 1. `crates/kito-cli/examples/kito-hello.rs` is the
-smallest plugin there is.
+Nothing of a plugin runs in a repository that did not enable it, and the
+daemon answers it only what the repository gave it: `read`, `write`,
+`integrate`, `admin` (`kito plugin enable web --only read` gives less
+than it asks for).
+
+A plugin is `kito-<name>` and a `kito-plugin.toml` next to it, which says
+what it asks for and what it adds:
+
+```toml
+name = "web"
+version = "0.1.0"
+api = 1                              # the daemon API it was written for
+permissions = ["read", "write"]
+
+[[command]]                          # `kito web` runs `kito-web`
+name = "web"
+about = "Serve the web client for this repository"
+
+[[gate]]                             # asked before a lane is integrated
+name = "licence"
+about = "Every new file has a licence header"
+
+[[event]]                            # run for these, one at a time
+kinds = ["integrated", "commented"]
+
+[[tool]]                             # offered to agents as kito.web.open
+name = "open"
+description = "The address of a lane in the web client"
+
+[assistant]                          # `kito assistant add codex`
+name = "codex"
+```
+
+- **A command** is run in the repository with `KITO_REPO`, `KITO_API` and
+  `KITO_PLUGIN_KEY` in its environment: the key is what it says to the
+  daemon, which then knows it as that plugin.
+- **A gate** (`kito-web gate licence`) is asked after the checks, in the
+  same confined copy of the merged result, with the lanes in it and
+  their diffs as JSON on its input. It prints `{"result": "pass"}`,
+  `"fail"` or `"wait"` with a `"message"`: a failure is a check that
+  failed; a wait leaves the lane waiting with that reason, and the gate
+  is asked again the next time.
+- **An event** (`kito-web event`, the event as JSON on its input) is told
+  after the fact, and never holds anything up. What a plugin last failed
+  at is in `kito status`.
+- **A tool** (`kito-web tool open`, the arguments as JSON on its input)
+  is offered to agents after Kito's own, and says whose it is.
+- **An assistant** is set up by `kito assistant add <name>`, which runs
+  the plugin's `assistant setup` in the repository.
+
+What a program may ask the daemon, and under which permission, is in
+[docs/api.md](docs/api.md): the daemon's API, version 1.
+`crates/kito-cli/examples/kito-hello.rs` is the smallest plugin there is,
+and `scripts/demo-phase19.sh` shows it at work.
 
 ## The rules as behaviour
 

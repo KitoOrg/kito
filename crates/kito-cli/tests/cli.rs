@@ -2254,3 +2254,36 @@ fn a_plugin_is_run_for_the_events_it_listed() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(!told().contains("Said to nobody"), "{}", told());
 }
+
+#[test]
+fn an_assistant_is_set_up_by_the_plugin_that_knows_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    assert!(ok(root, &["assistant", "list"]).contains("No plugin enabled here sets an assistant up."));
+    let none = kito(root, &["assistant", "add", "hello"]);
+    assert!(String::from_utf8_lossy(&none.stderr).contains("no plugin enabled here sets `hello` up"));
+
+    let manifest = "name = \"hello\"\nversion = \"0.3.0\"\napi = 1\npermissions = [\"read\"]\n\n[assistant]\nname = \"hello\"\n\n[[tool]]\nname = \"shout\"\ndescription = \"Says it louder.\"\n";
+    let source = hello_plugin(root, manifest);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    let info = ok(root, &["plugin", "info", "hello"]);
+    assert!(info.contains("sets up the assistant hello: `kito assistant add hello`"), "{info}");
+    assert!(info.contains("tool kito.hello.shout  Says it louder."), "{info}");
+    let not_here = kito(root, &["assistant", "add", "hello"]);
+    let said = String::from_utf8_lossy(&not_here.stderr).into_owned();
+    assert!(said.contains("which this repository did not enable: `kito plugin enable hello`"), "{said}");
+
+    // Enabled, the plugin writes that assistant's files, and says what
+    // the assistant cannot be held to.
+    ok(root, &["plugin", "enable", "hello"]);
+    assert_eq!(ok(root, &["assistant", "list"]), "hello  (plugin hello 0.3.0)\n");
+    let set = ok(root, &["assistant", "add", "hello"]);
+    assert!(set.contains("hello is set up for Kito") && set.contains("no hook before an edit"), "{set}");
+    assert!(fs::read_to_string(root.join("HELLO.md")).unwrap().contains("Work in a Kito lane"));
+    assert!(ok(root, &["assistant", "remove", "hello"]).contains("no longer set up"));
+    assert!(!root.join("HELLO.md").exists());
+}

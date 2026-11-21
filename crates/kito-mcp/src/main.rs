@@ -551,6 +551,74 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
     }
 }
 
+/// A tool of a plugin, as an agent is offered it (ADR 0005).
+struct PluginTool {
+    /// `hello.shout`: after the prefix, the plugin and the tool.
+    name: String,
+    plugin: String,
+    tool: String,
+    description: String,
+    input: Value,
+    program: PathBuf,
+    timeout: std::time::Duration,
+}
+
+/// The tools of the plugins this repository enabled, as they are now.
+fn plugin_tools(root: &Path, prefix: &str) -> Vec<PluginTool> {
+    // `kito.hello.shout`; for a client that takes no dot, `kito_hello_shout`.
+    let between = if prefix.ends_with('.') || prefix.is_empty() { "." } else { "_" };
+    let listed =
+        Client::connect_or_start(root).and_then(|mut client| client.call_value("plugins", json!({})));
+    let mut tools = Vec::new();
+    for plugin in listed.ok().as_ref().and_then(Value::as_array).into_iter().flatten() {
+        let runs = plugin["enabled"] == true && plugin["problem"].is_null();
+        let (Some(name), Some(program), true) = (plugin["name"].as_str(), plugin["program"].as_str(), runs)
+        else {
+            continue;
+        };
+        for tool in plugin["tools"].as_array().into_iter().flatten() {
+            let Some(tool_name) = tool["name"].as_str() else { continue };
+            tools.push(PluginTool {
+                name: format!("{name}{between}{tool_name}"),
+                plugin: name.to_owned(),
+                tool: tool_name.to_owned(),
+                description: format!(
+                    "{} (A tool of the plugin `{name}`, not of Kito itself.)",
+                    tool["description"].as_str().unwrap_or_default().trim()
+                ),
+                input: match &tool["input"] {
+                    schema @ Value::Object(_) => schema.clone(),
+                    _ => json!({ "type": "object" }),
+                },
+                program: PathBuf::from(program),
+                timeout: std::time::Duration::from_secs(tool["timeout_secs"].as_u64().unwrap_or(120).max(1)),
+            });
+        }
+    }
+    tools
+}
+
+/// Runs a tool of a plugin: `kito-<plugin> tool <tool>`, with the
+/// arguments as JSON on its input. What it prints is the answer.
+fn call_plugin(root: &Path, tool: &PluginTool, args: &Value) -> Result<Value, String> {
+    let mut client = Client::connect_or_start(root).map_err(|e| e.to_string())?;
+    let key = client.call_value("plugin_key", json!({ "name": tool.plugin })).map_err(|e| e.to_string())?;
+    drop(client);
+    let told = serde_json::to_vec(args).unwrap_or_default();
+    let printed = kitod::plugins::run_plugin(
+        &tool.program,
+        &["tool", &tool.tool],
+        root,
+        key["key"].as_str().unwrap_or_default(),
+        &told,
+        tool.timeout,
+    )
+    .map_err(|why| format!("the tool `{}` of the plugin `{}` failed: {why}", tool.tool, tool.plugin))?;
+    let text = String::from_utf8_lossy(&printed);
+    // JSON as it is; anything else as the text it is.
+    Ok(serde_json::from_str(text.trim()).unwrap_or_else(|_| json!({ "result": text.trim_end() })))
+}
+
 struct Kito {
     root: PathBuf,
     prefix: String,
@@ -582,7 +650,16 @@ impl ServerHandler for Kito {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tools.clone()))
+        // Kito's own, then those of the plugins enabled here, as they are now.
+        let (root, prefix) = (self.root.clone(), self.prefix.clone());
+        let listed =
+            tokio::task::spawn_blocking(move || plugin_tools(&root, &prefix)).await.unwrap_or_default();
+        let mut tools = self.tools.clone();
+        for tool in listed {
+            let Value::Object(schema) = tool.input else { continue };
+            tools.push(Tool::new(format!("{}{}", self.prefix, tool.name), tool.description, schema));
+        }
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -597,9 +674,19 @@ impl ServerHandler for Kito {
         let args = Value::Object(request.arguments.unwrap_or_default());
         let root = self.root.clone();
         // The daemon's client is blocking: off the thread that drives the protocol.
-        let outcome = tokio::task::spawn_blocking(move || call(&root, &tool, args))
-            .await
-            .map_err(|e| McpError::internal_error(format!("the tool failed to run: {e}"), None))?;
+        let own = self.tools.iter().any(|known| known.name == name.as_str());
+        let prefix = self.prefix.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            if own {
+                return call(&root, &tool, args);
+            }
+            match plugin_tools(&root, &prefix).into_iter().find(|offered| offered.name == tool) {
+                Some(offered) => call_plugin(&root, &offered, &args),
+                None => call(&root, &tool, args),
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("the tool failed to run: {e}"), None))?;
         let result = match outcome {
             Ok(value) => {
                 let mut result = CallToolResult::success(vec![ContentBlock::text(format!("{value:#}"))]);

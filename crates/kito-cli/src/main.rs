@@ -64,7 +64,23 @@ enum PluginCmd {
 }
 
 #[derive(Subcommand)]
+enum AssistantCmd {
+    /// Set a coding assistant up for Kito in this repository: its tools,
+    /// its rules, its hooks, written by the plugin that knows it
+    Add { name: String },
+    /// Take out what `add` wrote
+    Remove { name: String },
+    /// The assistants the plugins enabled here can set up
+    List,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Coding assistants other than Claude Code, set up by plugins
+    Assistant {
+        #[command(subcommand)]
+        command: AssistantCmd,
+    },
     /// Plugins: programs that add to Kito (a web client, an assistant)
     Plugin {
         #[command(subcommand)]
@@ -625,6 +641,16 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
             for gate in &manifest.gates {
                 println!("  gate {}  {}", gate.name, gate.about);
             }
+            for tool in &manifest.tools {
+                let about = tool.description.lines().next().unwrap_or_default();
+                println!("  tool kito.{}.{}  {about}", manifest.name, tool.name);
+            }
+            if let Some(assistant) = &manifest.assistant {
+                println!(
+                    "  sets up the assistant {}: `kito assistant add {}`",
+                    assistant.name, assistant.name
+                );
+            }
             let kinds: Vec<&str> =
                 manifest.events.iter().flat_map(|event| event.kinds.iter().map(String::as_str)).collect();
             if !kinds.is_empty() {
@@ -667,6 +693,84 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
     Ok(())
 }
 
+/// Runs a program of an enabled plugin in the repository, with what it
+/// needs to reach the daemon in its environment. Returns its exit code.
+fn run_plugin_here(
+    root: &Path,
+    client: &mut Client,
+    plugin: &Value,
+    args: &[OsString],
+) -> Result<u8, String> {
+    use kitod::plugins;
+    let name = plugin["name"].as_str().unwrap_or_default();
+    if let Some(problem) = plugin["problem"].as_str() {
+        return Err(problem.to_owned());
+    }
+    let program = plugin["program"].as_str().map(PathBuf::from).ok_or("the plugin has no program")?;
+    let key: Value = client.call("plugin_key", json!({ "name": name })).map_err(fail)?;
+    let status = std::process::Command::new(&program)
+        .args(args)
+        .current_dir(root)
+        .env(plugins::ENV_REPO, root)
+        .env(plugins::ENV_API, kitod::rpc::API.to_string())
+        .env(plugins::ENV_KEY, key["key"].as_str().unwrap_or_default())
+        .status()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    // Stopped by a signal: as a shell says it.
+    Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
+}
+
+/// `kito assistant`: a coding assistant is set up by the plugin that
+/// knows it (ADR 0005).
+fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
+    let root = root_of(cli)?;
+    let mut client = Client::connect_or_start(&root).map_err(fail)?;
+    let listed: Value = client.call("plugins", json!({})).map_err(fail)?;
+    let all: &[Value] = listed.as_array().map_or(&[], Vec::as_slice);
+    let sets_up =
+        |name: &str| all.iter().find(|plugin| plugin["enabled"] == true && plugin["assistant"] == name);
+    let (name, what) = match command {
+        AssistantCmd::List => {
+            let known: Vec<&Value> = all
+                .iter()
+                .filter(|plugin| plugin["enabled"] == true && plugin["assistant"].is_string())
+                .collect();
+            if cli.json {
+                print_json(&known);
+            } else if known.is_empty() {
+                println!(
+                    "No plugin enabled here sets an assistant up. Claude Code is set up by `kito claude`."
+                );
+            }
+            for plugin in known.iter().filter(|_| !cli.json) {
+                let text = |key: &str| plugin[key].as_str().unwrap_or_default();
+                println!("{}  (plugin {} {})", text("assistant"), text("name"), text("version"));
+            }
+            return Ok(0);
+        }
+        AssistantCmd::Add { name } => (name, "setup"),
+        AssistantCmd::Remove { name } => (name, "remove"),
+    };
+    let Some(plugin) = sets_up(name) else {
+        // Installed, and not let in here: say how.
+        let has = kitod::plugins::all_installed().into_iter().find(|plugin| {
+            plugin.manifest.assistant.as_ref().is_some_and(|assistant| assistant.name == *name)
+        });
+        return Err(match has {
+            Some(plugin) => format!(
+                "`{name}` is set up by the plugin `{}`, which this repository did not enable: `kito plugin \
+                 enable {}`",
+                plugin.manifest.name, plugin.manifest.name
+            ),
+            None => format!(
+                "no plugin enabled here sets `{name}` up: install the one that does (`kito plugin add`), \
+                 then `kito plugin enable` it"
+            ),
+        });
+    };
+    run_plugin_here(&root, &mut client, plugin, &["assistant".into(), what.into()])
+}
+
 /// Runs a command of a plugin this repository enabled, with what it needs
 /// to reach the daemon in its environment. Returns its exit code.
 fn cmd_external(cli: &Cli, line: &[OsString]) -> Result<u8, String> {
@@ -702,22 +806,7 @@ fn cmd_external(cli: &Cli, line: &[OsString]) -> Result<u8, String> {
             None => unknown(),
         });
     };
-    let name = plugin["name"].as_str().unwrap_or_default();
-    if let Some(problem) = plugin["problem"].as_str() {
-        return Err(problem.to_owned());
-    }
-    let program = plugin["program"].as_str().map(PathBuf::from).ok_or_else(unknown)?;
-    let key: Value = client.call("plugin_key", json!({ "name": name })).map_err(fail)?;
-    drop(client);
-    let status = std::process::Command::new(&program)
-        .args(&line[1..])
-        .env(plugins::ENV_REPO, &root)
-        .env(plugins::ENV_API, kitod::rpc::API.to_string())
-        .env(plugins::ENV_KEY, key["key"].as_str().unwrap_or_default())
-        .status()
-        .map_err(|e| format!("{}: {e}", program.display()))?;
-    // Stopped by a signal: as a shell says it.
-    Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
+    run_plugin_here(&root, &mut client, plugin, &line[1..])
 }
 
 /// Where the review of a lane stands, as text.
@@ -3005,6 +3094,16 @@ fn run() -> ExitCode {
             HookCmd::SessionStart => hook::session_start(),
         };
     }
+    // An assistant set up by its plugin: the exit code is the plugin's.
+    if let Cmd::Assistant { command } = &cli.command {
+        return match cmd_assistant(&cli, command) {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("kito: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // A command of a plugin: its exit code is the plugin's.
     if let Cmd::External(line) = &cli.command {
         return match cmd_external(&cli, line) {
@@ -3074,7 +3173,7 @@ fn run() -> ExitCode {
         Cmd::Hook { .. } => Ok(()),
         Cmd::Pull => cmd_pull(&cli),
         Cmd::Plugin { command } => cmd_plugin(&cli, command),
-        Cmd::External(_) => unreachable!("answered above"),
+        Cmd::External(_) | Cmd::Assistant { .. } => unreachable!("answered above"),
         Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

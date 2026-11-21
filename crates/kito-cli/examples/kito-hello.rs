@@ -9,6 +9,13 @@
 //! answers with; the gate `mute` answers nothing and `slow` never does.
 //! For an event (`kito-hello event`) it writes a line in a file of its
 //! own, and fails for an event that says `explode`.
+//!
+//! As a tool for agents (`kito-hello tool <name>`): `shout` answers the
+//! text it is given in capitals, with how many lanes are open (asked of
+//! the daemon, with its own key); `plain` prints text that is not JSON;
+//! `broken` fails. As an assistant (`kito-hello assistant setup |
+//! remove`) it writes and removes `HELLO.md`, the rules of an assistant
+//! that does not exist.
 
 use kitod::client::Client;
 use std::path::PathBuf;
@@ -75,6 +82,52 @@ fn main() -> ExitCode {
             println!("looked at {about}");
             println!("{answer}");
             ExitCode::SUCCESS
+        }
+        Some("tool") => {
+            let asked: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap_or_default();
+            match args.get(1).map(String::as_str) {
+                Some("shout") => {
+                    let root = PathBuf::from(said(kitod::plugins::ENV_REPO));
+                    let lanes = Client::connect(&root)
+                        .and_then(|mut client| client.call_value("lanes", serde_json::json!({})))
+                        .ok()
+                        .and_then(|lanes| lanes.as_array().map(Vec::len));
+                    let text = asked["text"].as_str().unwrap_or_default().to_uppercase();
+                    println!("{}", serde_json::json!({ "said": text, "open_lanes": lanes }));
+                    ExitCode::SUCCESS
+                }
+                Some("plain") => {
+                    println!("just words");
+                    ExitCode::SUCCESS
+                }
+                _ => {
+                    eprintln!("hello: this tool is broken");
+                    ExitCode::from(4)
+                }
+            }
+        }
+        Some("assistant") => {
+            let rules = PathBuf::from(said(kitod::plugins::ENV_REPO)).join("HELLO.md");
+            match args.get(1).map(String::as_str) {
+                Some("setup") => {
+                    let text = "# Rules for hello\n\nWork in a Kito lane: open one before you edit.\n";
+                    if let Err(e) = std::fs::write(&rules, text) {
+                        eprintln!("hello: {e}");
+                        return ExitCode::from(1);
+                    }
+                    println!("hello is set up for Kito: its rules are in HELLO.md.");
+                    println!(
+                        "It has no hook before an edit: an edit outside a lane is caught when it is saved."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Some("remove") => {
+                    let _ = std::fs::remove_file(&rules);
+                    println!("hello is no longer set up for Kito.");
+                    ExitCode::SUCCESS
+                }
+                _ => ExitCode::from(2),
+            }
         }
         Some("event") => {
             use std::io::Write;

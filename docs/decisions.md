@@ -1309,6 +1309,21 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-153 · A plugin's tools are listed when asked, under its name
+`kito-mcp` asks the daemon which plugins are enabled each time an agent
+lists the tools or calls one that is not Kito's: a plugin enabled or
+disabled while an agent works is there, or gone, at its next question,
+with nothing to restart. The tools of a plugin come after Kito's own, as
+`kito.<plugin>.<tool>` (with `--tool-prefix kito_`, `kito_<plugin>_<tool>`),
+and their descriptions say that they are the plugin's: what a plugin
+tells an agent is the plugin's word, not Kito's. `kito-mcp` runs the tool
+itself, with the plugin's key, so the daemon answers the tool what the
+plugin was given. An assistant is set up by `kito assistant add`, which
+runs the plugin's own `assistant setup` in the repository and shows what
+it says: Kito knows nothing of that assistant's files. Installing a
+plugin by name from a release is left for when a plugin has one: code
+that downloads and unpacks is not written against nothing.
+
 ### D-152 · Gates are asked with the checks; events are told after the fact
 A gate of a plugin runs where the checks do and as they do: in the copy
 of the merged result, after the commands, confined, stopped when its time

@@ -2278,6 +2278,79 @@ reviewed on a server by roles, with the trailer in the commit
   yet: an agent learns of comments when it is told them.
 - No owners of paths whose approval is required for those paths.
 
+## Phase 19 · plugins — done
+
+Kito had one way to grow: change Kito. A web view, another coding
+assistant, a team's own rule for integration each meant that. Now they
+are programs of their own ([ADR 0005](adr/0005-plugins.md)). Released as
+0.20.0.
+
+### What is there
+
+- **A plugin is a program** (`kitod::plugins`): `kito-<name>` and a
+  `kito-plugin.toml`. Installed for a person (`plugins/` in their Kito
+  directory), enabled by a repository (`[plugins.<name>]`, with what it
+  was given). `kito plugin add --path | enable | disable | list | info |
+  remove`.
+- **A key and permissions** (D-151): the first line on the daemon's
+  socket is a key; a plugin's own makes the connection that plugin's, and
+  every request is checked against `read`, `write`, `integrate`, `admin`
+  as the repository gave them. A method the list does not know needs
+  `admin`; `plugin_key` and `shutdown` are for no plugin.
+- **The daemon's API, version 1** ([`docs/api.md`](api.md)): every method
+  under the permission it needs. A test reads the document and the
+  daemon's source and fails when they disagree.
+- **Commands**: `kito <name>` for a name Kito does not have runs the
+  enabled plugin that declares it, with `KITO_REPO`, `KITO_API` and
+  `KITO_PLUGIN_KEY`.
+- **Gates** (D-152): asked with the checks, in the same confined copy,
+  in the same run when lanes are checked together; pass, fail or wait.
+- **Events** (D-152): a thread hands each event to a queue per plugin;
+  what a plugin last failed at is kept until it runs well again.
+- **Tools for agents** (D-153): `kito-mcp` lists the tools of the plugins
+  enabled, as they are when asked, as `kito.<plugin>.<tool>`.
+- **Assistants** (D-153): `kito assistant add | remove | list` run the
+  plugin's own setup. No assistant plugin exists yet.
+
+### Demo
+
+```bash
+scripts/demo-phase19.sh
+```
+
+Output: [`docs/demo/phase19-demo.txt`](demo/phase19-demo.txt).
+
+### Tests
+
+402 tests in all, on Linux, macOS and Windows. New: permissions of
+methods, manifests, a repository's word written in its configuration
+(`kitod/src/plugins.rs`); the API document against the daemon
+(`kitod/tests/api.rs`); from the command line, with a real plugin
+(`kito-hello`, an example of `kito-cli`): installed, enabled, answered
+what it was given and refused the rest, given less, disabled, removed;
+what is not a plugin; a gate that passes, fails, says to wait, says
+nothing, never ends; events in order with a failure among them; an
+assistant set up and removed (`kito-cli/tests/cli.rs`); a plugin's tools
+listed and called by an agent, with and without a dot in their names
+(`kito-mcp/tests/mcp.rs`).
+
+### Known limitations
+
+- **No plugin is installed by name**: only from a directory. Downloading
+  from a release waits for a plugin that has one.
+- **A plugin runs where the repository is.** The daemon of a directory
+  connected to a server does not answer plugins; on a server, gates and
+  events are those of the repository there.
+- **Gates when lanes are checked together, and on a server**, go through
+  the code that is tested for one lane on one machine, and have no test
+  of their own.
+- **Plugins are trusted programs.** The permissions limit what the daemon
+  answers a plugin; they do not confine what its program does on the
+  machine. Only gates run confined, and only where the checks do (Linux).
+- **What a plugin last failed at** is forgotten when the daemon stops.
+- **Claude Code is still set up by Kito itself**, not by a plugin.
+- No registry of plugins, no signatures beyond a release's checksum.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

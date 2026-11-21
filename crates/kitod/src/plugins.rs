@@ -183,6 +183,32 @@ pub struct GateSpec {
     pub timeout_secs: Option<u64>,
 }
 
+/// A tool a plugin offers to agents: `kito-mcp` lists it as
+/// `kito.<plugin>.<name>` and runs `kito-<plugin> tool <name>` with the
+/// arguments as JSON on its input.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolSpec {
+    pub name: String,
+    /// What it does and when to use it, for the agent.
+    pub description: String,
+    /// The JSON Schema of its arguments (an object).
+    pub input: serde_json::Value,
+    /// Seconds after which it is stopped (default 120).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// The coding assistant a plugin sets up for Kito: `kito-<plugin>
+/// assistant setup` writes that assistant's files in a repository, and
+/// `assistant remove` takes them out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantSpec {
+    /// `codex`, `cursor`: what `kito assistant add` is asked for.
+    pub name: String,
+}
+
 /// What a plugin is, as its `kito-plugin.toml` says.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -200,6 +226,74 @@ pub struct Manifest {
     pub events: Vec<EventSpec>,
     #[serde(rename = "gate", skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<GateSpec>,
+    #[serde(rename = "tool", skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<AssistantSpec>,
+}
+
+/// Runs a program of a plugin for a repository, with `input` on its
+/// standard input and what it needs to reach the daemon in its
+/// environment, and returns what it printed. `Err`: why it failed, with
+/// the end of what it said.
+pub fn run_plugin(
+    program: &Path,
+    args: &[&str],
+    root: &Path,
+    key: &str,
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    use std::process::{Command as Process, Stdio};
+    let mut child = Process::new(program)
+        .args(args)
+        .current_dir(root)
+        .env(ENV_REPO, root)
+        .env(ENV_API, crate::rpc::API.to_string())
+        .env(ENV_KEY, key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    // What it prints is read while it runs: a pipe that fills stops it.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut said = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut said);
+            }
+            said
+        })
+    };
+    let printed = reader(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let errors = reader(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    if let Some(mut pipe) = child.stdin.take() {
+        // One that does not read what it is told is its own business.
+        let _ = pipe.write_all(input);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {} s: stopped", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let (printed, errors) = (printed.join().unwrap_or_default(), errors.join().unwrap_or_default());
+    if status.success() {
+        return Ok(printed);
+    }
+    let how = status.code().map_or("killed by a signal".to_owned(), |code| format!("exit code {code}"));
+    let said = String::from_utf8_lossy(&errors);
+    let said: String = said.trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+    Err(format!("{how}{}{said}", if said.is_empty() { "" } else { ": " }))
 }
 
 /// A gate, ready to be asked.
@@ -253,6 +347,12 @@ impl Manifest {
         }
         for gate in &manifest.gates {
             check_name("gate", &gate.name).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        for tool in &manifest.tools {
+            check_name("tool", &tool.name).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(assistant) = &manifest.assistant {
+            check_name("assistant", &assistant.name).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         if manifest.api == 0 {
             return Err(format!(
@@ -400,6 +500,12 @@ pub struct PluginInfo {
     /// The events it is run for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
+    /// The tools it offers to agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSpec>,
+    /// The coding assistant it sets up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<String>,
     /// What it last failed at, if it has not run well since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
@@ -430,6 +536,8 @@ impl crate::Repo {
             gates: manifest.gates.iter().map(|gate| gate.name.clone()).collect(),
             events: manifest.events.iter().flat_map(|event| event.kinds.iter().cloned()).collect(),
             last_failure: None,
+            tools: manifest.tools,
+            assistant: manifest.assistant.map(|assistant| assistant.name),
             commands: manifest.commands,
             program: found.map(|found| program(&found.dir, name)),
             problem,

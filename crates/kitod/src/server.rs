@@ -1784,47 +1784,8 @@ async fn integration_loop(daemon: Arc<Daemon>) {
 /// Runs a plugin for one event: `kito-<name> event`, with the event as
 /// JSON on its input. `Err`: why it failed.
 fn run_for_event(run: &crate::plugins::EventRun, event: &rpc::Event) -> std::result::Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(&run.program)
-        .arg("event")
-        .current_dir(&run.root)
-        .env(crate::plugins::ENV_REPO, &run.root)
-        .env(crate::plugins::ENV_API, rpc::API.to_string())
-        .env(crate::plugins::ENV_KEY, &run.key)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{}: {e}", run.program.display()))?;
-    if let Some(mut input) = child.stdin.take() {
-        // One that does not read what it is told is its own business.
-        let _ = input.write_all(&serde_json::to_vec(event).unwrap_or_default());
-    }
-    let deadline = Instant::now() + run.timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                let mut said = String::new();
-                if let Some(mut errors) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut errors, &mut said);
-                }
-                let how =
-                    status.code().map_or("killed by a signal".to_owned(), |code| format!("exit code {code}"));
-                let said: String =
-                    said.trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
-                return Err(format!("{how}{}{said}", if said.is_empty() { "" } else { ": " }));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("still running after {} s: stopped", run.timeout.as_secs()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(e.to_string()),
-        }
-    }
+    let told = serde_json::to_vec(event).unwrap_or_default();
+    crate::plugins::run_plugin(&run.program, &["event"], &run.root, &run.key, &told, run.timeout).map(drop)
 }
 
 /// Tells the plugins what happens: each is run for the events it listed,

@@ -691,3 +691,96 @@ fn the_tools_reach_a_repository_kept_by_a_server() {
     drop(serving);
     stop_daemon(&serverdir.join("repos/shop"));
 }
+
+/// Installs the plugin of the tests (an example of `kito-cli`) for the
+/// person the sessions of these tests run as, with this manifest.
+fn install_hello(root: &Path, manifest: &str) {
+    let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
+    let built = Path::new(env!("CARGO_BIN_EXE_kito-mcp")).with_file_name("examples").join(&name);
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    BUILD.call_once(|| {
+        if !built.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kito-cli", "--example", "kito-hello"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kito-hello");
+        }
+    });
+    let dir = root.join(".absent-personal-config/plugins/hello");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(&built, dir.join(&name)).unwrap();
+    fs::write(dir.join("kito-plugin.toml"), manifest).unwrap();
+}
+
+#[test]
+fn the_tools_of_a_plugin_are_offered_to_agents_under_its_name() {
+    let (_tmp, root) = new_repo();
+    let manifest = r#"name = "hello"
+version = "0.3.0"
+api = 1
+permissions = ["read"]
+
+[[tool]]
+name = "shout"
+description = "Says it louder."
+input = { type = "object", properties = { text = { type = "string" } }, required = ["text"] }
+
+[[tool]]
+name = "plain"
+description = "Answers with words."
+
+[[tool]]
+name = "broken"
+description = "Always fails."
+"#;
+    install_hello(&root, manifest);
+    let mut mcp = Session::start(&root, &[]);
+    let names = |mcp: &mut Session| -> Vec<String> {
+        let listed = mcp.request("tools/list", json!({}));
+        listed["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect()
+    };
+    // Installed is not enough: the repository did not enable it.
+    assert!(!names(&mut mcp).iter().any(|name| name.contains("hello")));
+    let mut owner = kitod::client::Client::connect(&root).unwrap();
+    owner.call_value("plugin_enable", json!({ "name": "hello" })).unwrap();
+
+    // Enabled, its tools come after Kito's own, under its name, and say whose they are.
+    let listed = mcp.request("tools/list", json!({}));
+    let tools = listed["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names[names.len() - 3..], ["kito.hello.shout", "kito.hello.plain", "kito.hello.broken"]);
+    assert_eq!(names[names.len() - 4], "kito.close_lane");
+    let shout = &tools[tools.len() - 3];
+    assert_eq!(shout["description"], "Says it louder. (A tool of the plugin `hello`, not of Kito itself.)");
+    assert_eq!(shout["inputSchema"]["required"], json!(["text"]));
+    assert_eq!(tools[tools.len() - 2]["inputSchema"], json!({ "type": "object" }));
+
+    // Called, it is run with the arguments, and asks the daemon as the
+    // plugin it is.
+    mcp.tool("kito.open_lane", json!({ "agent": "alice", "intent": "prices in cents", "scope": ["./"] }))
+        .unwrap();
+    let said = mcp.tool("kito.hello.shout", json!({ "text": "prices in cents" })).unwrap();
+    assert_eq!(said, json!({ "said": "PRICES IN CENTS", "open_lanes": 1 }));
+    // What is not JSON is the text it is; a failure says whose tool failed.
+    assert_eq!(mcp.tool("kito.hello.plain", json!({})).unwrap(), json!({ "result": "just words" }));
+    let failed = mcp.tool("kito.hello.broken", json!({})).unwrap_err();
+    assert!(failed.contains("the tool `broken` of the plugin `hello` failed: exit code 4"), "{failed}");
+    assert!(failed.contains("this tool is broken"), "{failed}");
+
+    // Disabled, they are gone, and calling one says so.
+    owner.call_value("plugin_disable", json!({ "name": "hello" })).unwrap();
+    let listed = mcp.request("tools/list", json!({}));
+    assert!(!listed.to_string().contains("kito.hello"), "{listed}");
+    assert!(mcp.tool("kito.hello.shout", json!({ "text": "x" })).unwrap_err().contains("unknown tool"));
+
+    // For a client that takes no dot in a name.
+    owner.call_value("plugin_enable", json!({ "name": "hello" })).unwrap();
+    drop(mcp);
+    let mut mcp = Session::start(&root, &["--tool-prefix", "kito_"]);
+    let listed = mcp.request("tools/list", json!({})).to_string();
+    assert!(listed.contains("\"kito_hello_shout\"") && !listed.contains("kito_hello.shout"), "{listed}");
+    assert_eq!(mcp.tool("kito_hello_plain", json!({})).unwrap(), json!({ "result": "just words" }));
+    drop(mcp);
+    stop_daemon(&root);
+}

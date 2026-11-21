@@ -72,12 +72,13 @@ commands, events, gates, tools, an assistant.
 ### 2. Installed for a person, enabled by a repository
 
 - **Installed** in the person's Kito directory, `plugins/<name>/` under
-  `KITO_CONFIG_DIR`: `kito plugin add <name>` for a plugin Kito knows by
-  name (`web` is `KitoOrg/kito-web`), `kito plugin add <owner>/<repo>`
-  for any other, `kito plugin add --path <dir>` for one built here. From a
-  GitHub release, the archive for the platform, checked against its
-  SHA-256 as `install.sh` does. `kito plugin list`, `info`, `remove`,
-  `update`.
+  `KITO_CONFIG_DIR`: `kito plugin add --path <dir>` for one built or
+  unpacked here; `kito plugin list`, `info`, `remove`. By name, from a
+  GitHub release (`kito plugin add web` for `KitoOrg/kito-web`, `kito
+  plugin add <owner>/<repo>` for any other: the archive for the platform,
+  checked against its SHA-256 as `install.sh` does), once there is a
+  plugin with a release to install: it is not in 0.20.0, where there was
+  nothing to test it against.
 - **Enabled** by a repository, in `.kito/config.toml`:
 
   ```toml
@@ -136,7 +137,7 @@ is what its permissions and that person's role both allow, never more.
 - **Commands.** `kito <name> [...]` for a name Kito does not have runs
   the enabled plugin that declares it, in the repository, with the rest
   of the line; its exit code is `kito`'s. Kito's own commands cannot be
-  taken. `kito help` lists them apart, with the plugin each comes from.
+  taken. `kito plugin info` and `kito plugin enable` list them.
 - **Events.** For the kinds it lists, the daemon runs `kito-<name> event`
   with the event as JSON on its input: one at a time and in order for
   each plugin, after the event happened, never holding up what caused
@@ -167,10 +168,13 @@ is what its permissions and that person's role both allow, never more.
   On a server the gates are the repository's, like its checks: no client
   adds or removes one.
 - **Tools for agents.** `kito-mcp` offers the tools of the plugins the
-  repository enabled, named `kito.<plugin>.<tool>`, so that an agent and
-  whoever reads its transcript see where each comes from. A call runs
+  repository enabled, after its own, named `kito.<plugin>.<tool>`, and
+  each description ends by saying whose tool it is: an agent, and whoever
+  reads its transcript, see where each comes from. A call runs
   `kito-<name> tool <tool>` with the arguments as JSON on its input; what
-  it prints is the answer. A tool has its plugin's permissions.
+  it prints is the answer (JSON as it is, anything else as text). A tool
+  has its plugin's permissions, and is stopped after two minutes unless
+  it says another time.
 
 A plugin keeps what is its own under `.kito/plugins/<name>/`. It writes
 nothing else in `.kito`, and adds no kind of record to the store.
@@ -189,8 +193,9 @@ A plugin with `[assistant]` sets a coding assistant up for Kito:
 
 - `kito-<name> assistant setup` writes that assistant's files in the
   repository (its MCP configuration with `kito-mcp`, its rules, its
-  hooks), and `assistant remove` takes them out; `kito init --assistant
-  <name>` and `kito assistant add <name>` run it.
+  hooks), and `assistant remove` takes them out; `kito assistant add
+  <name>` and `kito assistant remove <name>` run them, and `kito
+  assistant list` says which assistants the plugins enabled here know.
 - Its hooks are its own programs: they read what the assistant sends
   before an edit, after a command and when a session starts, ask Kito
   (`kito hook before-edit`, `after-shell`, `session-start`, which stay

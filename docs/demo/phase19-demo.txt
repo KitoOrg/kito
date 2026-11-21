@@ -1,0 +1,41 @@
+
+$ kito plugin add --path <demo>/kito-hello
+hello 0.1.0 is installed in <demo>/config/plugins/hello
+  `kito plugin enable hello` lets it run in a repository.
+
+$ kito hello env
+kito: `kito hello` is a command of the plugin `hello`, which this repository did not enable: `kito plugin enable hello`
+
+$ kito plugin enable hello
+hello is enabled in this repository. It may: read, write.
+  kito hello  Ask the daemon as a plugin
+
+$ kito hello env
+repo: <demo>/app
+api: 1
+key: 64 characters
+
+$ kito hello ask lanes
+[]
+
+$ kito hello ask configure {"checks":["true"]}
+hello: the plugin `hello` may not ask `configure`: it needs the permission `admin`, which this repository did not give it (`kito plugin enable hello` gives what it asks for)
+
+$ kito integrate 1
+lane/1: verification failed: `plugin hello: gate prices`
+  | prices under 0.5 are not allowed: lane/1 by alice (2 files) onto main
+  Nothing was integrated: fix it in the lane and integrate again.
+
+$ kito integrate 1
+lane/1: merged and checked; it waits: the gate `prices` of the plugin `hello`: the ticket SHOP-12 is not approved yet
+  `kito integrate lane/1` asks again; for a review, `kito lane review lane/1` says where it stands.
+
+$ kito integrate 1
+lane/1: integrated as ckpt#2 (git …), verified in 0.3 s
+
+$ cat .kito/plugins/hello/events.log
+lane_opened lane/1 alice: a cheaper price [./]
+integrated lane/1 ckpt#2
+
+$ kito status
+Plugin ............ hello 0.1.0 (read, write)
