@@ -439,6 +439,46 @@ impl Daemon {
                         self.with_repo(|repo| repo.remove_note(id, by)).map_err(internal)?,
                     ))
                 }
+                // Comments on a lane (ADR 0004).
+                "comment" => {
+                    let lane = lane()?;
+                    let said = text("text")?;
+                    let on = optional("on");
+                    let reply_to = optional("reply_to")
+                        .map(|id| id.parse::<kito_core::CommentId>())
+                        .transpose()
+                        .map_err(|e: kito_core::IdParseError| (rpc::INVALID_PARAMS, e.to_string()))?;
+                    let person = params.get("on_behalf_of").and_then(person_of);
+                    // Written by an agent for a person, or by the person.
+                    let (by, person) = match optional("agent").filter(|agent| !agent.trim().is_empty()) {
+                        Some(agent) => (Some(kito_core::Author::agent(agent.trim())), person),
+                        None => (person, None),
+                    };
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| {
+                            repo.add_comment(lane, on.as_deref(), said, by, person, reply_to)
+                        })
+                        .map_err(internal)?,
+                    ))
+                }
+                "comments" => {
+                    let lane = lane()?;
+                    let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.comments(lane, all)).map_err(internal)?,
+                    ))
+                }
+                "resolve_comment" => {
+                    let id: kito_core::CommentId = text("comment")?
+                        .parse()
+                        .map_err(|e: kito_core::IdParseError| (rpc::INVALID_PARAMS, e.to_string()))?;
+                    let by = params.get("on_behalf_of").and_then(person_of);
+                    let (person, integrator) = (person_name(params), integrates(params));
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.resolve_comment(id, by, person.as_deref(), integrator))
+                            .map_err(internal)?,
+                    ))
+                }
                 "checkpoint" => {
                     let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
@@ -760,6 +800,9 @@ impl Daemon {
                     let mut status =
                         serde_json::to_value(info).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
                     status["conflicts"] = to_json(serde_json::to_value(conflicts))?;
+                    // What was said about it and is not resolved (ADR 0004).
+                    let comments = self.with_repo(|repo| repo.comments(lane, false)).map_err(internal)?;
+                    status["comments"] = to_json(serde_json::to_value(comments))?;
                     Ok(status)
                 }
                 "set_intent" => {
@@ -955,6 +998,11 @@ impl Daemon {
                 );
                 ("noted", lane, person, what)
             }
+            "comment" => {
+                let on = text(value, "on").map(|on| format!("{on}: ")).unwrap_or_default();
+                ("commented", lane, person, format!("{on}{}", text(value, "text").unwrap_or_default()))
+            }
+            "resolve_comment" => ("comment_resolved", lane, person, text(value, "id").unwrap_or_default()),
             "rename_symbol" => {
                 let what = format!(
                     "{} → {}",

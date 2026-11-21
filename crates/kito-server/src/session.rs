@@ -48,6 +48,9 @@ const ALLOWED: &[&str] = &[
     "remove_note",
     // Review of a lane (ADR 0004).
     "lane_diff",
+    "comment",
+    "comments",
+    "resolve_comment",
 ];
 
 /// Of those, what somebody who may only read can ask.
@@ -68,6 +71,7 @@ const READ: &[&str] = &[
     "reasons",
     "notes",
     "lane_diff",
+    "comments",
     // Asked before an edit and after a command: the answer changes nothing
     // of the repository.
     "before_edit",

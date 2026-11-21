@@ -72,7 +72,8 @@ pub struct ScopeWhy {
 pub struct EditAnswer {
     pub allowed: bool,
     /// `ok`; or why not: `main` (the main directory), `closed` (no such
-    /// open lane), `out_of_scope`, `why` (reasons to read first).
+    /// open lane), `out_of_scope`, `comments` (what was said about the lane, to read
+    /// first), `why` (reasons to read first).
     pub kind: String,
     /// What to tell whoever wanted to make the edit.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -86,6 +87,9 @@ pub struct EditAnswer {
     /// The notes left on that code, not told before (ADR 0003).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<crate::notes::NoteInfo>,
+    /// What was said about the lane, not told before (ADR 0004).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<crate::comments::CommentInfo>,
 }
 
 /// A reason behind code a lane replaced.
@@ -235,6 +239,28 @@ impl Repo {
         let told = self.told_reasons(lane);
         let mut seen = BTreeSet::new();
         notes.into_iter().filter(|note| !told.contains(&note.id) && seen.insert(note.id.clone())).collect()
+    }
+
+    /// The comments on a lane its agent was not told (ADR 0004).
+    pub(crate) fn untold_comments(&mut self, lane: LaneId) -> Vec<crate::comments::CommentInfo> {
+        let comments = self.comments_for_agent(lane);
+        if comments.is_empty() {
+            return comments;
+        }
+        let told = self.told_reasons(lane);
+        comments.into_iter().filter(|comment| !told.contains(&comment.id)).collect()
+    }
+
+    /// Remembers that the agent of a lane was told these comments.
+    pub(crate) fn tell_comments(&mut self, lane: LaneId, comments: &[crate::comments::CommentInfo]) {
+        if comments.is_empty() || !self.lanes.contains_key(&lane) {
+            return;
+        }
+        let told = self.told_reasons(lane);
+        told.extend(comments.iter().map(|comment| comment.id.clone()));
+        if let Ok(bytes) = serde_json::to_vec(told) {
+            let _ = std::fs::write(self.told_file(lane), bytes);
+        }
     }
 
     /// Remembers that a lane was told these notes, with the reasons.
@@ -423,6 +449,30 @@ impl Repo {
                     ),
                 )
             });
+        }
+
+        // Told what was said about the lane (ADR 0004)? Whoever reviews it
+        // speaks to the agent through its comments.
+        let comments = self.untold_comments(lane);
+        if !comments.is_empty() {
+            self.tell_comments(lane, &comments);
+            let mut message =
+                format!("Kito: this edit was held back once. Somebody commented on {lane} and you have not read it:\n");
+            for comment in &comments {
+                let on = comment.on.as_ref().map(|on| format!(" on {on}")).unwrap_or_default();
+                let to = comment.reply_to.as_ref().map(|to| format!(", answering {to}")).unwrap_or_default();
+                let old = if comment.outdated { ", on code that changed since" } else { "" };
+                message
+                    .push_str(&format!("- {}{on} ({}{to}{old}): {}\n", comment.id, comment.by, comment.text));
+                for line in comment.quoted.iter().flat_map(|quoted| quoted.lines()).take(6) {
+                    message.push_str(&format!("    > {line}\n"));
+                }
+            }
+            message.push_str(
+                "Do what they ask, or answer with the comment tool (reply_to) when you will not or when \
+                 there is something to say. Then make this edit again: it goes through.",
+            );
+            return Ok(EditAnswer { comments, ..refused("comments", message) });
         }
 
         // Told why the lines are the way they are?

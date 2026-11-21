@@ -264,6 +264,50 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "comment",
+            "Say something about a lane, or about code in it, where the lane is: to whoever works in it \
+             when you review it, or in answer (`reply_to`) to a comment on yours. The agent of the lane \
+             is told before its next edit. On lines, the comment keeps what they said and stays on them \
+             while the lane has them. To say why code is the way it is, for whoever changes it later, \
+             leave a note instead.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "lane": lane.clone(),
+                    "text": { "type": "string", "description": "What you have to say, in a sentence or two" },
+                    "on": { "type": "string", "description": "What it is about, as the lane has it: file:name, a file, or lines (src/shop.ts:12-14). Leave out for the lane as a whole, and in an answer" },
+                    "reply_to": { "type": "string", "description": "The comment you answer (comment#3)" },
+                    "agent": { "type": "string", "description": "Your name: it signs the comment" }
+                },
+                "required": ["lane", "text"]
+            }),
+        ),
+        (
+            "comments",
+            "What was said about a lane and is not resolved, each comment followed by its answers: who, \
+             on what (where those lines are now), what the lines said (`quoted`), and `outdated` when \
+             that code changed since. `status` gives them too.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "lane": lane.clone(),
+                    "all": { "type": "boolean", "description": "The resolved ones too" }
+                },
+                "required": ["lane"]
+            }),
+        ),
+        (
+            "resolve_comment",
+            "Mark a comment as dealt with: it is kept, and no longer told. For who wrote it, for the \
+             owner of the lane (or its agent) once what it asked is done, or for somebody who may \
+             integrate.",
+            json!({
+                "type": "object",
+                "properties": { "comment": { "type": "string", "description": "comment#3" } },
+                "required": ["comment"]
+            }),
+        ),
+        (
             "note",
             "Leave a note on code: something whoever changes it must know that no change of the code \
              says (\"called by the nightly billing job, outside this repository: do not rename\", \"slow \
@@ -473,6 +517,9 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
             }
             Ok(diff)
         }
+        "comment" => ask("comment", args),
+        "comments" => ask("comments", args),
+        "resolve_comment" => ask("resolve_comment", args),
         "note" => ask("add_note", args),
         "resolve_conflict" => ask("resolve_conflict", args),
         "close_lane" => ask("close_lane", args),

@@ -215,6 +215,11 @@ counter_id!(
     NoteId,
     "note"
 );
+counter_id!(
+    /// Sequence number of a comment on a lane (`comment#3`, ADR 0004).
+    CommentId,
+    "comment"
+);
 
 #[cfg(test)]
 mod tests {

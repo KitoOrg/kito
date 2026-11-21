@@ -1309,6 +1309,21 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-149 · A comment on lines is found by what the lines said
+A comment on lines keeps their text. Shown, it is looked for in the
+lane's file as it is: found, the comment is on those lines where they
+are now (the nearest place, when the same lines are there twice); not
+found, it is `outdated` and shown with what it quoted. No positions are
+kept up to date through the edits, and nothing is guessed: either the
+lane still has the lines the reviewer saw or it does not. A comment on a
+function, with no lines, is outdated once the lane recorded an op on that
+function after the comment (`at_ops`, the count of the lane's ops then,
+as a proposal has). The first edit after a comment is held back once
+with every comment the lane's agent was not told, whatever file the edit
+is in: a review is about the lane, and "add a test" is about no line.
+Comments have a log of their own, apart from the verdicts' (a keyed log
+has one kind of key).
+
 ### D-148 · The diff of a lane is against what it started from
 `lane_diff` compares the lane as it is with the state it started from
 (or was last brought up to), not with its target as it is now: what the

@@ -360,6 +360,27 @@ enum LaneCmd {
     Close { lane: String },
     /// Ops since the base, files touched, open conflicts
     Status { lane: String },
+    /// Say something about a lane, or about code in it: its agent is told
+    Comment {
+        lane: String,
+        text: String,
+        /// What it is about: file:name, a file, or lines (src/shop.ts:12-14)
+        #[arg(long, conflicts_with = "reply")]
+        on: Option<String>,
+        /// The comment it answers (comment#3)
+        #[arg(long)]
+        reply: Option<String>,
+    },
+    /// What was said about a lane and is not resolved
+    Comments {
+        lane: String,
+        /// The resolved ones too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark a comment as dealt with: it is kept, and no longer told
+    #[command(name = "resolve-comment")]
+    ResolveComment { comment: String },
     /// What a lane changes: files, functions and lines (ADR 0004)
     Diff {
         lane: String,
@@ -460,6 +481,33 @@ fn root_of(cli: &Cli) -> Result<PathBuf, String> {
 
 fn daemon(cli: &Cli) -> Result<Client, String> {
     Client::connect_or_start(&root_of(cli)?).map_err(fail)
+}
+
+/// Comments as text: each with what it quoted, its answers under it.
+fn comments_text(comments: &[Value]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for comment in comments {
+        let text = |key: &str| comment[key].as_str().unwrap_or_default();
+        let pad = if comment["reply_to"].is_string() { "  " } else { "" };
+        let on = comment["on"].as_str().map(|on| format!(" on {on}")).unwrap_or_default();
+        let whose = match comment["for"].as_str() {
+            Some(person) => format!("{}, of {person}", text("by")),
+            None => text("by").to_owned(),
+        };
+        let mut marks = String::new();
+        if comment["outdated"] == true {
+            marks.push_str("  [the code changed since]");
+        }
+        if let Some(by) = comment["resolved_by"].as_str() {
+            let _ = write!(marks, "  [resolved by {by}]");
+        }
+        let _ = writeln!(out, "{pad}{}{on} ({whose}): {}{marks}", text("id"), text("text"));
+        for line in text("quoted").lines().filter(|_| comment["quoted"].is_string()) {
+            let _ = writeln!(out, "{pad}  > {line}");
+        }
+    }
+    out
 }
 
 /// The diff of a lane as text: a line per file, its functions, its hunks.
@@ -1992,6 +2040,36 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 }
             }
         }
+        LaneCmd::Comment { lane, text, on, reply } => {
+            let said: Value = client
+                .call("comment", json!({ "lane": lane, "text": text, "on": on, "reply_to": reply }))
+                .map_err(fail)?;
+            if cli.json {
+                print_json(&said);
+                return Ok(());
+            }
+            print!("{}", comments_text(std::slice::from_ref(&said)));
+        }
+        LaneCmd::Comments { lane, all } => {
+            let said: Value = client.call("comments", json!({ "lane": lane, "all": all })).map_err(fail)?;
+            if cli.json {
+                print_json(&said);
+                return Ok(());
+            }
+            match said.as_array().map_or(&[][..], Vec::as_slice) {
+                [] if *all => println!("Nobody commented on it."),
+                [] => println!("No comment waits on it."),
+                said => print!("{}", comments_text(said)),
+            }
+        }
+        LaneCmd::ResolveComment { comment } => {
+            let done: Value = client.call("resolve_comment", json!({ "comment": comment })).map_err(fail)?;
+            if cli.json {
+                print_json(&done);
+                return Ok(());
+            }
+            println!("{} is resolved.", done["id"].as_str().unwrap_or(comment));
+        }
         LaneCmd::Diff { lane, paths, stat } => {
             let diff: Value =
                 client.call("lane_diff", json!({ "lane": lane, "paths": paths })).map_err(fail)?;
@@ -2040,6 +2118,10 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
             let conflicts: Vec<ConflictInfo> =
                 serde_json::from_value(status["conflicts"].clone()).unwrap_or_default();
             conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
+            if let Some(said) = status["comments"].as_array().filter(|said| !said.is_empty()) {
+                println!("Comments:");
+                comments_text(said).lines().for_each(|line| println!("  {line}"));
+            }
         }
     }
     Ok(())

@@ -1621,6 +1621,14 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     let diff = ok(&here, &["lane", "diff", "1"]);
     assert!(diff.contains("changed  src/shop.py  +1 -1\n  changed  total"), "{diff}");
     assert!(diff.contains("+    subtotal = round(price * 100) * quantity"), "{diff}");
+    // So are its comments: said from here, kept there.
+    let said = ok(&here, &["lane", "comment", "1", "Half a cent rounds up?", "--on", "src/shop.py:2"]);
+    assert!(said.starts_with("comment#1 on src/shop.py:2 ("), "{said}");
+    assert!(said.contains("  >     subtotal = round(price * 100) * quantity"), "{said}");
+    assert!(ok(&here, &["lane", "status", "1"]).contains(
+        "Comments:
+  comment#1 on src/shop.py:2"
+    ));
     let daemon = ok(&here, &["daemon", "status"]);
     assert!(
         daemon.contains("Connected to ...... `shop` on") && daemon.contains("Lanes kept here ... 2"),
@@ -1813,4 +1821,88 @@ changed  src/shop.ts  +2 -2
         .contains("main changed 1 file since the lane started: it has not seen them"));
     let none = kito(root, &["lane", "diff", "main"]);
     assert!(String::from_utf8_lossy(&none.stderr).contains("the main lane has no diff"));
+}
+
+#[test]
+fn comments_on_a_lane_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(prices: number[]): number {
+  let sum = 0;
+  for (const price of prices) {
+    sum += price;
+  }
+  return sum;
+}
+";
+    fs::write(
+        root.join(".gitignore"),
+        ".kito/
+",
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "./"]);
+    let work = root.join(".kito/lanes/1/work");
+    assert_eq!(
+        ok(root, &["lane", "comments", "1"]),
+        "No comment waits on it.
+"
+    );
+
+    fs::write(work.join("src/shop.ts"), shop.replace("sum += price;", "sum += Math.round(price * 100);"))
+        .unwrap();
+    // On the working copy as it is: nobody has to sync first.
+    let said = ok(root, &["lane", "comment", "1", "Half a cent rounds up?", "--on", "src/shop.ts:4"]);
+    assert_eq!(
+        said,
+        "comment#1 on src/shop.ts:4 (ada): Half a cent rounds up?
+  >     sum += Math.round(price * 100);
+"
+    );
+    ok(root, &["lane", "comment", "1", "Looks right otherwise."]);
+    ok(root, &["lane", "comment", "1", "It does: Math.round.", "--reply", "comment#1"]);
+    let listed = "comment#1 on src/shop.ts:4 (ada): Half a cent rounds up?
+  >     sum += Math.round(price * 100);
+  comment#3 (ada): It does: Math.round.
+comment#2 (ada): Looks right otherwise.
+";
+    assert_eq!(ok(root, &["lane", "comments", "1"]), listed);
+    // The lane says what waits on it.
+    let status = ok(root, &["lane", "status", "1"]);
+    assert!(
+        status.contains(
+            "Comments:
+  comment#1 on src/shop.ts:4 (ada): Half a cent rounds up?"
+        ),
+        "{status}"
+    );
+    assert_eq!(json(root, &["lane", "status", "1", "--json"])["comments"].as_array().unwrap().len(), 3);
+
+    // The agent in the lane is told before its next edit, once.
+    let file = work.join("src/shop.ts");
+    let held = hook(root, &["hook", "before-edit"], &edit(&file, "let sum = 0;", "let sum = 0.0;"));
+    let told = refusal(&held);
+    assert!(told.contains("Somebody commented on lane/1") && told.contains("comment#2 (ada)"), "{told}");
+
+    assert_eq!(
+        ok(root, &["lane", "resolve-comment", "comment#1"]),
+        "comment#1 is resolved.
+"
+    );
+    assert_eq!(
+        ok(root, &["lane", "comments", "1"]),
+        "comment#2 (ada): Looks right otherwise.
+"
+    );
+    let all = ok(root, &["lane", "comments", "1", "--all"]);
+    assert!(all.contains("Half a cent rounds up?  [resolved by ada]"), "{all}");
+    let twice = kito(root, &["lane", "resolve-comment", "comment#1"]);
+    assert!(String::from_utf8_lossy(&twice.stderr).contains("resolved already"));
+    let both = kito(root, &["lane", "comment", "1", "x", "--on", "src/shop.ts", "--reply", "comment#2"]);
+    assert!(!both.status.success());
 }

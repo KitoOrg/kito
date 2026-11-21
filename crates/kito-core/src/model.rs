@@ -596,6 +596,48 @@ pub enum NoteTarget {
     Path(PathBuf),
 }
 
+/// Something said about a lane, or about code in it, by whoever reviews
+/// it; or an answer to that. ADR 0004.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: crate::CommentId,
+    pub lane: LaneId,
+    /// What it is on; none: the lane as a whole, or what it answers is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<CommentTarget>,
+    pub text: String,
+    /// Who wrote it: a person, or an agent.
+    pub by: Author,
+    /// Whom the agent works for, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<Author>,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// How many ops the lane had then: what was looked at.
+    pub at_ops: u64,
+    /// The comment it answers: the one that started the exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<crate::CommentId>,
+    /// Who resolved it, and when: it is kept, and no longer told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<(Author, u64)>,
+}
+
+/// The code a comment is on, as the lane had it then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentTarget {
+    pub path: PathBuf,
+    /// The function it is on, or the one its lines are in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<SymbolId>,
+    /// The lines, from 1, in the lane's text then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<(u32, u32)>,
+    /// What those lines said.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quoted: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: CheckpointId,

@@ -27,11 +27,13 @@ pub use codec::CodecError;
 pub use edit::{apply_edits, EditError, TextEdit};
 pub use hash::{Hash, HashParseError};
 pub use hlc::{Hlc, HlcClock};
-pub use ids::{BlobId, CheckpointId, ConflictId, IdParseError, IntentId, LaneId, NoteId, OpId, SymbolId};
+pub use ids::{
+    BlobId, CheckpointId, CommentId, ConflictId, IdParseError, IntentId, LaneId, NoteId, OpId, SymbolId,
+};
 pub use model::{
-    Author, AuthorKind, Checkpoint, Conflict, ConflictKind, FileMode, Fingerprint, Intent, Lane, LaneState,
-    Lang, Location, Note, NoteTarget, Op, OpKind, Proposal, RefSource, Reference, Resolution, ScopeEntry,
-    ScopeItem, Symbol, SymbolKind, Verification,
+    Author, AuthorKind, Checkpoint, Comment, CommentTarget, Conflict, ConflictKind, FileMode, Fingerprint,
+    Intent, Lane, LaneState, Lang, Location, Note, NoteTarget, Op, OpKind, Proposal, RefSource, Reference,
+    Resolution, ScopeEntry, ScopeItem, Symbol, SymbolKind, Verification,
 };
 pub use symbols::{SymbolEntry, SymbolError, SymbolTable};
 pub use tree::{Tree, TreeEntry, TreeError};

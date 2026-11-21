@@ -11,8 +11,8 @@ use crate::objects::{Packs, Stored};
 use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
 use kito_core::{
-    codec, BlobId, Checkpoint, CheckpointId, Conflict, ConflictId, Intent, IntentId, Lane, LaneId, Note,
-    NoteId, Op, OpId, SymbolId,
+    codec, BlobId, Checkpoint, CheckpointId, Comment, CommentId, Conflict, ConflictId, Intent, IntentId,
+    Lane, LaneId, Note, NoteId, Op, OpId, SymbolId,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -115,6 +115,7 @@ pub struct RecoveryReport {
     pub lanes: LogRecovery,
     pub conflicts: LogRecovery,
     pub notes: LogRecovery,
+    pub comments: LogRecovery,
     pub index: IndexRecovery,
 }
 
@@ -128,6 +129,7 @@ impl RecoveryReport {
             + self.lanes.discarded_bytes
             + self.conflicts.discarded_bytes
             + self.notes.discarded_bytes
+            + self.comments.discarded_bytes
     }
 }
 
@@ -223,6 +225,7 @@ pub struct Store {
     lanes: KeyedLog<LaneId, Lane>,
     conflicts: KeyedLog<ConflictId, Conflict>,
     notes: KeyedLog<NoteId, Note>,
+    comments: KeyedLog<CommentId, Comment>,
     index: Index,
     pending: Pending,
     /// The blobs read or written last: a new version of a file is stored as
@@ -371,6 +374,16 @@ impl Store {
             &lost_found,
             None,
         )?;
+        // Comments on lanes (ADR 0004): kept like the notes.
+        let (comments, comments_recovery) = KeyedLog::open(
+            &dir.join("comments"),
+            LogKind::Comments,
+            "comment",
+            |comment: &Comment| comment.id,
+            &*opts.fs,
+            &lost_found,
+            None,
+        )?;
         let ends = SmallLogs {
             checkpoints: checkpoints.len(),
             intents: intents.len(),
@@ -391,6 +404,7 @@ impl Store {
             lanes,
             conflicts,
             notes,
+            comments,
             index,
             pending: Pending::default(),
             recent: Mutex::new(Recent::default()),
@@ -403,6 +417,7 @@ impl Store {
                 lanes: lanes_recovery,
                 conflicts: conflicts_recovery,
                 notes: notes_recovery,
+                comments: comments_recovery,
                 index: index_recovery,
             },
             index_dirty: false,
@@ -897,6 +912,29 @@ impl Store {
 
     pub fn next_note_id(&self) -> NoteId {
         NoteId(self.notes.last_key().map_or(1, |id| id.0 + 1))
+    }
+
+    // ------------------------------------------------------------ comments
+
+    /// Records (or updates: a resolution) a comment on a lane durably
+    /// (ADR 0004).
+    pub fn put_comment(&mut self, comment: &Comment) -> Result<()> {
+        self.check()?;
+        let put = self.comments.put(comment);
+        self.guard(put)
+    }
+
+    pub fn comment(&self, id: CommentId) -> Option<&Comment> {
+        self.comments.get(id)
+    }
+
+    /// Every comment ever written, in ID order, resolved ones included.
+    pub fn comments(&self) -> impl DoubleEndedIterator<Item = &Comment> {
+        self.comments.iter()
+    }
+
+    pub fn next_comment_id(&self) -> CommentId {
+        CommentId(self.comments.last_key().map_or(1, |id| id.0 + 1))
     }
 
     /// The index takes note of the confirmed length of the logs it does not

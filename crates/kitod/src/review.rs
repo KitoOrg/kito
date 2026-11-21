@@ -165,7 +165,7 @@ fn label(table: &SymbolTable, id: SymbolId) -> Option<String> {
 }
 
 /// The symbol an op is about.
-fn symbol_of(kind: &OpKind) -> Option<SymbolId> {
+pub(crate) fn symbol_of(kind: &OpKind) -> Option<SymbolId> {
     match kind {
         OpKind::AddSymbol { sym, .. } => Some(sym.id),
         OpKind::RemoveSymbol { id }

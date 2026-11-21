@@ -80,7 +80,7 @@ pub struct Comment {
     pub by: Author,
     pub person: Option<Author>,     // whom an agent works for
     pub at_ms: u64,
-    pub at_op: OpId,                // the lane's last op when it was written
+    pub at_ops: u64,                // how many ops the lane had when it was written
     pub reply_to: Option<CommentId>,
     pub resolved: Option<(Author, u64)>,
 }
@@ -88,27 +88,34 @@ pub struct Comment {
 pub struct CommentTarget {
     pub path: PathBuf,
     pub symbol: Option<SymbolId>,   // the function the lines are in
-    pub lines: Option<(u32, u32)>,  // in the lane's text at `at_op`
+    pub lines: Option<(u32, u32)>,  // in the lane's text then
     pub quoted: String,             // those lines, as they were
 }
 ```
 
-- **It stays with the code it is about.** A comment on lines is the
-  comment of the function they are in, as a note is (ADR 0003); `quoted`
-  keeps what the lines said. When that function changed in the lane after
-  `at_op`, the comment is shown as `outdated`, with what it quoted: it is
-  neither moved by guessing nor dropped.
+- **It stays with the code it is about.** A comment on lines keeps what
+  the lines said (`quoted`). While the lane's file still has those lines,
+  wherever they moved, the comment is on them, at the place nearest to
+  where they were; once it does not, the comment is `outdated` and shown
+  with what it quoted: it is neither moved by guessing nor dropped. A
+  comment on a function follows it through renames and moves, and is
+  `outdated` once the lane recorded something on that function after
+  `at_ops`; one on a file, once the file is gone (D-149).
 - **The agent in the lane is told.** Comments that are not resolved are
-  part of `kito lane status`, of what `open_lane` answers for a lane that
-  is taken up again, and of what the hooks tell an agent before it edits
-  code (phase 11): once each, like notes. A comment is how a person tells
-  an agent in a lane what to change.
+  part of `kito lane status` (and of the MCP tool `status`), and of what
+  the hooks tell an agent before it edits (phase 11): the first edit
+  after a comment is held back once, with the comments not told yet. What
+  the lane's own agent wrote is not told back. A comment is how a person
+  tells an agent in a lane what to change.
+- **Answers** join the exchange a comment started: an answer to an answer
+  is an answer to the first comment.
 - **Resolved**, not removed: by who wrote it, by the lane's owner, or by
-  somebody who may integrate. A reply does not resolve.
-- `kito lane comment <lane> [<target>] "<text>"` (`--reply comment#7`),
-  `kito lane comments <lane>`, `kito lane resolve-comment comment#7`; the
-  MCP tools `comment` and `comments`; the daemon's `comment`, `comments`,
-  `resolve_comment`. An event, `commented`.
+  somebody who may integrate. An answer does not resolve.
+- `kito lane comment <lane> "<text>"` (`--on <target>`, `--reply
+  comment#7`), `kito lane comments <lane>` (`--all`), `kito lane
+  resolve-comment comment#7`; the MCP tools `comment`, `comments` and
+  `resolve_comment`; the daemon's methods of the same names. Events:
+  `commented`, `comment_resolved`.
 
 ### 3. Verdicts
 
@@ -170,9 +177,10 @@ waiting lanes lack nothing but that ("approved, to integrate"). With
 
 ### 5. Where it is kept, and who may
 
-- A log of its own, `.kito/reviews`, kept like the notes log (the last
-  record of a comment or of a person's verdict wins; `LogKind::Reviews`).
-  The store's format does not change, and an older Kito ignores the file.
+- Logs of their own, kept like the notes log: `.kito/comments` (the last
+  record of a comment wins; `LogKind::Comments`) and `.kito/verdicts`
+  (the last of a person on a lane wins). The store's format does not
+  change, and an older Kito ignores the files.
 - On a server: reading needs `read`; commenting and giving a verdict need
   `write`; `required` is counted among people with `write` or more.
 - A closed lane keeps its review. `why` on code that came in through a

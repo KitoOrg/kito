@@ -1062,7 +1062,7 @@ impl Repo {
     }
 
     /// The content of a file as a lane has it.
-    fn text_of(&self, lane: LaneId, file: &Path) -> Result<String> {
+    pub(crate) fn text_of(&self, lane: LaneId, file: &Path) -> Result<String> {
         let entry = self
             .work(lane)?
             .tree
