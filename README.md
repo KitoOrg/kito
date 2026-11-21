@@ -31,7 +31,7 @@ runnable demo.
 | 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch and checks | done |
 | 17 | Review of a lane: diffs, comments and approvals, in the daemon and the server; a web view as a separate, optional program | planned |
 | 18 | The why graph, better: intents that say nothing refused, notes on code ([ADR 0003](docs/adr/0003-notes-on-code.md)), lines followed across file renames | done |
-| — | Windows ([ADR 0002](docs/adr/0002-windows.md)): builds; tests under way | in progress |
+| — | Windows ([ADR 0002](docs/adr/0002-windows.md)): the tests pass there, in CI; no sandbox, no partial-save detection | done |
 
 ## Crates
 

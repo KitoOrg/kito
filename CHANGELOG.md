@@ -6,8 +6,20 @@ of a version are its section here.
 
 ## [Unreleased]
 
-Windows (ADR 0002), under way: Kito builds for Windows; its tests do not
-pass there yet.
+Windows ([ADR 0002](docs/adr/0002-windows.md)):
+
+- Kito runs on Windows itself, not only in WSL: its tests pass there and
+  run in CI next to Linux and macOS.
+- A release has `kito-<version>-windows-x86_64.zip`, and `install.ps1`
+  installs it (`irm .../install.ps1 | iex`).
+- Not on Windows: the sandbox of checks and lane commands (they run
+  unconfined, and Kito says so), the executable bit, and links, which are
+  kept as files holding their target.
+- Checks run through `sh` when Git for Windows' is on the `PATH`, and
+  through `cmd` otherwise.
+- Fixed there: the store's recovery truncates through a handle that may
+  (a file opened to append may not); server tokens come from the system's
+  randomness instead of `/dev/urandom`.
 
 ## [0.18.0]
 

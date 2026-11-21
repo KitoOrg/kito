@@ -23,7 +23,7 @@ need uname
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) die "no build for $(uname -s): Kito runs on Linux and macOS (on Windows, in WSL)" ;;
+  *) die "no build for $(uname -s): Kito runs on Linux and macOS (on Windows: install.ps1, or this in WSL)" ;;
 esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;

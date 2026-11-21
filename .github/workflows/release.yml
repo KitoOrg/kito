@@ -24,6 +24,7 @@ jobs:
           - { platform: linux-aarch64, target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
           - { platform: macos-arm64, target: aarch64-apple-darwin, runner: macos-15 }
           - { platform: macos-x86_64, target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { platform: windows-x86_64, target: x86_64-pc-windows-msvc, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -37,16 +38,25 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           name="kito-${version}-${{ matrix.platform }}"
           mkdir -p "dist/$name"
-          for bin in kito kitod kito-mcp kito-server; do cp "target/dist/$bin" "dist/$name/"; done
           cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            # A zip, with `.exe`: what Windows opens by itself.
+            for bin in kito kitod kito-mcp kito-server; do cp "../target/dist/$bin.exe" "$name/"; done
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            echo "$(sha256sum "$name.zip" | cut -d' ' -f1)  $name.zip" > "$name.zip.sha256"
+          else
+            for bin in kito kitod kito-mcp kito-server; do cp "../target/dist/$bin" "$name/"; done
+            tar -czf "$name.tar.gz" "$name"
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
           path: |
             dist/*.tar.gz
-            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.sha256
 
   release:
     needs: build
@@ -71,5 +81,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS install.sh \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.zip dist/*.sha256 dist/SHA256SUMS \
+            install.sh install.ps1 \
             --title "Kito ${GITHUB_REF_NAME#v}" --notes-file notes.md
