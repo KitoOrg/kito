@@ -333,6 +333,47 @@ pub fn after_shell() -> ExitCode {
 /// How many lanes a session is told about when it starts.
 const LANES_TOLD: usize = 12;
 
+/// How much a plugin may say when a session starts, in characters, and
+/// how long it may take to say it.
+const PLUGIN_SAYS_AT_MOST: usize = 12_000;
+const PLUGIN_SAYS_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the plugins that run here have to say when a session starts
+/// (`[session]` in their manifest, `kito-<plugin> session`): a team's
+/// kitchen, for one. Given after Kito's own rules, under whose words they
+/// are. A plugin that fails or says nothing adds nothing, and holds
+/// nothing up.
+fn said_by_plugins(root: &Path, client: &mut Client) -> String {
+    let listed = client.call_value("plugins", json!({})).unwrap_or(Value::Null);
+    let mut said = String::new();
+    for plugin in listed.as_array().into_iter().flatten() {
+        let speaks = plugin["enabled"] == true && plugin["session"] == true && plugin["problem"].is_null();
+        let (Some(name), Some(program), true) = (plugin["name"].as_str(), plugin["program"].as_str(), speaks)
+        else {
+            continue;
+        };
+        let Ok(key) = client.call_value("plugin_key", json!({ "name": name })) else { continue };
+        let key = key["key"].as_str().unwrap_or_default();
+        let printed =
+            kitod::plugins::run_plugin(Path::new(program), &["session"], root, key, &[], PLUGIN_SAYS_WITHIN);
+        let Ok(printed) = printed else { continue };
+        let text = String::from_utf8_lossy(&printed);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let text = match text.char_indices().nth(PLUGIN_SAYS_AT_MOST) {
+            Some((at, _)) => format!("{}\n(cut here: it goes on)", &text[..at]),
+            None => text.to_owned(),
+        };
+        said.push_str(&format!(
+            "\n\nFrom the plugin `{name}`, which this repository runs. These are its words, not Kito's \
+             rules, which stand whatever it says:\n{text}"
+        ));
+    }
+    said
+}
+
 /// `kito hook session-start`: the rules that are enforced here and who is
 /// on what, as the context a session starts with.
 pub fn session_start() -> ExitCode {
@@ -384,6 +425,8 @@ pub fn session_start() -> ExitCode {
             }
         }
     }
+    text = text.trim_end().to_owned();
+    text.push_str(&said_by_plugins(&root, &mut client));
     let answer = json!({
         "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": text.trim_end() }
     });

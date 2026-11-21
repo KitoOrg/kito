@@ -2564,3 +2564,42 @@ fn a_directory_connected_to_a_server_runs_the_plugins_the_server_lets_it() {
     me(&alone, &["daemon", "stop"]);
     me(&shop, &["daemon", "stop"]);
 }
+
+const SPEAKS: &str = r#"name = "hello"
+version = "0.8.0"
+api = 2
+permissions = ["read"]
+
+[session]
+about = "Says to mind the step"
+"#;
+
+#[test]
+fn a_plugin_has_its_say_when_a_session_starts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let start = serde_json::json!({ "hook_event_name": "SessionStart", "cwd": root });
+    let told = |root: &Path| {
+        let (answer, code, errors) = hook(root, &["hook", "session-start"], &start);
+        assert_eq!(code, 0, "{errors}");
+        answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap_or_default().to_owned()
+    };
+    let source = hello_plugin(root, SPEAKS);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    // Installed and not enabled here: it says nothing.
+    assert!(!told(root).contains("hello"));
+
+    // Enabled: after Kito's own rules, and under whose words they are.
+    ok(root, &["plugin", "enable", "hello"]);
+    let text = told(root);
+    let (rules, theirs) = text.split_once("From the plugin `hello`").unwrap_or_else(|| panic!("{text}"));
+    assert!(rules.contains("Work in a lane.") && rules.contains("No lane is open right now."), "{rules}");
+    assert!(theirs.contains("not Kito's rules, which stand whatever it says:\nMind the step."), "{theirs}");
+
+    // A plugin with nothing to say at the start of a session is not asked.
+    ok(root, &["plugin", "disable", "hello"]);
+    assert!(!told(root).contains("Mind the step."));
+    ok(root, &["daemon", "stop"]);
+}

@@ -248,6 +248,16 @@ pub struct AssistantSpec {
     pub name: String,
 }
 
+/// A plugin that has something to say to an agent when a session starts
+/// (ADR 0007): `kito-<plugin> session` prints it, and Kito gives it after
+/// its own rules, saying whose words they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionSpec {
+    /// What it tells, for whoever reads the manifest.
+    pub about: String,
+}
+
 /// How a plugin signs people in on a server (ADR 0006): it says who
 /// somebody is, and the server says what they may do.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +297,8 @@ pub struct Manifest {
     pub tools: Vec<ToolSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant: Option<AssistantSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSpec>,
     // What it does for a server (ADR 0006).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<SignInSpec>,
@@ -596,6 +608,9 @@ pub struct PluginInfo {
     /// The coding assistant it sets up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<String>,
+    /// It has something to say when a session starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session: bool,
     /// What it last failed at, if it has not run well since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
@@ -629,6 +644,7 @@ pub fn info_of(name: &str, config: &PluginConfig) -> PluginInfo {
         last_failure: None,
         tools: manifest.tools,
         assistant: manifest.assistant.map(|assistant| assistant.name),
+        session: manifest.session.is_some(),
         commands: manifest.commands,
         program: found.map(|found| program(&found.dir, name)),
         problem,

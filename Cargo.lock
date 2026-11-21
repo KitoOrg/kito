@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "kito-cli"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "kito-core",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "kito-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "kito-diff"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "criterion",
  "kito-core",
@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "kito-git"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "gix",
  "kito-core",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "kito-integrate"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "rustix",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "kito-lane"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "reflink-copy",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "kito-mcp"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "kitod",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "kito-merge"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "kito-diff",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "kito-parse"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "proptest",
@@ -2104,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "kito-semantic"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "kito-core",
  "kito-diff",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "kito-server"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "axum",
  "clap",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "kito-store"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "crc32c",
  "criterion",
@@ -2156,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "kitod"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "getrandom 0.2.17",
  "ignore",

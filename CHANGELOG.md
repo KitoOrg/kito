@@ -4,9 +4,11 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
-## [Unreleased]
+## [0.22.0]
 
-A team's kitchen ([ADR 0007](docs/adr/0007-kitchens.md)), under way:
+A team's kitchen (phase 21, [ADR 0007](docs/adr/0007-kitchens.md)): what
+Kito needs so that a plugin can give every agent of a team the same
+behaviour, concepts, recipes and tools, kept on the team's server.
 
 - **Plugins run in a directory connected to a server**: those the
   server enabled for its clients (`kito-server plugin enable <name>
@@ -16,7 +18,14 @@ A team's kitchen ([ADR 0007](docs/adr/0007-kitchens.md)), under way:
   server, which runs `kito-<name> answer <question>` and is told who
   asks, about which repository and with which role. The daemon's API is
   version 2; plugins written for version 1 run as they did.
-- Not yet: the kitchen itself (`kito-kitchen`).
+- **What a plugin says when a session starts**: a plugin with
+  `[session]` in its manifest is run then, and what it prints is given
+  to the agent after Kito's own rules, under whose words they are.
+- The kitchen itself is the plugin `kito-kitchen`: a repository on the
+  server (`behaviour.md`, `concepts/`, `recipes/`, `tools/`, and
+  `parts/` a repository picks from), `kito-server kitchen …` there,
+  `kito kitchen …` and tools for agents in every connected directory,
+  and a copy for when the server is away.
 
 ## [0.21.0]
 

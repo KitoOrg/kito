@@ -52,9 +52,11 @@ parts/<part>/…          the same four, for the repositories that pick it
   is about (the first line of the file). An agent is told the names and
   the lines, and asks for the text when it needs it: a kitchen can be
   large without being in every prompt.
-- **A tool** is a command and what it takes (`command`, `args`, `about`,
-  `input`, `timeout_secs`), run in the lane's working copy on the
-  machine of whoever works. It is offered to agents next to Kito's own.
+- **A tool** is a command and what it takes (`command` or a `script`
+  the kitchen carries, `args`, `about`, `input`, `timeout_secs`), run in
+  the lane's working copy on the machine of whoever works. Agents reach
+  it through one tool of the plugin, `run`, which takes its name: what a
+  plugin offers is fixed in its manifest, and a kitchen's tools are not.
 - **A part** (`parts/rust`, `parts/web`) is optional. A repository on
   the server picks parts: `kito-server kitchen parts <repository>
   rust web`. What it gets is the kitchen's base and its parts, a part
@@ -88,9 +90,11 @@ One program, `kito-kitchen` (`KitoOrg/kito-kitchen`), on both sides:
   repository's main lane, as integrated: what is in a lane of the
   kitchen is not the kitchen yet.
 - **For agents**, through `kito-mcp` as tools of the plugin: `kitchen`
-  (the behaviour and what there is), `concept`, `recipe`, and each of
-  the kitchen's tools by its name. At the start of a session the
-  behaviour and the lists are given with Kito's rules.
+  (the behaviour and what there is), `concept`, `recipe`, and `run` for
+  the kitchen's tools. At the start of a session the behaviour and the
+  lists are given after Kito's rules: a plugin with `[session]` in its
+  manifest is run (`kito-<plugin> session`) and what it prints is told,
+  under whose words they are (D-159).
 - **For people**: `kito kitchen` shows the kitchen of this repository;
   `kito kitchen concept | recipe <name>` prints one.
 - **Assistants** need nothing more: the kitchen comes through Kito's own
@@ -104,9 +108,10 @@ One program, `kito-kitchen` (`KitoOrg/kito-kitchen`), on both sides:
   the team's instructions, said to be the kitchen's, and never as
   Kito's own rules. Kito's three rules are not the kitchen's to change.
 - A kitchen's tool runs a command on the machine of whoever works, as
-  a repository's own scripts do. It is run confined like a check where
-  checks are confined (Linux), in the lane's working copy, and only
-  what the kitchen names. Who may change the kitchen may run commands
+  a repository's own scripts do: in the lane's working copy, only what
+  the kitchen names, and what the agent gives is one word of the
+  command, never a line for a shell. It is not confined yet as a check
+  is: a person who does not want that sets `KITO_KITCHEN_NO_TOOLS`. Who may change the kitchen may run commands
   on the team's machines: that role is given accordingly, and changes
   to `tools/` are reviewed like code.
 
@@ -114,8 +119,9 @@ One program, `kito-kitchen` (`KitoOrg/kito-kitchen`), on both sides:
 
 - The daemon's API becomes version 2 (one method added; version 1
   plugins go on working).
-- `kito-server` learns one more thing about a repository (its kitchen
-  parts) and one about itself (which repository is the kitchen).
+- Which repository is the kitchen, and which parts a repository picks,
+  are kept by the plugin on the server (`plugins/kitchen/config.toml`):
+  `kito-server` itself learned nothing.
 - A person needs `kito-kitchen` installed once; until then the session
   says the team has a kitchen and how to get the plugin.
 - An agent with no connection to the server has the kitchen it last

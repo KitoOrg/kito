@@ -1309,6 +1309,18 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-159 · A plugin has its say when a session starts, after Kito's
+A team's kitchen is no use if an agent must think of asking for it. A
+plugin with `[session]` in its manifest is run when a session starts
+(`kito-<plugin> session`, ten seconds, twelve thousand characters), and
+what it prints is given after Kito's own rules, under a line that says
+which plugin's words these are and that Kito's rules stand whatever they
+say. The order and the line are the point: a plugin informs an agent, it
+does not get to restate what is enforced. A plugin that fails, is slow
+or says nothing adds nothing and holds nothing up. It needs no
+permission of its own: it is run with the plugin's key, and can ask only
+what the plugin was given.
+
 ### D-158 · In a connected directory the server says which plugins run
 A directory connected to a server has no configuration of its own to
 enable a plugin in: the repository is the server's. So the server says

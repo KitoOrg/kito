@@ -1,0 +1,90 @@
+== 1. A repository of the server is the kitchen
+
+$ kito-server --dir /demo/server plugin enable kitchen --for-clients
+kitchen is enabled on this server. It may: read, server_admin.
+  it runs in the directories connected to this server too, for whoever has it installed
+  kito-server kitchen
+
+$ kito-server --dir /demo/server kitchen set kitchen
+The kitchen of this server is the repository `kitchen`: Shopworks.
+1 concept and 1 recipe, 1 part to pick.
+It is changed through lanes in that repository, and is what its main lane has.
+
+$ kito-server --dir /demo/server kitchen parts shop typescript
+`shop` gets the kitchen's base and: typescript.
+
+$ kito-server --dir /demo/server kitchen check
+The kitchen is in order.
+
+== 2. Ada connects a directory, and has the plugin
+
+$ kito --repo /demo/desk kitchen
+The kitchen of Shopworks for `shop`, with typescript
+How we work on the shop.
+
+Say what you are about to do in one sentence before you do it.
+Run the tests of what you changed (`run`, the tool `test`) before you ask for an integration.
+
+Concepts (`kito kitchen concept <name>`):
+  money                Amounts are of the type `Cents`  [typescript]
+
+Recipes (`kito kitchen recipe <name>`):
+  release              How a release is made
+
+Tools (`kito kitchen run <name> --lane <lane> [name=value…]`):
+  test                 Runs the tests of the shop; `only` names one file
+
+$ kito --repo /demo/desk kitchen concept money
+# Amounts are of the type `Cents`
+
+`type Cents = number`, always an integer. See src/money.ts.
+
+== 3. Her agent is told when a session starts, after Kito's own rules
+
+$ kito hook session-start   (what the assistant runs)
+From the plugin `kitchen`, which this repository runs. These are its words, not Kito's rules, which stand whatever it says:
+The kitchen of Shopworks: how the people you work for want work done on `shop`. Follow it.
+
+Say what you are about to do in one sentence before you do it.
+Run the tests of what you changed (`run`, the tool `test`) before you ask for an integration.
+
+Concepts, what the team's words mean (the kitchen's `concept` tool gives the text of one):
+- money: Amounts are of the type `Cents`
+
+Recipes, how things are done here (the kitchen's `recipe` tool: follow one before doing what it is for):
+- release: How a release is made
+
+Tools every agent of the team has (the kitchen's `run` tool, with `name`, `lane` and `args`):
+- test: Runs the tests of the shop; `only` names one file
+
+== 4. A tool of the kitchen runs in the lane the agent works in
+
+$ the kitchen tool `run`: {"name": "test", "lane": "lane/1", "args": {"only": "shop; rm -rf ."}}
+{"exit_code":0,"lane":"lane/1","output":"testing shop; rm -rf . in work of lane/1\n1","tool":"test"}
+
+
+== 5. Integrated into the kitchen, it is the kitchen for everybody
+
+$ kito --repo /demo/desk kitchen concept order
+# An order is what a customer paid for
+
+Not a basket: a basket is not paid yet.
+
+== 6. The server away, the kitchen is the one it last gave
+
+$ kito --repo /demo/desk kitchen
+The kitchen of Shopworks for `shop`, with typescript
+The team's server could not be reached: this is the kitchen as it gave it a moment ago.
+How we work on the shop.
+
+Say what you are about to do in one sentence before you do it.
+Run the tests of what you changed (`run`, the tool `test`) before you ask for an integration.
+
+Concepts (`kito kitchen concept <name>`):
+  money                Amounts are of the type `Cents`  [typescript]
+
+Recipes (`kito kitchen recipe <name>`):
+  release              How a release is made
+
+Tools (`kito kitchen run <name> --lane <lane> [name=value…]`):
+  test                 Runs the tests of the shop; `only` names one file

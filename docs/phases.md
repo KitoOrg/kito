@@ -2420,6 +2420,75 @@ with the same manifest, enabled by a server. Released as 0.21.0.
 - **Not run on macOS or Windows** since 0.20.0: the project's CI has
   been stopped by the account's billing, not by a failure.
 
+## Phase 21 · a team's kitchen — done
+
+Kito told an agent the rules of version control and nothing of how a
+team works: that was copied by hand into every repository's `CLAUDE.md`
+or `AGENTS.md`, for every assistant, and stale in most. A kitchen is one
+place for it, on the team's server ([ADR 0007](adr/0007-kitchens.md)).
+Released as 0.22.0; the kitchen itself is the plugin `kito-kitchen`.
+
+### What is there
+
+- **Plugins in a connected directory** (D-158): the ones the server
+  enabled for its clients (`--for-clients`), with what of a repository
+  the server gave them, for whoever has them installed. The directory's
+  daemon knows a plugin by its key and refuses it the rest; a person
+  enables nothing there.
+- **`plugin_call`** (the daemon's API, version 2): a plugin asks the
+  plugin of its own name on the server, which runs `kito-<name> answer
+  <question>` and is told who asks, about which repository, with which
+  role.
+- **A plugin's say when a session starts** (D-159): `[session]` in a
+  manifest, `kito-<plugin> session`, given after Kito's own rules.
+- **`kito-kitchen`** (its own repository): a kitchen is a repository on
+  the server with `behaviour.md` (always told), `concepts/` and
+  `recipes/` (named, one line each, the text asked for), `tools/` (a
+  command or a script every agent has, run in the lane's working copy)
+  and `parts/` (the same, for the repositories that pick them).
+  `kito-server kitchen new | set | parts | show | check`; `kito kitchen
+  [concept | recipe <name> | run <tool> --lane <lane>]`; for agents the
+  tools `kitchen`, `concept`, `recipe`, `run`, and the kitchen at the
+  start of a session; a copy in the directory for when the server
+  cannot be reached.
+
+### How it was tested
+
+- `kito-cli/tests/cli.rs`: a connected directory runs the plugin the
+  server let it and no other, the plugin is refused what it was not
+  given, asks its counterpart and only its counterpart, and is told a
+  failure of the server's plugin as one; a plugin's words at the start
+  of a session come after Kito's rules, and only when it is enabled.
+- `kito-kitchen`'s own tests: a kitchen's files and what is wrong with
+  them, the server's side alone, and one under `kito-server` and `kito`
+  themselves: a person and an agent get the kitchen, a part wins over
+  the base, a tool runs in the lane with what it is given as one word,
+  ends badly, is stopped when it takes too long; the session's start;
+  what is integrated into the kitchen is the kitchen at once; the
+  server away.
+- `scripts/demo-phase21.sh`, kept in `docs/demo/phase21-demo.txt`.
+
+### Known limitations
+
+- **A kitchen's tool is not confined**: it runs as the person, in the
+  lane's working copy. Who may change the kitchen may run commands on
+  the team's machines; `KITO_KITCHEN_NO_TOOLS` turns them off for a
+  person.
+- **A kitchen's tools are behind one tool, `run`**: what a plugin offers
+  agents is fixed in its manifest.
+- **Events and gates of a plugin do not run in a connected directory**:
+  they are the repository's, on the server.
+- **What the server says of its plugins is believed for fifteen
+  seconds** by a directory's daemon.
+- **Which repository is the kitchen, and what each picks, have no
+  history**: they are a file of the plugin on the server.
+- **No kitchen without a server**, and none shared between servers.
+- **Not tried with an assistant in a real session**: the tools and the
+  session's start are run as Kito runs them, by tests.
+- **Not run on macOS or Windows** since 0.20.0: the project's CI is
+  stopped by the account's billing. A kitchen's scripts are for a Unix
+  shell.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

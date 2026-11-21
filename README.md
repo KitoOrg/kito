@@ -534,8 +534,27 @@ The session lasts thirty days (`[sign_in] days` in `server.toml`);
 comes back with a session cookie. Tokens stay for scripts and agents.
 `scripts/demo-phase20.sh` shows a server and its plugin at work.
 
+A server says which of its plugins run in the directories connected to
+it too (`kito-server plugin enable <name> --for-clients`), for whoever
+has them installed; there a plugin asks its counterpart on the server
+(`plugin_call`), and may have its say when a session starts
+(`[session]`). That is what a team's **kitchen** is made of
+([ADR 0007](docs/adr/0007-kitchens.md), the plugin `kito-kitchen`): how
+the team's agents behave, what its words mean, how things are done and
+the tools everybody has, written once in a repository on the server and
+given to every agent, whatever assistant it is.
+
+```console
+$ kito-server plugin enable kitchen --for-clients
+$ kito-server kitchen set kitchen
+$ kito-server kitchen parts shop rust
+$ kito kitchen                          # in a directory connected to it
+The kitchen of Shopworks for `shop`, with rust
+…
+```
+
 What a program may ask the daemon, and under which permission, is in
-[docs/api.md](docs/api.md): the daemon's API, version 1.
+[docs/api.md](docs/api.md): the daemon's API, version 2.
 `crates/kito-cli/examples/kito-hello.rs` is the smallest plugin there is,
 and `scripts/demo-phase19.sh` shows it at work.
 

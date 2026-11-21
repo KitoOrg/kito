@@ -169,6 +169,11 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // What it says when a session starts (`[session]`).
+        Some("session") => {
+            println!("Mind the step.");
+            ExitCode::SUCCESS
+        }
         Some("answer") => {
             let asked = args.get(1).cloned().unwrap_or_default();
             if asked == "explode" {
