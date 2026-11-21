@@ -708,17 +708,26 @@ fn run_plugin_here(
     }
     let program = plugin["program"].as_str().map(PathBuf::from).ok_or("the plugin has no program")?;
     let key: Value = client.call("plugin_key", json!({ "name": name })).map_err(fail)?;
-    let status = std::process::Command::new(&program)
+    let mut command = std::process::Command::new(&program);
+    command
         .args(args)
         .current_dir(root)
         .env(plugins::ENV_REPO, root)
         .env(plugins::ENV_API, kitod::rpc::API.to_string())
         .env(plugins::ENV_KEY, key["key"].as_str().unwrap_or_default())
-        .env(plugins::ENV_SOCKET, plugins::socket_name(root))
-        .status()
-        .map_err(|e| format!("{}: {e}", program.display()))?;
-    // Stopped by a signal: as a shell says it.
-    Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
+        .env(plugins::ENV_SOCKET, plugins::socket_name(root));
+    // On Unix `kito` becomes the plugin: whoever stops one stops the
+    // other, and a plugin that serves (a web client) is not left behind.
+    #[cfg(unix)]
+    {
+        let failed = std::os::unix::process::CommandExt::exec(&mut command);
+        Err(format!("{}: {failed}", program.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|e| format!("{}: {e}", program.display()))?;
+        Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
+    }
 }
 
 /// `kito assistant`: a coding assistant is set up by the plugin that
