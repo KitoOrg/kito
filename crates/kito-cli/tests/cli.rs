@@ -1617,6 +1617,10 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert_eq!(fs::read_to_string(there.join("src/shop.py")).unwrap(), cents);
     let status = ok(&here, &["lane", "status", "1"]);
     assert!(status.contains(&format!("Working copy ...... {}", work.display())), "{status}");
+    // The diff of the lane is the server's to tell (ADR 0004).
+    let diff = ok(&here, &["lane", "diff", "1"]);
+    assert!(diff.contains("changed  src/shop.py  +1 -1\n  changed  total"), "{diff}");
+    assert!(diff.contains("+    subtotal = round(price * 100) * quantity"), "{diff}");
     let daemon = ok(&here, &["daemon", "status"]);
     assert!(
         daemon.contains("Connected to ...... `shop` on") && daemon.contains("Lanes kept here ... 2"),
@@ -1742,4 +1746,71 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     ok(&desk, &["daemon", "stop"]);
     drop(serving);
     ok(&serverdir.join("repos/shop"), &["daemon", "stop"]);
+}
+
+#[test]
+fn the_diff_of_a_lane_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n\nexport function discount(amount: number, percent: number): number {\n  return amount - (amount * percent) / 100;\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "./"]);
+    let work = root.join(".kito/lanes/1/work");
+
+    assert_eq!(ok(root, &["lane", "diff", "1"]), "lane/1 onto main (base ckpt#1): 0 files, +0 -0\n");
+
+    fs::write(work.join("src/shop.ts"), shop.replace("sum += price;", "sum += Math.round(price * 100);"))
+        .unwrap();
+    fs::write(work.join("NOTES.md"), "Prices are in cents.\n").unwrap();
+    ok(root, &["rename", "src/shop.ts:discount", "rebate", "--lane", "1"]);
+
+    // The diff is of the working copy as it is: nobody has to sync first.
+    let diff = ok(root, &["lane", "diff", "1"]);
+    let expected = "lane/1 onto main (base ckpt#1): 2 files, +3 -2
+
+added    NOTES.md  +1 -0
+@@ -0,0 +1,1 @@
++Prices are in cents.
+
+changed  src/shop.ts  +2 -2
+  changed  total (lines 1-7): \"prices in cents\"
+  renamed  rebate (lines 9-11), was src/shop.ts:discount: \"prices in cents\"
+@@ -1,11 +1,11 @@
+ export function total(prices: number[]): number {
+   let sum = 0;
+   for (const price of prices) {
+-    sum += price;
++    sum += Math.round(price * 100);
+   }
+   return sum;
+ }
+ 
+-export function discount(amount: number, percent: number): number {
++export function rebate(amount: number, percent: number): number {
+   return amount - (amount * percent) / 100;
+ }
+";
+    assert_eq!(diff, expected);
+
+    // Without the lines; some paths only; as JSON.
+    let stat = ok(root, &["lane", "diff", "1", "--stat"]);
+    assert!(stat.contains("renamed  rebate") && !stat.contains("@@"), "{stat}");
+    let one = ok(root, &["lane", "diff", "1", "NOTES.md"]);
+    assert!(one.starts_with("lane/1 onto main (base ckpt#1): 1 file, +1 -0\n"), "{one}");
+    let asked = json(root, &["lane", "diff", "1", "src/", "--json"]);
+    assert_eq!(asked["files"][0]["symbols"][1]["was"], "src/shop.ts:discount");
+    assert_eq!(asked["files"][0]["hunks"][0]["before"], serde_json::json!([1, 11]));
+
+    // The main lane moves on: the lane is told what it has not seen.
+    fs::write(root.join("README.md"), "# Shop\n").unwrap();
+    ok(root, &["sync"]);
+    assert!(ok(root, &["lane", "diff", "1", "--stat"])
+        .contains("main changed 1 file since the lane started: it has not seen them"));
+    let none = kito(root, &["lane", "diff", "main"]);
+    assert!(String::from_utf8_lossy(&none.stderr).contains("the main lane has no diff"));
 }

@@ -360,6 +360,15 @@ enum LaneCmd {
     Close { lane: String },
     /// Ops since the base, files touched, open conflicts
     Status { lane: String },
+    /// What a lane changes: files, functions and lines (ADR 0004)
+    Diff {
+        lane: String,
+        /// Only these files and directories
+        paths: Vec<String>,
+        /// The files and the functions, without the lines
+        #[arg(long)]
+        stat: bool,
+    },
     /// Run a command in the working copy of a lane, confined to it: it
     /// writes only there, and does not read Kito's own data or your keys
     Run {
@@ -451,6 +460,73 @@ fn root_of(cli: &Cli) -> Result<PathBuf, String> {
 
 fn daemon(cli: &Cli) -> Result<Client, String> {
     Client::connect_or_start(&root_of(cli)?).map_err(fail)
+}
+
+/// The diff of a lane as text: a line per file, its functions, its hunks.
+fn lane_diff_text(diff: &Value, stat: bool) -> String {
+    use std::fmt::Write as _;
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
+    let count = |value: &Value, key: &str| value[key].as_u64().unwrap_or(0);
+    let files: &[Value] = diff["files"].as_array().map_or(&[], Vec::as_slice);
+    let (added, removed) =
+        files.iter().fold((0, 0), |(a, r), file| (a + count(file, "added"), r + count(file, "removed")));
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} onto {} (base {}): {} file{}, +{added} -{removed}",
+        text(diff, "lane"),
+        text(diff, "onto"),
+        text(diff, "base"),
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+    );
+    match count(diff, "behind") {
+        0 => {}
+        behind => {
+            let _ = writeln!(
+                out,
+                "{} changed {behind} file{} since the lane started: it has not seen them",
+                text(diff, "onto"),
+                if behind == 1 { "" } else { "s" }
+            );
+        }
+    }
+    for file in files {
+        let was = file["was"].as_str().map(|was| format!(" (was {was})")).unwrap_or_default();
+        let lines = match file["binary"].as_bool() {
+            Some(true) => "binary".to_owned(),
+            _ => format!("+{} -{}", count(file, "added"), count(file, "removed")),
+        };
+        let _ = writeln!(out, "\n{:<8} {}{was}  {lines}", text(file, "change"), text(file, "path"));
+        for symbol in file["symbols"].as_array().into_iter().flatten() {
+            // The name without its file: the file is the line above.
+            let name = text(symbol, "symbol");
+            let name = name.rsplit_once(':').map_or(name.as_str(), |(_, name)| name).to_owned();
+            let at = match (symbol["lines"][0].as_u64(), symbol["lines"][1].as_u64()) {
+                (Some(from), Some(to)) if from == to => format!(" (line {from})"),
+                (Some(from), Some(to)) => format!(" (lines {from}-{to})"),
+                _ => String::new(),
+            };
+            let was = symbol["was"].as_str().map(|was| format!(", was {was}")).unwrap_or_default();
+            let why: Vec<String> =
+                strings(&symbol["intents"]).iter().map(|why| format!("\"{why}\"")).collect();
+            let why = if why.is_empty() { String::new() } else { format!(": {}", why.join(", ")) };
+            let _ = writeln!(out, "  {:<8} {name}{at}{was}{why}", text(symbol, "change"));
+        }
+        if stat {
+            continue;
+        }
+        for hunk in file["hunks"].as_array().into_iter().flatten() {
+            let side = |key: &str| {
+                format!("{},{}", hunk[key][0].as_u64().unwrap_or(0), hunk[key][1].as_u64().unwrap_or(0))
+            };
+            let _ = writeln!(out, "@@ -{} +{} @@", side("before"), side("after"));
+            for line in strings(&hunk["lines"]) {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+    out
 }
 
 fn print_json(value: &impl serde::Serialize) {
@@ -1915,6 +1991,15 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                     ),
                 }
             }
+        }
+        LaneCmd::Diff { lane, paths, stat } => {
+            let diff: Value =
+                client.call("lane_diff", json!({ "lane": lane, "paths": paths })).map_err(fail)?;
+            if cli.json {
+                print_json(&diff);
+                return Ok(());
+            }
+            print!("{}", lane_diff_text(&diff, *stat));
         }
         LaneCmd::Status { lane } => {
             let status: Value = client.call("lane_status", json!({ "lane": lane })).map_err(fail)?;

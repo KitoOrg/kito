@@ -533,7 +533,7 @@ impl Repo {
     }
 
     /// The words of an op's intent.
-    fn words(&self, op: &Op) -> Option<&str> {
+    pub(crate) fn words(&self, op: &Op) -> Option<&str> {
         op.intent.and_then(|intent| self.store.intent(&intent)).map(|intent| intent.summary.as_str())
     }
 

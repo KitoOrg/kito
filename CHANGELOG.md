@@ -6,6 +6,14 @@ of a version are its section here.
 
 ## [Unreleased]
 
+Review of a lane ([ADR 0004](docs/adr/0004-review-of-a-lane.md)), under way:
+
+- `kito lane diff <lane> [path…] [--stat]`, and the MCP tool `lane_diff`:
+  what a lane changes against what it started from. Per file its lines,
+  and the functions it added, changed, removed or renamed, each with the
+  intents of the lane's ops on it. A function renamed or moved is one
+  change, with the name it had. On a server, anybody who may read may ask.
+
 Windows ([ADR 0002](docs/adr/0002-windows.md)):
 
 - Kito runs on Windows itself, not only in WSL: its tests pass there and

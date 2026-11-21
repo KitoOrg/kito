@@ -730,6 +730,23 @@ impl Daemon {
                         self.with_repo(|repo| repo.close_lane(lane)).map_err(internal)?,
                     ))
                 }
+                // Review of a lane (ADR 0004): what it changes.
+                "lane_diff" => {
+                    let lane = lane()?;
+                    let paths: Vec<String> = params
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|paths| paths.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| {
+                            // As the working copy is now, not as it was last seen.
+                            repo.scan_lane(lane)?;
+                            repo.lane_diff(lane, &paths)
+                        })
+                        .map_err(internal)?,
+                    ))
+                }
                 "lane_status" => {
                     let lane = lane()?;
                     let (info, conflicts) = self

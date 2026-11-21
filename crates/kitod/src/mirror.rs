@@ -51,6 +51,7 @@ const REPEATABLE: &[&str] = &[
     "why_graph",
     "reasons",
     "after_shell",
+    "lane_diff",
 ];
 
 /// A connection left alone this long is checked before it is trusted with

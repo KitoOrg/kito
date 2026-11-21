@@ -154,6 +154,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
             "kito.integration_result",
             "kito.why",
             "kito.reasons",
+            "kito.lane_diff",
             "kito.note",
             "kito.resolve_conflict",
             "kito.close_lane",

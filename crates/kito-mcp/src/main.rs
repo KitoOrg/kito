@@ -246,6 +246,24 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "lane_diff",
+            "What a lane changes against what it started from: to review a lane, yours before you ask \
+             for its integration or somebody else's. Per file: added, changed, removed or renamed (`was`), \
+             lines added and removed, the hunks (each line after ` `, `-` or `+`), and `symbols`: the \
+             functions and classes it added, changed, removed or renamed, the lines each is on, and the \
+             intents of the lane's ops on it. A function renamed or moved is one change, with what it \
+             `was`. `behind`: files the lane's target changed since the lane started.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "lane": lane.clone(),
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Only these files and directories (default: everything the lane changed)" },
+                    "hunks": { "type": "boolean", "description": "false: leave the lines out, keep the files and the symbols (for a lane that changed a lot)" }
+                },
+                "required": ["lane"]
+            }),
+        ),
+        (
             "note",
             "Leave a note on code: something whoever changes it must know that no change of the code \
              says (\"called by the nightly billing job, outside this repository: do not rename\", \"slow \
@@ -446,6 +464,15 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
             Ok(answer)
         }
         "reasons" => Ok(json!({ "reasons": ask("reasons", args)?, "about_reasons": ABOUT_REASONS })),
+        "lane_diff" => {
+            let mut diff = ask("lane_diff", args.clone())?;
+            if args.get("hunks").and_then(Value::as_bool) == Some(false) {
+                for file in diff["files"].as_array_mut().into_iter().flatten() {
+                    file.as_object_mut().map(|file| file.remove("hunks"));
+                }
+            }
+            Ok(diff)
+        }
         "note" => ask("add_note", args),
         "resolve_conflict" => ask("resolve_conflict", args),
         "close_lane" => ask("close_lane", args),

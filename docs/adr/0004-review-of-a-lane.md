@@ -32,15 +32,14 @@ command line (decided with the person on 2026-11-20).
 ### 1. The diff of a lane
 
 `lane_diff(lane, paths?)` answers what the lane changes against what it
-lands on, as that is now (its base, and what it would bring after catching
-up is said apart, as `behind`):
+started from; what its target got since is said apart, as `behind`:
 
 ```rust
 pub struct LaneDiff {
     pub lane: String,
     pub onto: String,            // "main", "lane/3", "staging"
     pub base: String,            // ckpt#12, or the op of a parent lane
-    pub behind: usize,           // ops its target got since
+    pub behind: usize,           // files its target changed since
     pub files: Vec<FileDiff>,
 }
 
@@ -51,6 +50,8 @@ pub struct FileDiff {
     pub binary: bool,
     pub before: Option<String>,  // blob IDs: `content` gives the texts
     pub after: Option<String>,
+    pub added: usize,            // lines
+    pub removed: usize,
     pub hunks: Vec<Hunk>,        // lines, with 3 of context
     pub symbols: Vec<SymbolChange>,
 }
@@ -59,7 +60,7 @@ pub struct SymbolChange {
     pub symbol: String,          // src/shop.ts:total
     pub change: Change,          // a rename or a move is one change, not two
     pub was: Option<String>,
-    pub lines: (u32, u32),       // in the lane's text
+    pub lines: Option<(u32, u32)>, // in the lane's text; none: removed
     pub intents: Vec<String>,    // why, as the lane's ops say
 }
 ```

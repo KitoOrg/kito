@@ -1309,6 +1309,18 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-148 · The diff of a lane is against what it started from
+`lane_diff` compares the lane as it is with the state it started from
+(or was last brought up to), not with its target as it is now: what the
+target got meanwhile is not the lane's doing, and would show as the lane
+undoing it. That is said apart, as `behind`: the files the target changed
+since, which is what there is to count without merging. The symbols of
+the diff are those the lane's ops touched plus those the two symbol
+tables have differently; a function that only follows its file to a new
+name is the file's rename and is not listed. The working copy is scanned
+before the diff is made: a review is of what is there. Anybody who may
+read may ask (ADR 0004).
+
 ### D-147 · A file's history is followed through its names
 The why of a file was gathered by its path: after a rename its lines
 came out with no reason, and a new file given the name an earlier one

@@ -22,6 +22,7 @@ pub mod pull;
 pub mod refs;
 pub mod rename;
 pub mod repo;
+pub mod review;
 pub mod rpc;
 pub mod sandbox;
 pub mod scope;
