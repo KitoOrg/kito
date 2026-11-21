@@ -1309,6 +1309,30 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-162 · A server is changed from a browser by the people its machine named
+Installing a plugin puts a program on the server and enabling it runs
+that program: the first thing a browser can do there that is not about
+a repository. Roles do not say who may: `integrate` is about code. So a
+person may be an **administrator**, and only the server's own machine
+says so (`kito-server user admin`); the interface cannot make one, and a
+person who stops being one is refused at their next request.
+
+What an administrator can do from a browser is kept narrower than what
+they can do on the machine. A plugin is installed **by its name from the
+registry the server was told** and from nowhere else: no address, no
+path, no upload, so that a stolen session installs at worst something
+the registry lists. Installing enables nothing. Enabling says what the
+plugin asks for and gives what is ticked, never more. The plugin that
+serves the pages cannot be disabled from the pages: the interface does
+not saw off its own branch, and a server is never left with no way in
+but its machine by a click. Pages and ways to sign in are started with
+the server, so a change to those says that it takes effect when the
+server starts again.
+
+The server does all of it and tells its plugins who did (`by`); the
+interface (`kito-web`) only asks. A request with a session's cookie must
+carry `X-Kito`, as everywhere: a page of another site cannot make one.
+
 ### D-161 · A plugin is asked to clean up, and goes whether it does or not
 What a plugin writes outside its own directory, only it knows how to
 take out: an assistant's rules merged into a file the project also

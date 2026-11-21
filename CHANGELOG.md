@@ -4,10 +4,12 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
-## [Unreleased]
+## [0.23.0]
 
-A registry of plugins ([ADR 0008](docs/adr/0008-plugin-registry.md)),
-under way:
+A registry of plugins (phase 22,
+[ADR 0008](docs/adr/0008-plugin-registry.md)): a plugin is installed by
+its name, taken out as cleanly as it went in, and a server's plugins are
+changed from a browser by its administrators.
 
 - **`kito plugin add <name>`** (and `<name>@<version>`; the same for
   `kito-server plugin add`): the plugin is downloaded from what the
@@ -27,7 +29,25 @@ under way:
   said, and the plugin goes all the same; `--no-cleanup` does not run it.
 - **`kito-server plugin remove <name>`**: off the server's machine, once
   it is disabled.
-- Not yet: a server's plugins from a browser, `outdated` and `update`.
+- **`kito plugin outdated`** and **`kito plugin update [<name>]`**: the
+  plugins the registry has a later version of that fits this Kito and
+  this machine, and that version installed.
+- **Administrators of a server**: `kito-server user admin <name>`
+  (`--off`), said on the server's machine only. `/-/me` says who is one.
+- **`/-/admin/plugins`** on the server's HTTP address, for
+  administrators: what is installed, enabled and with what, and what the
+  registry lists; install (by name, from the server's registry, and
+  nothing else), enable (with the permissions given, `for_clients`),
+  disable (`purge`), remove. The plugin that serves the pages is not
+  taken out from them. Every change is told as a server event
+  (`plugin_installed`, `plugin_enabled`, `plugin_disabled`,
+  `plugin_removed`), with who made it. The page is in `kito-web` 0.5.
+- Fixed in the tests: the hooks' test said a simulated command took 40
+  ms and took longer itself on a busy machine, so Kito rightly did not
+  blame the command; it now writes again until the hook is that quick.
+  Where the same test once let an edit through that should have been
+  held back, it now says what Kito knew of those lines: not seen again,
+  and not explained.
 
 ## [0.22.0]
 

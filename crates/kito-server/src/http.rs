@@ -168,7 +168,70 @@ async fn me(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
         .filter(|repo| who.user.may_use(repo))
         .map(|repo| json!({ "name": repo, "role": who.user.role_in(&repo).word() }))
         .collect();
-    answered(json!({ "user": who.name, "email": who.user.email, "repos": repos }))
+    answered(json!({ "user": who.name, "email": who.user.email, "repos": repos, "admin": who.user.admin }))
+}
+
+/// Who asks, if they are an administrator of the server and the request
+/// is theirs to make: `Err` is the answer otherwise, the same for
+/// whoever is not one.
+fn administrator(
+    http: &Http,
+    server: &Server,
+    headers: &HeaderMap,
+) -> Result<Who, (StatusCode, &'static str)> {
+    let Some(who) = http.who(server, headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "nobody is signed in: give a token, or open a session"));
+    };
+    // A page of another site can send the cookie along, and cannot set this.
+    if who.by_cookie && headers.get("x-kito").is_none() {
+        return Err((StatusCode::FORBIDDEN, "not a request of a page of this server"));
+    }
+    match who.user.admin {
+        true => Ok(who),
+        false => Err((
+            StatusCode::FORBIDDEN,
+            "the plugins of this server are for its administrators (`kito-server user admin <name>`, on its machine)",
+        )),
+    }
+}
+
+/// `GET /-/admin/plugins`: what is installed and enabled, and what the
+/// registry lists (ADR 0008).
+async fn admin_plugins(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
+    let server = match http.server() {
+        Ok(server) => server,
+        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    if let Err((status, why)) = administrator(&http, &server, &headers) {
+        return said(status, why);
+    }
+    // The registry is asked over the network: not on the thread that serves.
+    match tokio::task::spawn_blocking(move || crate::admin::listed(&server)).await {
+        Ok(listed) => answered(listed),
+        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `POST /-/admin/plugins`: install, enable, disable or remove one.
+async fn admin_change(
+    State(http): State<Arc<Http>>,
+    headers: HeaderMap,
+    Json(ask): Json<crate::admin::Ask>,
+) -> Response {
+    let mut server = match http.server() {
+        Ok(server) => server,
+        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let who = match administrator(&http, &server, &headers) {
+        Ok(who) => who,
+        Err((status, why)) => return said(status, why),
+    };
+    let done = tokio::task::spawn_blocking(move || crate::admin::change(&mut server, &who.name, &ask)).await;
+    match done {
+        Ok(Ok(done)) => answered(done),
+        Ok(Err(why)) => said(StatusCode::BAD_REQUEST, &why),
+        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -563,6 +626,7 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         .route("/-/me", get(me))
         .route("/-/session", post(open_session).delete(close_session))
         .route("/-/api/{repo}", post(api))
+        .route("/-/admin/plugins", get(admin_plugins).post(admin_change))
         .route("/-/sign-in", get(ways))
         .route("/-/sign-in/{method}", get(begin_sign_in))
         .route("/-/sign-in/{method}/callback", get(finish_sign_in))

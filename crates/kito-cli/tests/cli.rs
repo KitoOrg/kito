@@ -966,7 +966,19 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
     let grown = ok(root, &["lane", "scope", "2", "--add", "src/"]);
     assert!(grown.contains("a directory was declared"), "{grown}");
     let held = refusal(&hook(root, &["hook", "before-edit"], &other));
-    assert!(held.contains("this edit was held back once"), "{held}");
+    if !held.contains("this edit was held back once") {
+        // Seen under load, and not explained yet: what Kito knew then.
+        let said = |args: &[&str]| {
+            let out = kito(root, args);
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+        };
+        panic!(
+            "the edit was let through: {held:?}\n--- why src/shop.ts:4 in lane 2\n{}\n--- lane status\n{}\n--- log\n{}",
+            said(&["why", "src/shop.ts:4", "--lane", "2"]),
+            said(&["lane", "status", "2"]),
+            said(&["log", "-v"]),
+        );
+    }
     assert!(held.contains("- \"prices in cents\": alice for ada, lane/1, checkpoint ckpt#2"), "{held}");
     assert!(!held.contains("first version"), "told when the lane was opened: {held}");
     assert_eq!(refusal(&hook(root, &["hook", "before-edit"], &other)), "", "the second time it goes through");
@@ -993,8 +1005,23 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
         "tool_input": { "command": format!("sed -i s/Shop/The\\ shop/ {}", work.join("README.md").display()) },
         "tool_response": { "stdout": "", "stderr": "" },
     });
-    let (answer, code, _) = hook(root, &["hook", "after-shell"], &ran);
-    assert_eq!(code, 0);
+    // On a busy machine the test takes longer than those 40 ms to get from
+    // the write to the hook, and Kito is right to say that the write was
+    // not the command's: written again until the hook is that quick.
+    let told_after = |write: &dyn Fn(usize)| -> Value {
+        for attempt in 0..40 {
+            write(attempt);
+            let (answer, code, _) = hook(root, &["hook", "after-shell"], &ran);
+            assert_eq!(code, 0);
+            if !answer.is_null() {
+                return answer;
+            }
+        }
+        panic!("a command that wrote where it should not have was never told so");
+    };
+    let answer = told_after(&|attempt| {
+        fs::write(work.join("README.md"), format!("# The shop\n{}", "\n".repeat(attempt))).unwrap()
+    });
     assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse");
     let told = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
     assert!(told.starts_with("Kito: lane/2 (bob) has changes outside what it declared: README.md"), "{told}");
@@ -1003,9 +1030,11 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
     let (answer, code, _) = hook(root, &["hook", "after-shell"], &ran);
     assert_eq!((answer, code), (Value::Null, 0));
     // One that wrote in the main directory is told so.
-    fs::write(root.join("README.md"), "# Shop\n\nWritten where it stands.\n").unwrap();
-    ok(root, &["sync"]);
-    let (answer, _, _) = hook(root, &["hook", "after-shell"], &ran);
+    let answer = told_after(&|attempt| {
+        let text = format!("# Shop\n\nWritten where it stands.\n{}", "\n".repeat(attempt));
+        fs::write(root.join("README.md"), text).unwrap();
+        ok(root, &["sync"]);
+    });
     let told = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
     assert!(told.contains("files of the main directory were changed: README.md"), "{told}");
 
@@ -2719,6 +2748,39 @@ fn a_plugin_is_installed_by_its_name_from_a_registry() {
     assert!(ok && said.contains("hello 0.9.0 is installed"), "{said}");
     // A name or a directory, not both and not neither.
     assert!(!me(&["plugin", "add"]).0);
+
+    // Nothing later yet; then the registry has a later version.
+    assert!(me(&["plugin", "outdated"]).1.contains("is the latest the registry has"));
+    assert!(me(&["plugin", "update", "hello"]).1.contains("hello 0.9.0 is the latest"));
+    let later = hello_plugin(&base, &LISTED.replace("0.9.0", "0.10.0"));
+    let archive = registry.join(format!("files/kito-hello-0.10.0-{platform}.tar.gz"));
+    let packed = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&base)
+        .arg(later.file_name().unwrap())
+        .status();
+    assert!(packed.unwrap().success());
+    let later_sum = kitod::registry::sha256_hex(&fs::read(&archive).unwrap());
+    let mut plugin: Value =
+        serde_json::from_str(&fs::read_to_string(registry.join("plugins/hello.json")).unwrap()).unwrap();
+    plugin["versions"]["0.10.0"] = serde_json::json!({ "api": 2, "files": { platform.as_str(): {
+        "url": format!("files/kito-hello-0.10.0-{platform}.tar.gz"), "sha256": later_sum,
+    }}});
+    fs::write(registry.join("plugins/hello.json"), plugin.to_string()).unwrap();
+    // Later by its numbers (0.10 after 0.9), and never the one for a later Kito (9.0.0).
+    let (ok, said) = me(&["plugin", "outdated"]);
+    assert!(
+        ok && said.starts_with("hello 0.9.0 -> 0.10.0\n") && said.contains("`kito plugin update`"),
+        "{said}"
+    );
+    let (ok, said) = me(&["plugin", "update"]);
+    assert!(ok && said.starts_with("hello 0.9.0 -> 0.10.0 (SHA-256 "), "{said}");
+    assert!(me(&["plugin", "list"]).1.contains("hello 0.10.0"));
+    assert!(me(&["plugin", "outdated"]).1.contains("is the latest the registry has"));
+    let (ok, said) = me(&["plugin", "update", "nope"]);
+    assert!(!ok && said.contains("the plugin `nope` is not installed"), "{said}");
 }
 
 const LEAVES: &str = r#"name = "hello"

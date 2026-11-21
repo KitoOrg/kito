@@ -22,6 +22,7 @@
 //! server answers `{"ok": {...}}` or `{"error": "..."}`. After that come
 //! the requests of the daemon's own protocol (JSON-RPC 2.0).
 
+mod admin;
 mod http;
 mod session;
 mod state;
@@ -216,6 +217,14 @@ enum UserCmd {
         /// Only in this repository
         #[arg(long, value_name = "NAME")]
         repo: Option<String>,
+    },
+    /// Let a person change the server itself from a browser: install,
+    /// enable, disable and remove its plugins. Nobody may unless said here
+    Admin {
+        name: String,
+        /// They no longer may
+        #[arg(long)]
+        off: bool,
     },
     /// List the people, the repositories each may use and what they may do
     List,
@@ -565,6 +574,22 @@ fn run(cli: &Cli) -> Result<(), String> {
                 None => println!("{name} may {}.", role.word()),
             }
         }
+        Cmd::User { command: UserCmd::Admin { name, off } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            server.set_admin(name, !*off)?;
+            let what = if *off { "is no longer an administrator" } else { "is an administrator" };
+            server.tell(
+                "role_changed",
+                json!({ "user": name, "admin": !*off, "what": format!("{name} {what}") }),
+            );
+            match off {
+                false => println!(
+                    "{name} is an administrator of this server: they may install, enable, disable and remove \
+                     its plugins from a browser."
+                ),
+                true => println!("{name} is no longer an administrator of this server."),
+            }
+        }
         Cmd::User { command: UserCmd::List } => {
             let server = Server::open(&dir_of(cli))?;
             if server.config.users.is_empty() {
@@ -583,7 +608,8 @@ fn run(cli: &Cli) -> Result<(), String> {
                     true => String::new(),
                     false => format!(" [{}]", user.logins.join(", ")),
                 };
-                println!("{name}{email}{signs}: {}", places.join(", "));
+                let admin = if user.admin { " (administrator)" } else { "" };
+                println!("{name}{email}{signs}{admin}: {}", places.join(", "));
             }
         }
         Cmd::User { command: UserCmd::Remove { name } } => {

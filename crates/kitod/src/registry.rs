@@ -180,6 +180,39 @@ pub fn plugin(name: &str) -> Result<Plugin, String> {
     }
 }
 
+/// A plugin this person has, and the later version the registry lists
+/// that fits this Kito and this machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Outdated {
+    pub name: String,
+    pub installed: String,
+    pub latest: String,
+}
+
+/// The installed plugins the registry has a later version of. A plugin
+/// the registry does not list (installed from a directory) is not one;
+/// `Err` is for a registry that could not be asked at all.
+pub fn outdated() -> Result<Vec<Outdated>, String> {
+    let index = index()?;
+    let mut found = Vec::new();
+    for installed in plugins::all_installed() {
+        let name = &installed.manifest.name;
+        if !index.plugins.contains_key(name) {
+            continue;
+        }
+        let Ok(listed) = plugin(name) else { continue };
+        let Ok((latest, _)) = pick(&listed, None) else { continue };
+        if numbers(latest) > numbers(&installed.manifest.version) {
+            found.push(Outdated {
+                name: name.clone(),
+                installed: installed.manifest.version.clone(),
+                latest: latest.to_owned(),
+            });
+        }
+    }
+    Ok(found)
+}
+
 /// A version as numbers, for telling which is later: `0.10.1` after `0.9`.
 fn numbers(version: &str) -> Vec<u64> {
     version.split(['.', '-', '+']).map(|part| part.parse().unwrap_or(0)).collect()

@@ -51,6 +51,10 @@ enum PluginCmd {
     },
     /// What the registry has: every plugin, or those that say these words
     Search { words: Vec<String> },
+    /// The plugins you installed that the registry has a later version of
+    Outdated,
+    /// Install the later version of a plugin, or of every plugin that has one
+    Update { name: Option<String> },
     /// Remove a plugin you installed: it takes out what it wrote for you
     /// outside any repository, then its program goes
     Remove {
@@ -622,6 +626,56 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                 println!("  from {} (SHA-256 {})", source.url, source.sha256);
             }
             println!("  `kito plugin enable {}` lets it run in a repository.", manifest.name);
+        }
+        PluginCmd::Outdated => {
+            let found = kitod::registry::outdated()?;
+            if cli.json {
+                print_json(&found);
+                return Ok(());
+            }
+            if found.is_empty() {
+                println!("Every plugin you installed is the latest the registry has for this Kito.");
+            }
+            for plugin in &found {
+                println!("{} {} -> {}", plugin.name, plugin.installed, plugin.latest);
+            }
+            if !found.is_empty() {
+                println!("`kito plugin update` installs them.");
+            }
+        }
+        PluginCmd::Update { name } => {
+            let found = kitod::registry::outdated()?;
+            let wanted: Vec<_> =
+                found.iter().filter(|plugin| name.as_ref().is_none_or(|name| *name == plugin.name)).collect();
+            if let (Some(name), true) = (name, wanted.is_empty()) {
+                return match plugins::installed(name) {
+                    Some(found) => {
+                        println!(
+                            "{name} {} is the latest the registry has for this Kito.",
+                            found.manifest.version
+                        );
+                        Ok(())
+                    }
+                    None => Err(format!("the plugin `{name}` is not installed: `kito plugin add {name}`")),
+                };
+            }
+            if wanted.is_empty() {
+                println!("Every plugin you installed is the latest the registry has for this Kito.");
+            }
+            // One that does not install is said, and the others go on.
+            let mut failed = Vec::new();
+            for plugin in wanted {
+                match kitod::registry::install(&plugin.name, Some(&plugin.latest)) {
+                    Ok((_, source)) => println!(
+                        "{} {} -> {} (SHA-256 {})",
+                        plugin.name, plugin.installed, plugin.latest, source.sha256
+                    ),
+                    Err(why) => failed.push(format!("{}: {why}", plugin.name)),
+                }
+            }
+            if !failed.is_empty() {
+                return Err(failed.join("\n"));
+            }
         }
         PluginCmd::Search { words } => {
             let index = kitod::registry::index()?;

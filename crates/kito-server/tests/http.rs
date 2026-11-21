@@ -33,7 +33,10 @@ fn server(dir: &Path, args: &[&str]) -> Command {
         .env("KITOD_BIN", kitod())
         .env("KITO_AUTHOR", "the server")
         .env_remove("KITO_EMAIL")
-        .env("KITO_CONFIG_DIR", dir.join(".personal-config"));
+        .env("KITO_CONFIG_DIR", dir.join(".personal-config"))
+        // A registry of files, next to the server: empty unless a test fills it.
+        .env("KITO_REGISTRY", format!("file://{}", dir.join("registry").display()))
+        .env("KITO_HELLO_CLEANED", dir.join("cleaned"));
     command
 }
 
@@ -511,4 +514,158 @@ fn somebody_signs_in_in_a_browser_as_who_a_plugin_says_they_are() {
     ok(&served.dir, &["user", "remove", "bob"]);
     assert_eq!(served.request("GET", "/-/me", &[("Cookie", &cookie)], None).status, 401);
     assert!(!fs::read_to_string(served.dir.join("sessions.toml")).unwrap().contains("bob"));
+}
+
+const FROM_REGISTRY: &str = r#"name = "hello"
+version = "0.9.0"
+description = "Says what it is told"
+api = 2
+permissions = ["read", "server_events"]
+
+[[server_event]]
+kinds = ["plugin_installed", "plugin_enabled", "plugin_disabled", "plugin_removed"]
+
+[cleanup]
+about = "Takes out what it set up"
+"#;
+
+/// A registry of files that lists the plugin of the tests, in `dir`.
+fn registry_with_hello(dir: &Path) {
+    let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
+    let built = Path::new(env!("CARGO_BIN_EXE_kito-server")).with_file_name("examples").join(&name);
+    let packed = dir.join("pack/kito-hello");
+    fs::create_dir_all(&packed).unwrap();
+    fs::copy(built, packed.join(&name)).unwrap();
+    fs::write(packed.join("kito-plugin.toml"), FROM_REGISTRY).unwrap();
+    let registry = dir.join("registry");
+    fs::create_dir_all(registry.join("plugins")).unwrap();
+    let archive = registry.join("hello.tar.gz");
+    let done = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(dir.join("pack"))
+        .arg("kito-hello")
+        .status();
+    assert!(done.unwrap().success());
+    let sum = kitod::registry::sha256_hex(&fs::read(&archive).unwrap());
+    let index = json!({ "registry": 1, "plugins": { "hello": { "about": "Says what it is told", "latest": "0.9.0" } } });
+    fs::write(registry.join("index.json"), index.to_string()).unwrap();
+    let plugin = json!({ "name": "hello", "about": "Says what it is told", "versions": { "0.9.0": {
+        "api": 2, "files": { kitod::registry::platform(): { "url": "hello.tar.gz", "sha256": sum } },
+    }}});
+    fs::write(registry.join("plugins/hello.json"), plugin.to_string()).unwrap();
+}
+
+#[test]
+fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser() {
+    let served = Served::start(|dir| {
+        install_hello(dir, PAGES);
+        ok(dir, &["plugin", "enable", "hello"]);
+        // The plugin that serves the pages is installed as `hello`: the one
+        // of the registry replaces it later, so it is kept under its own name.
+        registry_with_hello(dir);
+        let said = ok(dir, &["user", "admin", "ada"]);
+        assert!(said.contains("ada is an administrator of this server"), "{said}");
+        assert!(ok(dir, &["user", "list"]).contains("ada (administrator): * (integrate)"));
+    });
+    let session = |token: &str| {
+        let opened = served.request("POST", "/-/session", &[], Some(&json!({ "token": token })));
+        let value =
+            opened.head.lines().find_map(|line| line.strip_prefix("set-cookie: kito_session=")).unwrap();
+        format!("kito_session={}", value.split(';').next().unwrap())
+    };
+    let (ada, carol) = (session(&served.ada), session(&served.carol));
+    let page = [("Cookie", ada.as_str()), ("X-Kito", "1")];
+
+    // Who is an administrator is said to the page; nobody else is let in,
+    // and the answer is the same whoever they are.
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &ada)], None).json()["admin"], true);
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &carol)], None).json()["admin"], false);
+    assert_eq!(served.request("GET", "/-/admin/plugins", &[], None).status, 401);
+    let refused = served.request("GET", "/-/admin/plugins", &[("Cookie", &carol), ("X-Kito", "1")], None);
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert!(refused.body.contains("for its administrators"), "{}", refused.body);
+    let change = json!({ "action": "disable", "name": "hello" });
+    assert_eq!(
+        served
+            .request("POST", "/-/admin/plugins", &[("Cookie", &carol), ("X-Kito", "1")], Some(&change))
+            .status,
+        403
+    );
+    // A page of another site can send the cookie along, and nothing more.
+    assert_eq!(served.request("GET", "/-/admin/plugins", &[("Cookie", &ada)], None).status, 403);
+    assert_eq!(served.request("POST", "/-/admin/plugins", &[("Cookie", &ada)], Some(&change)).status, 403);
+
+    // What is there, and what the registry has.
+    let listed = served.request("GET", "/-/admin/plugins", &page, None);
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let listed = listed.json();
+    assert_eq!(
+        listed["listed"],
+        json!([{ "name": "hello", "about": "Says what it is told", "latest": "0.9.0" }])
+    );
+    let hello = &listed["installed"][0];
+    assert_eq!(
+        (hello["name"].as_str(), hello["enabled"].as_bool(), hello["serves_pages"].as_bool()),
+        (Some("hello"), Some(true), Some(true))
+    );
+    let ask = |body: Value| served.request("POST", "/-/admin/plugins", &page, Some(&body));
+
+    // The plugin that serves the pages is not taken out from the pages.
+    let no = ask(json!({ "action": "disable", "name": "hello" }));
+    assert!(no.status == 400 && no.body.contains("serves the pages of this server"), "{}", no.body);
+    let no = ask(json!({ "action": "remove", "name": "hello" }));
+    assert!(no.status == 400 && no.body.contains("is enabled on this server"), "{}", no.body);
+    // Only by name, and only what the registry has.
+    for name in ["../hello", "https://evil.example/x", "nope"] {
+        let no = ask(json!({ "action": "install", "name": name }));
+        assert_eq!(no.status, 400, "{name}: {}", no.body);
+    }
+    assert!(ask(json!({ "action": "upload", "name": "hello" }))
+        .body
+        .contains("installed, enabled, disabled or removed"));
+
+    // On the server's machine it is disabled; from then on the browser
+    // installs the one the registry lists, enables it with what it is
+    // given, and takes it out.
+    ok(&served.dir, &["plugin", "disable", "hello", "--no-cleanup"]);
+    let installed = ask(json!({ "action": "install", "name": "hello" }));
+    assert_eq!(installed.status, 200, "{}", installed.body);
+    let installed = installed.json();
+    assert!(installed["done"]
+        .as_str()
+        .unwrap()
+        .contains("hello 0.9.0 is installed. It runs nowhere until it is enabled."));
+    assert_eq!(installed["asks"], json!(["read", "server_events"]));
+    assert_eq!(installed["from"]["sha256"].as_str().unwrap().len(), 64);
+    let more = ask(json!({ "action": "enable", "name": "hello", "permissions": ["server_events", "pages"] }));
+    assert!(more.status == 400 && more.body.contains("does not ask for `pages`"), "{}", more.body);
+    let enabled = ask(
+        json!({ "action": "enable", "name": "hello", "permissions": ["server_events"], "for_clients": true }),
+    );
+    assert_eq!(enabled.status, 200, "{}", enabled.body);
+    assert!(enabled.json()["done"].as_str().unwrap().contains("It may: server_events."));
+    let now = served.request("GET", "/-/admin/plugins", &page, None).json();
+    let hello = &now["installed"][0];
+    assert_eq!(hello["version"], "0.9.0");
+    assert_eq!(
+        (hello["permissions"].clone(), hello["for_clients"].as_bool()),
+        (json!(["server_events"]), Some(true))
+    );
+
+    let disabled = ask(json!({ "action": "disable", "name": "hello", "purge": true }));
+    assert_eq!(disabled.status, 200, "{}", disabled.body);
+    // It was run one last time, as the server's.
+    assert_eq!(fs::read_to_string(served.dir.join("cleaned")).unwrap(), "server server=true\n");
+    let removed = ask(json!({ "action": "remove", "name": "hello" }));
+    assert_eq!(removed.status, 200, "{}", removed.body);
+    assert!(removed.json()["done"].as_str().unwrap().contains("removed from the server's machine"));
+    assert_eq!(served.request("GET", "/-/admin/plugins", &page, None).json()["installed"], json!([]));
+    assert!(!served.dir.join(".personal-config/plugins/hello").exists());
+    assert!(ask(json!({ "action": "remove", "name": "hello" })).body.contains("is not installed"));
+
+    // An administrator who is one no longer is refused at once.
+    ok(&served.dir, &["user", "admin", "ada", "--off"]);
+    assert_eq!(served.request("GET", "/-/admin/plugins", &page, None).status, 403);
 }

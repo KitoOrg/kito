@@ -553,6 +553,26 @@ The kitchen of Shopworks for `shop`, with rust
 …
 ```
 
+Plugins are installed by name from a **registry**
+([ADR 0008](docs/adr/0008-plugin-registry.md)): files that list each
+plugin's versions with their checksums, at `https://kito.sh/registry` or
+wherever `KITO_REGISTRY` says (a team's own; a directory, with
+`file://`).
+
+```console
+$ kito plugin search
+$ kito plugin add kitchen             # checked against the registry's SHA-256
+$ kito plugin outdated
+$ kito plugin update
+$ kito plugin disable kitchen         # it takes out what it wrote here
+$ kito plugin remove kitchen
+```
+
+On a server, the people its machine named administrators (`kito-server
+user admin <name>`) do the same from a browser (`/-/admin/plugins`, the
+page is in `kito-web`): by name, from the server's registry, and nothing
+else. The registry at kito.sh lists nothing yet.
+
 What a program may ask the daemon, and under which permission, is in
 [docs/api.md](docs/api.md): the daemon's API, version 2.
 `crates/kito-cli/examples/kito-hello.rs` is the smallest plugin there is,

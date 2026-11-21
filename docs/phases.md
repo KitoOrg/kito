@@ -2489,6 +2489,81 @@ Released as 0.22.0; the kitchen itself is the plugin `kito-kitchen`.
   stopped by the account's billing. A kitchen's scripts are for a Unix
   shell.
 
+## Phase 22 · a registry of plugins — done
+
+A plugin was installed from a directory somebody had: with eight of them
+and a server that tells people "install `kitchen`", there was nowhere to
+get one from, no clean way to take one out, and a server's plugins could
+only be changed on its machine. Released as 0.23.0
+([ADR 0008](adr/0008-plugin-registry.md)).
+
+### What is there
+
+- **The registry is files** (`kitod::registry`, D-160): `index.json` and
+  `plugins/<name>.json`, read over HTTPS, from a directory (`file://`),
+  or over HTTP on this machine only. `https://kito.sh/registry` unless
+  `KITO_REGISTRY` says another.
+- **By name**: `kito plugin add <name>[@version]`, `search`, `outdated`,
+  `update`; `kito-server plugin add <name>`. The archive is checked
+  against the registry's SHA-256, unpacked apart as something hostile
+  (plain files inside its own directory only), and installed only if its
+  manifest is the plugin and the version that were listed.
+- **Taking a plugin out** (D-161): `[cleanup]` in a manifest, run one
+  last time where the plugin goes (`cleanup repository | server |
+  person`); `disable` removes its key and, with `--purge`, what it kept;
+  `remove` runs the person's cleanup; `kito-server plugin remove`. A
+  cleanup that fails stops nothing.
+- **A server's plugins from a browser** (D-162): administrators
+  (`kito-server user admin`), `/-/admin/plugins`, the events
+  `plugin_installed | enabled | disabled | removed`.
+- Outside this repository: the page in `kito-web` 0.5; `[cleanup]` in
+  the plugins for Codex, Claude Code and ZCode; in the website's
+  repository, `scripts/registry-add.mjs` (lists a plugin from an archive
+  of it) and `install.sh`, on a branch that is not published.
+
+### How it was tested
+
+- `kitod::registry`'s own tests: which version is picked, an archive
+  that tries to leave its place, what is read and what is not.
+- `kito-cli/tests/cli.rs`: a plugin installed by its name from a
+  registry of files; a wrong checksum, a wrong version, a name the
+  registry lacks, a version for a later Kito; a later version found and
+  installed; a plugin that cleans up when disabled, purged, removed, and
+  one whose cleanup fails.
+- `kito-server/tests/plugins.rs`: the same on a server, and `remove`
+  refused while enabled.
+- `kito-server/tests/http.rs`: `/-/admin/plugins` for an administrator,
+  for somebody who is not, for a page of another site; only by name;
+  install, enable with less than asked, disable with purge, remove; the
+  plugin that serves the pages.
+- By hand, in a browser: the page of `kito-web` against a demo server,
+  installing and enabling a plugin from a registry of files.
+- `scripts/demo-phase22.sh`, kept in `docs/demo/phase22-demo.txt`.
+
+### Known limitations
+
+- **Nothing is published.** The registry at kito.sh is empty, and the
+  site that would serve it is not deployed: Kito and its plugins are
+  private. Everything above was run against registries of files.
+- **No signatures.** The checksum ties a download to what the registry
+  listed; it does not say the registry was right. Who can write the
+  registry decides what a name installs.
+- **A registry is named by an environment variable**, not yet in a
+  configuration file of a person or of a server.
+- **A plugin's pages and way to sign in change when the server starts
+  again**, not when it is enabled or disabled from the browser.
+- **An administrator's session is as good as the administrator**: it
+  can install whatever the registry lists. A server that wants none of
+  it names nobody.
+- **`kito-server` has no `outdated` or `update`**: `plugin add <name>`
+  again installs the latest.
+- **The hooks' test once let an edit through under load** that should
+  have been held back. It was not reproduced (twelve runs on a busy
+  machine), and now says what Kito knew when it happens.
+- **Not run on macOS or Windows** since 0.20.0: the project's CI is
+  stopped by the account's billing. Archives are unpacked with `tar` in
+  the tests.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

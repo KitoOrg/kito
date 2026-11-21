@@ -1,0 +1,82 @@
+== 1. Installed by its name
+
+$ kito plugin search
+hello 0.9.0  Says what it is told
+
+$ kito plugin add hello
+hello 0.9.0 is installed in /demo/config/plugins/hello
+  from file:///demo/registry/kito-hello-0.9.0.tar.gz (SHA-256 SHA256)
+  `kito plugin enable hello` lets it run in a repository.
+
+$ kito plugin enable hello
+hello is enabled in this repository. It may: read.
+  kito hello  Says what it is told
+
+$ kito hello env
+repo: /demo/app
+api: 2
+key: 64 characters
+socket: /demo/app/.kito/kitod.sock
+
+== 2. A file that is not the one the registry listed
+
+$ kito plugin add hello
+kito: file:///demo/registry/kito-hello-0.9.0.tar.gz: it is not the file the registry listed for `hello` 0.9.0 (its SHA-256 is SHA256, the registry says SHA256): nothing was installed
+
+== 3. A later version
+
+$ kito plugin outdated
+hello 0.9.0 -> 0.10.0
+`kito plugin update` installs them.
+
+$ kito plugin update
+hello 0.9.0 -> 0.10.0 (SHA-256 SHA256)
+
+== 4. Taking it out
+
+$ kito assistant add hello
+hello is set up for Kito: its rules are in HELLO.md.
+It has no hook before an edit: an edit outside a lane is caught when it is saved.
+
+$ ls HELLO.md
+HELLO.md
+
+$ kito plugin disable hello --purge
+  took HELLO.md out
+hello is disabled in this repository, and what it kept here is removed.
+
+$ ls HELLO.md
+ls: cannot access 'HELLO.md': No such file or directory
+
+$ kito plugin remove hello
+hello is removed.
+Repositories that enabled it say that it is missing.
+
+== 5. A server's plugins, over HTTP, for its administrators
+
+$ kito-server --dir /demo/server user admin ada
+ada is an administrator of this server: they may install, enable, disable and remove its plugins from a browser.
+
+$ curl -H "Authorization: Bearer <bob>" …/-/admin/plugins
+{"error":"the plugins of this server are for its administrators (`kito-server user admin <name>`, on its machine)"}
+
+$ curl -H "Authorization: Bearer <ada>" -d '{"action":"install","name":"hello"}' …/-/admin/plugins
+{"adds":[],"asks":["read","server_events"],"done":"hello 0.10.0 is installed. It runs nowhere until it is enabled.","from":{"registry":"file:///demo/registry","sha256":"SHA256","url":"file:///demo/registry/kito-hello-0.10.0.tar.gz","version":"0.10.0"}}
+
+$ … -d '{"action":"install","name":"https://evil.example/x"}'
+{"error":"\"https://evil.example/x\" is not a name a plugin can have: lower-case letters, digits and `-`, starting with a letter"}
+
+$ … -d '{"action":"enable","name":"hello","permissions":["server_events"]}'
+{"done":"hello is enabled on this server. It may: server_events.","restart":false}
+
+$ kito-server --dir /demo/server plugin list
+hello 0.10.0  [enabled (server_events)]
+
+$ … -d '{"action":"disable","name":"hello","purge":true}'
+{"done":"hello is disabled on this server.","restart":false,"said":[]}
+
+$ … -d '{"action":"remove","name":"hello"}'
+{"done":"hello is removed from the server's machine.","said":[]}
+
+$ kito-server --dir /demo/server plugin list
+No plugins. `kito-server plugin add --path <dir>`, then `plugin enable <name>`.

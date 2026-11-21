@@ -187,6 +187,10 @@ pub struct User {
     pub identities: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub logins: Vec<String>,
+    /// They may change the server itself from somewhere else than its
+    /// machine: its plugins (ADR 0008). Said on the server's machine only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
 }
 
 impl User {
@@ -370,6 +374,7 @@ impl Server {
             repos,
             role,
             roles: BTreeMap::new(),
+            admin: false,
             identities: identity.iter().map(|identity| identity.key()).collect(),
             logins: identity
                 .iter()
@@ -379,6 +384,14 @@ impl Server {
         self.config.users.insert(name.to_owned(), user);
         self.save()?;
         Ok(identity.is_none().then_some(token))
+    }
+
+    /// Says whether a person is an administrator of the server.
+    pub fn set_admin(&mut self, name: &str, admin: bool) -> Result<(), String> {
+        let user =
+            self.config.users.get_mut(name).ok_or_else(|| format!("{name} is not a user of this server"))?;
+        user.admin = admin;
+        self.save()
     }
 
     /// Changes what a person may do: everywhere, or in one repository.
