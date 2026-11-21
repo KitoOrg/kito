@@ -6,20 +6,39 @@ of a version are its section here.
 
 ## [Unreleased]
 
-Review of a lane ([ADR 0004](docs/adr/0004-review-of-a-lane.md)), under way:
+## [0.19.0]
 
-- `kito lane diff <lane> [path…] [--stat]`, and the MCP tool `lane_diff`:
-  what a lane changes against what it started from. Per file its lines,
-  and the functions it added, changed, removed or renamed, each with the
-  intents of the lane's ops on it. A function renamed or moved is one
-  change, with the name it had. On a server, anybody who may read may ask.
-- Comments: `kito lane comment <lane> "<text>"` (`--on src/shop.ts:12-14`,
-  `--reply comment#3`), `kito lane comments`, `kito lane resolve-comment`,
-  and the MCP tools `comment`, `comments`, `resolve_comment`. A comment on
-  lines stays on them while the lane has them, and is marked once it does
-  not. The agent in the lane is told the comments before its next edit,
-  once; `kito lane status` shows the ones that wait. On a server,
-  commenting needs `write`.
+Review of a lane (phase 17, [ADR 0004](docs/adr/0004-review-of-a-lane.md)).
+Kito has no interface for it: it is data in the store, and questions the
+daemon and the server answer.
+
+- **The diff of a lane**: `kito lane diff <lane> [path…] [--stat]`, and
+  the MCP tool `lane_diff`: what a lane changes against what it started
+  from. Per file its lines, and the functions it added, changed, removed
+  or renamed, each with the intents of the lane's ops on it. A function
+  renamed or moved is one change, with the name it had.
+- **Comments**: `kito lane comment <lane> "<text>"` (`--on
+  src/shop.ts:12-14`, `--reply comment#3`), `kito lane comments`, `kito
+  lane resolve-comment`, and the MCP tools `comment`, `comments`,
+  `resolve_comment`. A comment on lines stays on them while the lane has
+  them, and is marked once it does not. The agent in the lane is told the
+  comments before its next edit, once; `kito lane status` shows the ones
+  that wait.
+- **Verdicts**: `kito lane approve`, `request-changes`, `withdraw` and
+  `review`, and the MCP tool `review`. An approval is of the lane as it
+  was: it is stale once the lane changes. A request for changes stops the
+  lane until it is taken back or replaced. The owner's own approval does
+  not count.
+- **What integration asks**: `[review] required = N` (`agents`, `keep`;
+  `required` under `[lanes.<name>]` for what lands on a permanent lane;
+  `kito-server repo set <repo> --approvals N` on a server). A lane that
+  lacks its review is merged, checked and then waits, saying what is
+  missing. Approving brings nothing in: `kito integrate` does, for
+  whoever may. With `required = 0`, the default, nothing changes.
+- Who reviewed is on the checkpoint, in the why of that code, and in the
+  exported commit (`Reviewed-by:`).
+- On a server: reading a diff and a review needs `read`; commenting and
+  giving a verdict need `write`.
 
 Windows ([ADR 0002](docs/adr/0002-windows.md)):
 

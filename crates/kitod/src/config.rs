@@ -84,6 +84,17 @@ email_domain = "kito.invalid"
 # verify = ["npm test"]
 # branch = "staging"
 # integrate = ["ci"]
+# required = 1
+
+[review]
+# Approvals a lane needs before it is integrated, from people other than
+# its owner (`kito lane approve <lane>`). 0: none. Approving brings nothing
+# in: `kito integrate <lane>` does, once the lane has its approvals.
+required = 0
+# Whether the verdict of an agent counts, as the verdict of its person.
+agents = false
+# Whether an approval still counts after the lane changed.
+keep = false
 
 [scope]
 # Every lane declares what it will change before it changes it: functions
@@ -163,6 +174,7 @@ pub struct Config {
     pub verify: VerifyConfig,
     pub semantic: SemanticConfig,
     pub scope: ScopeConfig,
+    pub review: ReviewConfig,
 }
 
 /// What lanes may declare, and what they may change without declaring it.
@@ -307,6 +319,21 @@ pub struct PermanentConfig {
     pub branch: Option<String>,
     /// Who may land work on it; empty: whoever may integrate.
     pub integrate: Vec<String>,
+    /// Approvals what lands on it needs, instead of `[review] required`.
+    pub required: Option<u32>,
+}
+
+/// What integration asks of the review of a lane (ADR 0004).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewConfig {
+    /// Approvals a lane needs before it is integrated, from people other
+    /// than its owner.
+    pub required: u32,
+    /// Whether the verdict of an agent counts, as its person's.
+    pub agents: bool,
+    /// Whether an approval still counts after the lane changed.
+    pub keep: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

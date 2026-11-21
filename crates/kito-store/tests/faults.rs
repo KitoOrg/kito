@@ -161,6 +161,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
             verification: None,
             git_commit: None,
             approved_by: None,
+            reviewed_by: Vec::new(),
             git_merge: None,
             lane: None,
         };
@@ -246,6 +247,7 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
         verification: None,
         git_commit: None,
         approved_by: None,
+        reviewed_by: Vec::new(),
         git_merge: None,
         lane: None,
     };

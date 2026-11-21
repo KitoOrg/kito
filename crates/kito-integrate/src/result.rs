@@ -109,6 +109,10 @@ pub struct IntegrationResult {
     /// checkpoint was made, and no checks ran (ADR 0001).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_on: Option<String>,
+    /// What the lane lacks of its review, when it waits for that
+    /// (ADR 0004): "1 of 2 approvals; changes requested by bob".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
 }
 
 impl IntegrationResult {
@@ -126,6 +130,7 @@ impl IntegrationResult {
             message: None,
             out_of_scope: Vec::new(),
             landed_on: None,
+            missing: None,
         }
     }
 

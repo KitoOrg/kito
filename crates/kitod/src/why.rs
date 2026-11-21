@@ -195,6 +195,9 @@ pub struct Reason {
     /// Who let it in, when a person did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_by: Option<String>,
+    /// Whose approval of its lane counted (ADR 0004).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_by: Vec<String>,
     /// The checks that passed before it went in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<String>,
@@ -707,6 +710,9 @@ impl Repo {
             at_ms: group.last().wall_ms,
             checkpoint: checkpoint.map(|ck| ck.id.to_string()),
             approved_by: checkpoint.and_then(|ck| ck.approved_by.as_ref()).map(|person| person.name.clone()),
+            reviewed_by: checkpoint
+                .map(|ck| ck.reviewed_by.iter().map(|person| person.name.clone()).collect())
+                .unwrap_or_default(),
             checks: checkpoint
                 .and_then(|ck| ck.verification.as_ref())
                 .filter(|verification| verification.passed)

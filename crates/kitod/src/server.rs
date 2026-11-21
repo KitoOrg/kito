@@ -339,15 +339,21 @@ impl Daemon {
                     let checks: Option<Vec<String>> =
                         params.get("checks").and_then(|checks| serde_json::from_value(checks.clone()).ok());
                     let push = params.get("push").map(|remote| remote.as_str().map(str::to_owned));
-                    let now = self
+                    let approvals = params.get("approvals").and_then(Value::as_u64);
+                    let (now, approvals) = self
                         .with_repo(|repo| {
                             repo.configure(checks, push)?;
-                            repo.status()
+                            if let Some(approvals) = approvals {
+                                repo.set_required_approvals(approvals.min(99) as u32)?;
+                            }
+                            Ok((repo.status()?, repo.required_approvals()))
                         })
                         .map_err(internal)?;
                     // A remote just named gets what is already there.
                     self.push_wanted.notify_one();
-                    Ok(json!({ "protected": now.protected, "checks": now.checks, "push": now.push }))
+                    Ok(
+                        json!({ "protected": now.protected, "checks": now.checks, "push": now.push, "approvals": approvals }),
+                    )
                 }
                 "protect" => {
                     let on = params.get("on").and_then(Value::as_bool).unwrap_or(true);
@@ -478,6 +484,36 @@ impl Daemon {
                         self.with_repo(|repo| repo.resolve_comment(id, by, person.as_deref(), integrator))
                             .map_err(internal)?,
                     ))
+                }
+                // Verdicts on a lane (ADR 0004).
+                "verdict" => {
+                    let lane = lane()?;
+                    let kind = match text("verdict")? {
+                        "approve" | "approved" => kito_core::VerdictKind::Approved,
+                        "request_changes" | "changes_requested" => kito_core::VerdictKind::ChangesRequested,
+                        "withdraw" | "withdrawn" => kito_core::VerdictKind::Withdrawn,
+                        other => {
+                            return Err((
+                                rpc::INVALID_PARAMS,
+                                format!("{other:?} is not a verdict: approve, request_changes or withdraw"),
+                            ))
+                        }
+                    };
+                    let said = optional("text");
+                    let person = params.get("on_behalf_of").and_then(person_of);
+                    // Given by an agent for a person, or by the person.
+                    let (by, person) = match optional("agent").filter(|agent| !agent.trim().is_empty()) {
+                        Some(agent) => (Some(kito_core::Author::agent(agent.trim())), person),
+                        None => (person, None),
+                    };
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.give_verdict(lane, kind, said.as_deref(), by, person))
+                            .map_err(internal)?,
+                    ))
+                }
+                "review" => {
+                    let lane = lane()?;
+                    to_json(serde_json::to_value(self.with_repo(|repo| repo.review(lane)).map_err(internal)?))
                 }
                 "checkpoint" => {
                     let label = text("label")?;
@@ -1003,6 +1039,15 @@ impl Daemon {
                 ("commented", lane, person, format!("{on}{}", text(value, "text").unwrap_or_default()))
             }
             "resolve_comment" => ("comment_resolved", lane, person, text(value, "id").unwrap_or_default()),
+            "verdict" => {
+                let words = text(params, "text").map(|words| format!(": {words}")).unwrap_or_default();
+                let kind = match text(params, "verdict").unwrap_or_default().as_str() {
+                    "approve" | "approved" => "approved",
+                    "request_changes" | "changes_requested" => "changes requested",
+                    _ => "verdict withdrawn",
+                };
+                ("reviewed", lane, person, format!("{kind}{words}"))
+            }
             "rename_symbol" => {
                 let what = format!(
                     "{} → {}",

@@ -121,13 +121,14 @@ pub struct CommentTarget {
 
 ```rust
 pub struct Verdict {
+    pub id: VerdictId,          // each is a record; a person's last one stands
     pub lane: LaneId,
     pub by: Author,
     pub person: Option<Author>,
     pub kind: VerdictKind,      // Approved | ChangesRequested | Withdrawn
     pub text: Option<String>,
     pub at_ms: u64,
-    pub at_op: OpId,            // what was looked at
+    pub at_ops: u64,            // what was looked at: the lane's ops then
 }
 ```
 
@@ -136,14 +137,18 @@ pub struct Verdict {
   `at_op`, an approval is `stale`: shown, not counted. (`[review] keep =
   true` counts it still, for teams that want that.) A request for changes
   stands until whoever made it gives another verdict or withdraws it.
-- **The owner's own verdict does not count**, nor one by an agent that
-  works for the owner. A verdict by an agent counts as its person's, once,
-  and only where `[review] agents = true` (not by default: an approval is
-  a person's word).
+- **The owner's own approval does not count**, nor one by an agent that
+  works for the owner: a review is somebody else's. It may be given, and
+  is shown as not counting. The owner's request for changes stands like
+  anybody's: it is how a person holds back the lane of their own agent.
+- **A verdict by an agent** is refused unless `[review] agents = true`
+  (not by default: a verdict is a person's word); where it is taken it is
+  its person's, once.
 - `kito lane approve <lane> ["<text>"]`, `kito lane request-changes <lane>
-  "<text>"`, `kito lane withdraw <lane>`; the MCP tool `review` reads a
-  lane's review (diff aside) and gives a verdict where agents may. An
-  event, `reviewed`.
+  "<text>"`, `kito lane withdraw <lane>`, and `kito lane review <lane>`: where
+  it stands. The MCP tool `review` reads that, and gives a verdict where
+  agents may. The daemon's `verdict` and `review`. An event, `reviewed`.
+  `kito lanes` and the board say where each lane's review stands.
 
 ### 4. What integration asks
 

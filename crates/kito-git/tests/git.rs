@@ -79,6 +79,7 @@ impl Kito {
             verification: None,
             git_commit: None,
             approved_by: None,
+            reviewed_by: Vec::new(),
             git_merge: None,
             lane: None,
         };

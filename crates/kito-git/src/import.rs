@@ -105,6 +105,7 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
                 verification: None,
                 git_commit: Some(oid20(commit_id)),
                 approved_by: None,
+                reviewed_by: Vec::new(),
                 git_merge: None,
                 lane: None,
             };

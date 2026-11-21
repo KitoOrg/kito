@@ -2199,6 +2199,85 @@ renamed once and twice, and a new file under an old name
   still says nothing ("do the thing") goes through.
 - **Notes are not in git.**
 
+## Phase 17 · review of a lane — done
+
+A person had one thing to say about a lane: yes, by integrating it. Now
+what a lane changes can be seen, things can be said about it where it is,
+and a repository can ask for approvals before a lane goes in
+([ADR 0004](adr/0004-review-of-a-lane.md)). Released as 0.19.0, after
+phase 18. Kito has no interface for it: review is data in the store and
+questions the daemon and the server answer, and a web view is another
+program (decided with the person).
+
+### What is there
+
+- **The diff of a lane** (`kitod::review`, D-148): `lane_diff`, `kito
+  lane diff`, the MCP tool `lane_diff`. The lane as it is against what it
+  started from; per file the hunks and the symbols the lane added,
+  changed, removed or renamed, with the lines each is on and the intents
+  of the lane's ops on it. A rename or a move is one change. What the
+  target got meanwhile is counted apart (`behind`).
+- **Comments** (`kitod::comments`, D-149): on the lane, a function, a
+  file or lines; answers; resolved, not removed. A comment on lines keeps
+  their text and is found again by it; `outdated` once the lane no longer
+  has those lines. Stored in `.kito/comments`, which an older Kito
+  ignores. The first edit of the lane's agent after a comment is held
+  back once with the comments it was not told; `lane status` shows the
+  ones that wait.
+- **Verdicts** (`kitod::verdicts`, D-150): approved, changes requested,
+  withdrawn; the last one of a person on a lane stands. An approval is
+  stale once the lane changes; the owner's does not count; an agent's is
+  refused unless the repository lets agents review. Stored in
+  `.kito/verdicts`.
+- **What integration asks**: `[review] required`, `agents`, `keep`;
+  `required` under `[lanes.<name>]`; `kito-server repo set --approvals`.
+  A lane that lacks its review is merged and checked, then marked
+  `awaiting_approval` with what is missing. Approving and integrating
+  are two actions: an approval writes nothing to the target.
+- **Who reviewed** is on the checkpoint (`reviewed_by`), in the why of
+  that code, and in the exported commit as `Reviewed-by:` trailers.
+- On a server, `read` sees diffs and reviews; `write` comments and gives
+  verdicts; events `commented`, `comment_resolved`, `reviewed`.
+
+### Demo
+
+```bash
+scripts/demo-phase17.sh
+```
+
+Output: [`docs/demo/phase17-demo.txt`](demo/phase17-demo.txt).
+
+### Tests
+
+390 tests in all, on Linux, macOS and Windows. New: hunks with their
+context, files added, removed, renamed and binary, functions renamed and
+moved to another file, paths asked, `behind` (`kitod/tests/review.rs`);
+comments on a lane, a function, a file and lines, answers, resolution and
+who may, lines that move and lines that change, the agent told once
+(`kitod/tests/comments.rs`); a lane that waits for an approval, an
+approval that brings nothing in, stale and kept approvals, requests for
+changes, owners and agents, a permanent lane's own number
+(`kitod/tests/verdicts.rs`); the three from the command line; a lane
+reviewed on a server by roles, with the trailer in the commit
+(`kito-server/tests/rules.rs`).
+
+### Known limitations
+
+- **No interface**: review is read and written from the command line, by
+  agents through MCP, or by a program that asks the daemon.
+- **On one machine there is one person**: whoever runs the repository.
+  `required` greater than 0 is for a server, where people are known.
+- **A comment on lines is found by their text**: lines that were changed
+  by one character are no longer "those lines", and the comment is
+  marked. Nothing guesses where they went.
+- **Changes outside functions** (imports, text between them) are in the
+  hunks of a diff and in no symbol.
+- **The diff is the lane against its start**, not against its target as
+  it is now: what a catch-up would bring or collide with is not shown.
+- **The rules written for agents** by `kito init` do not mention review
+  yet: an agent learns of comments when it is told them.
+- No owners of paths whose approval is required for those paths.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

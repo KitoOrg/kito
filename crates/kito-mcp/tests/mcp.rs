@@ -158,6 +158,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
             "kito.comment",
             "kito.comments",
             "kito.resolve_comment",
+            "kito.review",
             "kito.note",
             "kito.resolve_conflict",
             "kito.close_lane",

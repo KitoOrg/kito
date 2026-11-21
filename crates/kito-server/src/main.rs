@@ -114,6 +114,10 @@ enum RepoCmd {
         /// No command has to succeed
         #[arg(long, conflicts_with = "checks")]
         no_checks: bool,
+        /// Approvals a lane needs before it is integrated, from people
+        /// other than its owner (0: none)
+        #[arg(long, value_name = "N")]
+        approvals: Option<u32>,
         /// Push every integration to this git remote: a name the
         /// repository's git knows, or a URL
         #[arg(long, value_name = "REMOTE", conflicts_with = "no_push")]
@@ -198,14 +202,19 @@ fn run(cli: &Cli) -> Result<(), String> {
                     .repo(&name)
                     .and_then(|root| kitod::config::Config::load(&root.join(kito_store::STORE_DIR)).ok())
                     .map(|config| {
-                        rules_of(config.main.protected, &config.verify.commands, config.git.push.as_deref())
+                        rules_of(
+                            config.main.protected,
+                            &config.verify.commands,
+                            config.review.required,
+                            config.git.push.as_deref(),
+                        )
                     })
                     .unwrap_or_default();
                 println!("{name}{rules}");
             }
         }
         Cmd::Repo {
-            command: RepoCmd::Set { name, protect, unprotect, checks, no_checks, push, no_push },
+            command: RepoCmd::Set { name, protect, unprotect, checks, no_checks, approvals, push, no_push },
         } => {
             let server = Server::open(&dir_of(cli))?;
             let root =
@@ -223,9 +232,17 @@ fn run(cli: &Cli) -> Result<(), String> {
             if push.is_some() || *no_push {
                 rules["push"] = json!(push);
             }
+            if let Some(approvals) = approvals {
+                rules["approvals"] = json!(approvals);
+            }
             let now: Value = daemon.call("configure", rules).map_err(|e| e.to_string())?;
             let checks: Vec<String> = serde_json::from_value(now["checks"].clone()).unwrap_or_default();
-            let rules = rules_of(now["protected"].as_bool().unwrap_or(false), &checks, now["push"].as_str());
+            let rules = rules_of(
+                now["protected"].as_bool().unwrap_or(false),
+                &checks,
+                now["approvals"].as_u64().unwrap_or(0) as u32,
+                now["push"].as_str(),
+            );
             println!("{name}{rules}");
         }
         Cmd::User { command: UserCmd::Add { name, email, repos, role } } => {
@@ -299,7 +316,7 @@ fn run(cli: &Cli) -> Result<(), String> {
 }
 
 /// The rules of a repository, after its name on a line.
-fn rules_of(protected: bool, checks: &[String], push: Option<&str>) -> String {
+fn rules_of(protected: bool, checks: &[String], approvals: u32, push: Option<&str>) -> String {
     let mut rules = vec![match protected {
         true => "main protected".to_owned(),
         false => "main open to direct edits".to_owned(),
@@ -307,6 +324,11 @@ fn rules_of(protected: bool, checks: &[String], push: Option<&str>) -> String {
     match checks.is_empty() {
         true => rules.push("no checks".to_owned()),
         false => rules.push(format!("checks: {}", checks.join("; "))),
+    }
+    match approvals {
+        0 => {}
+        1 => rules.push("1 approval".to_owned()),
+        more => rules.push(format!("{more} approvals")),
     }
     if let Some(push) = push {
         rules.push(format!("pushes to {push}"));

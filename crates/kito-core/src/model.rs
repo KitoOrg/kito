@@ -638,6 +638,34 @@ pub struct CommentTarget {
     pub quoted: String,
 }
 
+/// What somebody who reviewed a lane says of it, as it was then. The last
+/// one a person gave on a lane stands. ADR 0004.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verdict {
+    pub id: crate::VerdictId,
+    pub lane: LaneId,
+    /// Who gave it: a person, or an agent.
+    pub by: Author,
+    /// Whom the agent works for, when it is known: the verdict is theirs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<Author>,
+    pub kind: VerdictKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// How many ops the lane had then: what was looked at.
+    pub at_ops: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerdictKind {
+    Approved,
+    ChangesRequested,
+    /// The verdict given before is taken back.
+    Withdrawn,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: CheckpointId,
@@ -660,6 +688,10 @@ pub struct Checkpoint {
     /// (ADR 0001).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<LaneId>,
+    /// The people whose approval of the lane counted when it was
+    /// integrated (ADR 0004).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_by: Vec<Author>,
 }
 
 impl Checkpoint {

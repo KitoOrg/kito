@@ -308,6 +308,26 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "review",
+            "Where the review of a lane stands: the approvals it needs (`required`), whose count \
+             (`approved_by`), whose request for changes stands, each person's last verdict (`stale`: the \
+             lane changed since), the comments that wait, and `missing`: what it lacks to be integrated. \
+             With `verdict`, gives one on the lane as it is now: approve, request_changes (with `text`: \
+             what should change) or withdraw. A verdict is a person's word: an agent's is refused unless \
+             the repository lets agents review, and never counts on its own person's lane. Approving \
+             brings nothing in: that is request_integration, for whoever may.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "lane": lane.clone(),
+                    "verdict": { "type": "string", "enum": ["approve", "request_changes", "withdraw"], "description": "Leave out to read where the review stands" },
+                    "text": { "type": "string", "description": "What should change, or a word with the approval" },
+                    "agent": { "type": "string", "description": "Your name: it signs the verdict" }
+                },
+                "required": ["lane"]
+            }),
+        ),
+        (
             "note",
             "Leave a note on code: something whoever changes it must know that no change of the code \
              says (\"called by the nightly billing job, outside this repository: do not rename\", \"slow \
@@ -520,6 +540,10 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
         "comment" => ask("comment", args),
         "comments" => ask("comments", args),
         "resolve_comment" => ask("resolve_comment", args),
+        "review" => match args.get("verdict").is_some_and(Value::is_string) {
+            true => ask("verdict", args),
+            false => ask("review", args),
+        },
         "note" => ask("add_note", args),
         "resolve_conflict" => ask("resolve_conflict", args),
         "close_lane" => ask("close_lane", args),

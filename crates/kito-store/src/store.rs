@@ -12,7 +12,7 @@ use crate::record::LogKind;
 use crate::segments::{pos_after, LogOptions, Pos, SegmentedLog};
 use kito_core::{
     codec, BlobId, Checkpoint, CheckpointId, Comment, CommentId, Conflict, ConflictId, Intent, IntentId,
-    Lane, LaneId, Note, NoteId, Op, OpId, SymbolId,
+    Lane, LaneId, Note, NoteId, Op, OpId, SymbolId, Verdict, VerdictId,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -116,6 +116,7 @@ pub struct RecoveryReport {
     pub conflicts: LogRecovery,
     pub notes: LogRecovery,
     pub comments: LogRecovery,
+    pub verdicts: LogRecovery,
     pub index: IndexRecovery,
 }
 
@@ -130,6 +131,7 @@ impl RecoveryReport {
             + self.conflicts.discarded_bytes
             + self.notes.discarded_bytes
             + self.comments.discarded_bytes
+            + self.verdicts.discarded_bytes
     }
 }
 
@@ -226,6 +228,7 @@ pub struct Store {
     conflicts: KeyedLog<ConflictId, Conflict>,
     notes: KeyedLog<NoteId, Note>,
     comments: KeyedLog<CommentId, Comment>,
+    verdicts: KeyedLog<VerdictId, Verdict>,
     index: Index,
     pending: Pending,
     /// The blobs read or written last: a new version of a file is stored as
@@ -384,6 +387,15 @@ impl Store {
             &lost_found,
             None,
         )?;
+        let (verdicts, verdicts_recovery) = KeyedLog::open(
+            &dir.join("verdicts"),
+            LogKind::Verdicts,
+            "verdict",
+            |verdict: &Verdict| verdict.id,
+            &*opts.fs,
+            &lost_found,
+            None,
+        )?;
         let ends = SmallLogs {
             checkpoints: checkpoints.len(),
             intents: intents.len(),
@@ -405,6 +417,7 @@ impl Store {
             conflicts,
             notes,
             comments,
+            verdicts,
             index,
             pending: Pending::default(),
             recent: Mutex::new(Recent::default()),
@@ -418,6 +431,7 @@ impl Store {
                 conflicts: conflicts_recovery,
                 notes: notes_recovery,
                 comments: comments_recovery,
+                verdicts: verdicts_recovery,
                 index: index_recovery,
             },
             index_dirty: false,
@@ -935,6 +949,25 @@ impl Store {
 
     pub fn next_comment_id(&self) -> CommentId {
         CommentId(self.comments.last_key().map_or(1, |id| id.0 + 1))
+    }
+
+    // ------------------------------------------------------------ verdicts
+
+    /// Records a verdict on a lane durably (ADR 0004). Each is a record
+    /// of its own: the last one a person gave on a lane stands.
+    pub fn put_verdict(&mut self, verdict: &Verdict) -> Result<()> {
+        self.check()?;
+        let put = self.verdicts.put(verdict);
+        self.guard(put)
+    }
+
+    /// Every verdict ever given, in the order they were.
+    pub fn verdicts(&self) -> impl DoubleEndedIterator<Item = &Verdict> {
+        self.verdicts.iter()
+    }
+
+    pub fn next_verdict_id(&self) -> VerdictId {
+        VerdictId(self.verdicts.last_key().map_or(1, |id| id.0 + 1))
     }
 
     /// The index takes note of the confirmed length of the logs it does not

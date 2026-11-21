@@ -179,6 +179,9 @@ pub fn line_of(reason: &Reason) -> String {
     if let Some(person) = &reason.approved_by {
         line.push_str(&format!(", let in by {person}"));
     }
+    if !reason.reviewed_by.is_empty() {
+        line.push_str(&format!(", reviewed by {}", reason.reviewed_by.join(", ")));
+    }
     line
 }
 

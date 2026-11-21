@@ -34,6 +34,8 @@ pub(crate) enum LogKind {
     Notes = 7,
     /// Comments on lanes (ADR 0004).
     Comments = 8,
+    /// Verdicts on lanes (ADR 0004).
+    Verdicts = 9,
 }
 
 pub(crate) fn encode_header(kind: LogKind, segment: u32) -> [u8; HEADER_LEN] {

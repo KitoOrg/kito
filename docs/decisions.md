@@ -1309,6 +1309,22 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-150 · The owner's approval is given and does not count
+An approval by the owner of a lane, or by an agent that works for them,
+is recorded and shown as not counting ("the lane is theirs"): refusing it
+would stop a person from saying anything on the lane of their own agent,
+which is most of what review is on one machine. Their request for
+changes stands like anybody's and stops the lane, also where no approval
+is required: it is how a person holds back their agent's work. An
+agent's verdict is refused outright unless `[review] agents = true`. A
+verdict is a record of its own (`.kito/verdicts`, numbered); the last one
+of a person on a lane stands, and `withdraw` is a verdict that says
+nothing stands. Approving writes nothing to the target: `integrate` asks
+the review again when it runs, so an approval that went stale meanwhile
+is seen then. The people whose approval counted are on the checkpoint
+(`reviewed_by`, optional and last), in the why of that code, and in the
+exported commit as `Reviewed-by:` trailers.
+
 ### D-149 · A comment on lines is found by what the lines said
 A comment on lines keeps their text. Shown, it is looked for in the
 lane's file as it is: found, the comment is on those lines where they

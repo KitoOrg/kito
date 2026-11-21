@@ -76,6 +76,9 @@ pub struct BoardLane {
     /// who may do it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_by: Option<String>,
+    /// Where its review stands, when it has one or needs one (ADR 0004).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
     pub scope: Vec<Declared>,
     /// How many files of the repository the scope covers.
     pub scope_files: usize,
@@ -1032,6 +1035,7 @@ impl Repo {
                 intent: info.intent,
                 state: info.state,
                 proposed_by: info.proposed_by,
+                review: info.review,
                 scope: self.lane_scope(*lane)?,
                 scope_files: claims.scope_files,
                 broad: claims.scope_files > self.config.scope.broad_files,

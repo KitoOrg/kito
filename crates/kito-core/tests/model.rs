@@ -256,6 +256,7 @@ fn checkpoint_and_friends_round_trip() {
         approved_by: Some(Author::human("ada")),
         git_merge: Some([7; 20]),
         lane: None,
+        reviewed_by: vec![Author::human("bob")],
     };
     let back: Checkpoint = codec::from_slice(&codec::to_vec(&ck).unwrap()).unwrap();
     assert_eq!(back, ck);

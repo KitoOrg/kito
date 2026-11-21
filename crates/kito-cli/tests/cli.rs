@@ -1906,3 +1906,55 @@ comment#2 (ada): Looks right otherwise.
     let both = kito(root, &["lane", "comment", "1", "x", "--on", "src/shop.ts", "--reply", "comment#2"]);
     assert!(!both.status.success());
 }
+
+#[test]
+fn a_lane_is_reviewed_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let config = fs::read_to_string(root.join(".kito/config.toml")).unwrap();
+    assert!(config.contains("\n[review]\n") && config.contains("\nrequired = 0\n"), "{config}");
+    let shop = "export function total(prices: number[]): number {\n  return prices.reduce((sum, price) => sum + price, 0);\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::write(root.join("shop.ts"), shop).unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "./"]);
+    let work = root.join(".kito/lanes/1/work");
+    fs::write(work.join("shop.ts"), shop.replace("sum + price", "sum + Math.round(price * 100)")).unwrap();
+    assert_eq!(ok(root, &["lane", "review", "1"]), "lane/1: no verdict yet, and none is needed\n");
+
+    // Ada looks at what her agent did and wants it changed: said with
+    // words, it stops the lane.
+    let none = kito(root, &["lane", "request-changes", "1"]);
+    assert!(!none.status.success());
+    let asked = ok(root, &["lane", "request-changes", "1", "Whole cents only."]);
+    assert_eq!(asked, "lane/1: changes requested by ada\n  changes requested by ada: Whole cents only.\n");
+    assert!(ok(root, &["board"]).contains("active (changes requested by ada)"));
+    assert!(ok(root, &["lanes"]).contains("[changes requested by ada]"));
+    let waits = ok(root, &["integrate", "1"]);
+    assert!(waits.contains("it waits for its review: changes requested by ada"), "{waits}");
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), shop);
+    assert!(ok(root, &["board"]).contains("awaiting approval (asked by ada; changes requested by ada)"));
+
+    // Her approval takes the place of her request. It is hers, on her own
+    // lane: it lifts the request and counts for nothing more, and it
+    // brings nothing in.
+    ok(root, &["lane", "comment", "1", "Math.round does that."]);
+    let approved = ok(root, &["lane", "approve", "1", "Right."]);
+    assert_eq!(
+        approved,
+        "lane/1: no verdict yet, and none is needed\n  approved by ada: Right.  [does not count: the lane is theirs]\n  1 comment waits (`kito lane comments lane/1`)\n"
+    );
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), shop);
+    assert_eq!(json(root, &["lane", "review", "1", "--json"])["verdicts"][0]["counts"], false);
+
+    // Taken back; then integrating is its own action.
+    assert_eq!(
+        ok(root, &["lane", "withdraw", "1"]),
+        "lane/1: no verdict yet, and none is needed\n  1 comment waits (`kito lane comments lane/1`)\n"
+    );
+    let done = ok(root, &["integrate", "1"]);
+    assert!(done.contains("integrated"), "{done}");
+    assert!(fs::read_to_string(root.join("shop.ts")).unwrap().contains("Math.round"));
+}

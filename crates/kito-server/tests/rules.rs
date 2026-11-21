@@ -554,3 +554,72 @@ fn every_integration_is_pushed_to_the_git_remote() {
     // Pushing can be stopped.
     assert!(!ok(&world.dir, &["repo", "set", "shop", "--no-push"]).contains("pushes to"));
 }
+
+#[test]
+fn a_lane_is_reviewed_on_the_server_and_then_somebody_integrates_it() {
+    let mut world = World::new();
+    let said = ok(&world.dir, &["repo", "set", "shop", "--approvals", "1"]);
+    assert!(said.contains("1 approval"), "{said}");
+    assert!(ok(&world.dir, &["repo", "list"]).contains("1 approval"));
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--role", "write"]));
+    let dave = token_in(&ok(&world.dir, &["user", "add", "dave", "--role", "read"]));
+    let (ada, bob) = (world.ada.clone(), world.bob.clone());
+    let (ada, bob) = (desk(&mut world, "ada", &ada), desk(&mut world, "bob", &bob));
+    let (carol, dave) = (desk(&mut world, "carol", &carol), desk(&mut world, "dave", &dave));
+
+    let work = open(&bob, "builder");
+    write(&work, "src/shop.ts", &SHOP.replace("price * quantity", "Math.round(price * 100) * quantity"));
+    // Merged and checked, bob's lane waits for its review.
+    let result = integrate(&bob, "1");
+    assert_eq!(
+        (result["result"].as_str(), result["missing"].as_str()),
+        (Some("awaiting_approval"), Some("0 of 1 approval"))
+    );
+
+    // Who may read sees what the lane changes and where its review
+    // stands, and says nothing.
+    let diff = call(&dave, "lane_diff", json!({ "lane": "1" }));
+    assert_eq!(
+        (diff["files"][0]["path"].as_str(), diff["files"][0]["added"].as_u64()),
+        (Some("src/shop.ts"), Some(1))
+    );
+    assert_eq!(call(&dave, "review", json!({ "lane": "1" }))["required"], 1);
+    assert!(refused(&dave, "verdict", json!({ "lane": "1", "verdict": "approve" })).contains("may read"));
+    assert!(refused(&dave, "comment", json!({ "lane": "1", "text": "Nice." })).contains("may read"));
+    // The approval of its owner is not a review: it does not count.
+    let own = call(&bob, "verdict", json!({ "lane": "1", "verdict": "approve" }));
+    assert_eq!((own["approved_by"].clone(), own["missing"].as_str()), (json!([]), Some("0 of 1 approval")));
+
+    // Carol reviews: a comment on a line, then her approval.
+    let comment = call(
+        &carol,
+        "comment",
+        json!({ "lane": "1", "on": "src/shop.ts:2", "text": "Half a cent rounds up." }),
+    );
+    assert_eq!((comment["by"].as_str(), comment["on"].as_str()), (Some("carol"), Some("src/shop.ts:2")));
+    let review = call(&carol, "verdict", json!({ "lane": "1", "verdict": "approve", "text": "Good." }));
+    assert_eq!(review["approved_by"], json!(["carol"]));
+    assert_eq!(review["missing"], Value::Null);
+    assert_eq!(read(&world.main(), "src/shop.ts"), SHOP, "an approval brings nothing in");
+    let lane = &call(&ada, "lanes", json!({}))[0];
+    assert_eq!(
+        (lane["state"].as_str(), lane["review"].as_str()),
+        (Some("awaiting_approval"), Some("approved by carol"))
+    );
+    let told = events(&ada);
+    assert!(told.contains("commented") && told.contains("reviewed"), "{told}");
+
+    // Integrating stays for who may: bob still waits, ada brings it in.
+    let result = integrate(&bob, "1");
+    assert_eq!(
+        (result["result"].as_str(), result.get("missing")),
+        (Some("awaiting_approval"), None),
+        "{result}"
+    );
+    assert_eq!(integrate(&ada, "1")["result"], "integrated");
+    assert!(read(&world.main(), "src/shop.ts").contains("Math.round"));
+    // The commit says who reviewed.
+    wait_for("the commit of the integration", || {
+        git_out(&world.main(), &["log", "-1", "--format=%B", "main"]).contains("Reviewed-by: carol")
+    });
+}

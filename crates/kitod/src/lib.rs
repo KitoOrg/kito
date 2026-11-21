@@ -31,6 +31,7 @@ pub mod semantic;
 pub mod server;
 pub mod simulate;
 pub mod tls;
+pub mod verdicts;
 pub mod why;
 
 pub use error::{Error, Result};

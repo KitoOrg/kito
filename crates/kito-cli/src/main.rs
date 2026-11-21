@@ -381,6 +381,15 @@ enum LaneCmd {
     /// Mark a comment as dealt with: it is kept, and no longer told
     #[command(name = "resolve-comment")]
     ResolveComment { comment: String },
+    /// Approve a lane as it is now. It brings nothing in: `kito integrate` does
+    Approve { lane: String, text: Option<String> },
+    /// Say that a lane should change before it goes in, and how
+    #[command(name = "request-changes")]
+    RequestChanges { lane: String, text: String },
+    /// Take back the verdict you gave on a lane
+    Withdraw { lane: String },
+    /// Where the review of a lane stands: verdicts, what is missing
+    Review { lane: String },
     /// What a lane changes: files, functions and lines (ADR 0004)
     Diff {
         lane: String,
@@ -481,6 +490,48 @@ fn root_of(cli: &Cli) -> Result<PathBuf, String> {
 
 fn daemon(cli: &Cli) -> Result<Client, String> {
     Client::connect_or_start(&root_of(cli)?).map_err(fail)
+}
+
+/// Where the review of a lane stands, as text.
+fn review_text(review: &Value) -> String {
+    use std::fmt::Write as _;
+    let lane = review["lane"].as_str().unwrap_or_default();
+    let mut out = String::new();
+    let required = review["required"].as_u64().unwrap_or(0);
+    let approved = strings(&review["approved_by"]);
+    let _ = match (review["missing"].as_str(), approved.is_empty()) {
+        (Some(missing), _) => writeln!(out, "{lane}: {missing}"),
+        (None, false) => writeln!(
+            out,
+            "{lane}: approved by {}. `kito integrate {lane}` brings it in.",
+            approved.join(", ")
+        ),
+        (None, true) => writeln!(out, "{lane}: no verdict yet, and none is needed"),
+    };
+    for verdict in review["verdicts"].as_array().into_iter().flatten() {
+        let text = |key: &str| verdict[key].as_str().unwrap_or_default();
+        let whose = match verdict["for"].as_str() {
+            Some(person) => format!("{}, of {person}", text("by")),
+            None => text("by").to_owned(),
+        };
+        let words = verdict["text"].as_str().map(|words| format!(": {words}")).unwrap_or_default();
+        let not =
+            verdict["because"].as_str().map(|why| format!("  [does not count: {why}]")).unwrap_or_default();
+        let _ = writeln!(out, "  {} by {whose}{words}{not}", text("verdict").replace('_', " "));
+    }
+    if required > 0 {
+        let _ = writeln!(out, "  approvals needed: {required}");
+    }
+    match review["comments"].as_u64().unwrap_or(0) {
+        0 => {}
+        1 => {
+            let _ = writeln!(out, "  1 comment waits (`kito lane comments {lane}`)");
+        }
+        more => {
+            let _ = writeln!(out, "  {more} comments wait (`kito lane comments {lane}`)");
+        }
+    }
+    out
 }
 
 /// Comments as text: each with what it quoted, its answers under it.
@@ -878,8 +929,10 @@ fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>, graph: bool, uses: bo
         println!("     {}", facts.join(" · "));
         let checks = strings(&reason["checks"]);
         let approved = reason["approved_by"].as_str().map(|person| format!("let in by {person}"));
+        let reviewers = strings(&reason["reviewed_by"]);
+        let reviewed = (!reviewers.is_empty()).then(|| format!("reviewed by {}", reviewers.join(", ")));
         let passed = (!checks.is_empty()).then(|| format!("checks passed: {}", checks.join("; ")));
-        let said: Vec<String> = passed.into_iter().chain(approved).collect();
+        let said: Vec<String> = passed.into_iter().chain(reviewed).chain(approved).collect();
         if !said.is_empty() {
             println!("     {}", said.join(" · "));
         }
@@ -1439,6 +1492,9 @@ fn lane_line(lane: &LaneInfo) -> String {
     if let Some(name) = &lane.name {
         line.push_str(&format!("  permanent: {name}"));
     }
+    if let Some(review) = &lane.review {
+        line.push_str(&format!("  [{review}]"));
+    }
     match (&lane.parent, &lane.target) {
         (Some(parent), Some(target)) if parent == target => line.push_str(&format!("  on {parent}")),
         (Some(parent), Some(target)) => line.push_str(&format!("  on {parent}, lands on {target}")),
@@ -1803,9 +1859,17 @@ fn cmd_board(cli: &Cli) -> Outcome {
             Some(owner) if owner != text("agent") => format!(" (of {owner})"),
             _ => String::new(),
         };
-        let state = match (text("state"), lane["proposed_by"].as_str()) {
-            ("awaiting_approval", Some(by)) => format!("awaiting approval (asked by {by})"),
-            (state, _) => state.replace('_', " "),
+        let state = match (text("state"), lane["proposed_by"].as_str(), lane["review"].as_str()) {
+            // Reviewed, and waiting only for somebody who may integrate.
+            ("awaiting_approval", _, Some(review)) if review.starts_with("approved") => {
+                format!("{review}, to integrate")
+            }
+            ("awaiting_approval", Some(by), Some(review)) => {
+                format!("awaiting approval (asked by {by}; {review})")
+            }
+            ("awaiting_approval", Some(by), None) => format!("awaiting approval (asked by {by})"),
+            (state, _, Some(review)) => format!("{} ({review})", state.replace('_', " ")),
+            (state, ..) => state.replace('_', " "),
         };
         println!("{}  {}{whose}  {state}  {}", text("id"), text("agent"), text("intent"));
         let scope: Vec<&str> =
@@ -2070,6 +2134,29 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
             }
             println!("{} is resolved.", done["id"].as_str().unwrap_or(comment));
         }
+        LaneCmd::Approve { .. }
+        | LaneCmd::RequestChanges { .. }
+        | LaneCmd::Withdraw { .. }
+        | LaneCmd::Review { .. } => {
+            let review: Value = match command {
+                LaneCmd::Approve { lane, text } => {
+                    client.call("verdict", json!({ "lane": lane, "verdict": "approve", "text": text }))
+                }
+                LaneCmd::RequestChanges { lane, text } => client
+                    .call("verdict", json!({ "lane": lane, "verdict": "request_changes", "text": text })),
+                LaneCmd::Withdraw { lane } => {
+                    client.call("verdict", json!({ "lane": lane, "verdict": "withdraw" }))
+                }
+                LaneCmd::Review { lane } => client.call("review", json!({ "lane": lane })),
+                _ => unreachable!("matched above"),
+            }
+            .map_err(fail)?;
+            if cli.json {
+                print_json(&review);
+                return Ok(());
+            }
+            print!("{}", review_text(&review));
+        }
         LaneCmd::Diff { lane, paths, stat } => {
             let diff: Value =
                 client.call("lane_diff", json!({ "lane": lane, "paths": paths })).map_err(fail)?;
@@ -2211,6 +2298,17 @@ fn print_integration(result: &IntegrationResult) {
             println!("  Nothing was integrated: fix it in the lane and integrate again.");
         }
         Integration::Failed => println!("{}: {}", result.lane, result.message.clone().unwrap_or_default()),
+        Integration::AwaitingApproval if result.missing.is_some() => {
+            println!(
+                "{}: merged and checked{verified}; it waits for its review: {}",
+                result.lane,
+                result.missing.as_deref().unwrap_or_default()
+            );
+            println!(
+                "  `kito lane review {}` says where it stands; `kito integrate {}` again once it has it.",
+                result.lane, result.lane
+            );
+        }
         Integration::AwaitingApproval => {
             println!(
                 "{}: merged and checked{verified}; it waits for somebody who may integrate",

@@ -344,6 +344,7 @@ fn checkpoints_are_durable_and_updatable() {
         verification: None,
         git_commit: None,
         approved_by: None,
+        reviewed_by: Vec::new(),
         git_merge: None,
         lane: None,
     };
@@ -447,6 +448,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         verification: None,
         git_commit: None,
         approved_by: None,
+        reviewed_by: Vec::new(),
         git_merge: None,
         lane: None,
     };

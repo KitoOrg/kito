@@ -98,6 +98,10 @@ pub struct LaneInfo {
     /// The name of a permanent lane (`staging`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Where its review stands, when it has one or needs one (ADR 0004):
+    /// "0 of 1 approval", "changes requested by bob", "approved by bob".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
 }
 
 /// Where a lane starts and where it lands, when not on the main lane.
@@ -579,6 +583,7 @@ impl Repo {
                         verification: None,
                         git_commit: None,
                         approved_by: None,
+                        reviewed_by: Vec::new(),
                         git_merge: None,
                         lane: None,
                     };
@@ -799,6 +804,15 @@ impl Repo {
             target: (record.parent.is_some() || record.target.is_some())
                 .then(|| self.lane_name(record.target_lane())),
             name: record.name.clone(),
+            review: match self.lanes.contains_key(&record.id) && record.name.is_none() {
+                true => {
+                    let (missing, approvers) = self.review_gate(record.id);
+                    let names: Vec<&str> = approvers.iter().map(|person| person.name.as_str()).collect();
+                    missing
+                        .or_else(|| (!names.is_empty()).then(|| format!("approved by {}", names.join(", "))))
+                }
+                false => None,
+            },
         }
     }
 

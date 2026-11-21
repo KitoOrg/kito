@@ -1017,7 +1017,23 @@ impl Repo {
                 return Ok(Some(result));
             }
         }
-        if let Some(by) = hold {
+        // What the lane needs of its review (ADR 0004), then the say of
+        // somebody who may integrate (D-095). Approving brought nothing
+        // in: this does, now that nothing is missing.
+        let (missing, reviewed_by) = self.review_gate(lane);
+        let waits = match (&missing, &hold) {
+            (Some(missing), _) => Some(format!(
+                "the merge composes and the checks pass, but the lane lacks its review ({missing}): \
+                 `kito lane review {lane}` says where it stands; then `kito integrate {lane}` again"
+            )),
+            (None, Some(_)) => Some(format!(
+                "the merge composes and the checks pass, but integrating is not for who asked: the lane \
+                 waits for somebody who may (`kito integrate {lane}`)"
+            )),
+            (None, None) => None,
+        };
+        if let Some(message) = waits {
+            let by = hold.or_else(|| approved_by.clone()).unwrap_or_else(|| self.identity.author());
             let at_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_millis() as u64);
@@ -1027,9 +1043,8 @@ impl Repo {
             self.put_lane_state(lane, state)?;
             self.store.commit()?;
             result.result = Outcome::AwaitingApproval;
-            result.message = Some(format!(
-                "the merge composes and the checks pass, but integrating is not for who asked: the lane                  waits for somebody who may (`kito integrate {lane}`)"
-            ));
+            result.message = Some(message);
+            result.missing = missing;
             result.verification = verification;
             return Ok(Some(result));
         }
@@ -1129,6 +1144,7 @@ impl Repo {
             }),
             git_commit: None,
             approved_by,
+            reviewed_by,
             git_merge: brought.filter(|_| on_lane.is_none()),
             lane: on_lane,
         };
@@ -1419,6 +1435,7 @@ impl Repo {
             verification: None,
             git_commit: None,
             approved_by: None,
+            reviewed_by: Vec::new(),
             git_merge: caught,
             lane: Some(lane),
         };

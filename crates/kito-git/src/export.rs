@@ -403,6 +403,13 @@ fn commit_message(ck: &Checkpoint) -> BString {
         let outcome = if v.passed { "passed" } else { "failed" };
         message.push_str(&format!("Kito-Verification: {outcome} ({} ms)\n", v.duration_ms));
     }
+    // Whose approval of the lane counted (ADR 0004).
+    for person in &ck.reviewed_by {
+        match &person.email {
+            Some(email) => message.push_str(&format!("Reviewed-by: {} <{email}>\n", person.name)),
+            None => message.push_str(&format!("Reviewed-by: {}\n", person.name)),
+        }
+    }
     message.into()
 }
 

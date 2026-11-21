@@ -29,11 +29,12 @@ pub use hash::{Hash, HashParseError};
 pub use hlc::{Hlc, HlcClock};
 pub use ids::{
     BlobId, CheckpointId, CommentId, ConflictId, IdParseError, IntentId, LaneId, NoteId, OpId, SymbolId,
+    VerdictId,
 };
 pub use model::{
     Author, AuthorKind, Checkpoint, Comment, CommentTarget, Conflict, ConflictKind, FileMode, Fingerprint,
     Intent, Lane, LaneState, Lang, Location, Note, NoteTarget, Op, OpKind, Proposal, RefSource, Reference,
-    Resolution, ScopeEntry, ScopeItem, Symbol, SymbolKind, Verification,
+    Resolution, ScopeEntry, ScopeItem, Symbol, SymbolKind, Verdict, VerdictKind, Verification,
 };
 pub use symbols::{SymbolEntry, SymbolError, SymbolTable};
 pub use tree::{Tree, TreeEntry, TreeError};

@@ -29,7 +29,7 @@ runnable demo.
 | 14 | Git both ways: commits made with plain git are brought in through a lane, merged and pushed back | done |
 | 15 | Lanes on lanes: a lane opened on work that has not landed, landing on it or further down ([ADR 0001](docs/adr/0001-lanes-on-lanes.md)) | done |
 | 16 | Permanent lanes: a `staging` next to `main`, with its own checkpoints, git branch and checks | done |
-| 17 | Review of a lane: diffs, comments and approvals, in the daemon and the server; a web view as a separate, optional program | planned |
+| 17 | Review of a lane ([ADR 0004](docs/adr/0004-review-of-a-lane.md)): its diff, comments its agent is told, verdicts, approvals before integration; data and questions, no interface | done |
 | 18 | The why graph, better: intents that say nothing refused, notes on code ([ADR 0003](docs/adr/0003-notes-on-code.md)), lines followed across file renames | done |
 | — | Windows ([ADR 0002](docs/adr/0002-windows.md)): the tests pass there, in CI; no sandbox, no partial-save detection | done |
 
@@ -378,6 +378,65 @@ kito note src/billing.ts:invoice "called by the nightly billing job, outside thi
 A note is told with the why of that code, and to an agent about to change
 it, once. `kito note --list` and `kito note --remove note#3`; agents have
 the tool `note` ([ADR 0003](docs/adr/0003-notes-on-code.md)).
+
+## Review of a lane
+
+What a lane changes, what people say about it and whether it may go in
+are in the repository, where the lane is ([ADR 0004](docs/adr/0004-review-of-a-lane.md)).
+Kito has no interface of its own for this: the command line, the agents'
+tools and any program that asks the daemon see the same.
+
+```bash
+kito lane diff 1                 # its files, its functions, its lines
+kito lane diff 1 src/ --stat     # some paths; without the lines
+```
+
+The diff is against what the lane started from. Per file it lists the
+functions the lane added, changed, removed or renamed, each with the
+intents of the lane's changes to it; a function renamed or moved is one
+change, with the name it had.
+
+```bash
+kito lane comment 1 "Half a cent is lost: round, do not floor." --on src/shop.ts:4
+kito lane comment 1 "Rounded now." --reply comment#1
+kito lane comments 1
+kito lane resolve-comment comment#1
+```
+
+A comment is on the lane, on a function, a file or lines. On lines it
+keeps what they said: it stays on them wherever they move, and is marked
+once the lane no longer has them. **The agent in the lane is told**: its
+first edit after a comment is held back once, with the comments it has
+not read. A comment is how a person tells an agent in a lane what to
+change.
+
+```bash
+kito lane request-changes 1 "See the comment on line 4."
+kito lane approve 1
+kito lane withdraw 1
+kito lane review 1               # where it stands, and what is missing
+```
+
+A request for changes stops the lane until it is taken back or replaced.
+An approval is of the lane as it was: once the lane changes it is stale.
+The owner's own approval does not count. **Approving brings nothing in**:
+`kito integrate` does, as before, for whoever may.
+
+A repository may ask for approvals before a lane is integrated:
+
+```toml
+[review]
+required = 1      # approvals, from people other than the lane's owner
+agents = false    # whether an agent's verdict counts, as its person's
+keep = false      # whether an approval survives a change to the lane
+```
+
+On a server it is the repository's rule, like its checks: `kito-server
+repo set shop --approvals 1`. A lane that lacks its review is merged,
+checked, and then waits, saying what is missing (`awaiting_approval`).
+Who reviewed is on the checkpoint, in the why of that code, and in the
+exported commit (`Reviewed-by:`). Agents have the tools `lane_diff`,
+`comment`, `comments`, `resolve_comment` and `review`.
 
 ## The rules as behaviour
 

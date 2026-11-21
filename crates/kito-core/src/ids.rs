@@ -220,6 +220,11 @@ counter_id!(
     CommentId,
     "comment"
 );
+counter_id!(
+    /// Sequence number of a verdict on a lane (ADR 0004).
+    VerdictId,
+    "verdict"
+);
 
 #[cfg(test)]
 mod tests {
