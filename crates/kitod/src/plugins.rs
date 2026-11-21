@@ -109,6 +109,8 @@ const READ: &[&str] = &[
     "before_edit",
     "after_shell",
     "reasons_behind",
+    // What the session of an assistant runs on: remembered, not recorded.
+    "assistant_session",
 ];
 
 const WRITE: &[&str] = &[

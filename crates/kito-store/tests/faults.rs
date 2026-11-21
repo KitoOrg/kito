@@ -186,6 +186,7 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 parent: None,
                 target: None,
                 name: None,
+                assistant: None,
             })
             .unwrap();
         store

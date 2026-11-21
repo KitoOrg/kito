@@ -474,6 +474,7 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         parent: None,
         target: None,
         name: None,
+        assistant: None,
     };
     store.put_lane(&lane).unwrap();
     assert_eq!(store.next_lane_id(), LaneId(2));

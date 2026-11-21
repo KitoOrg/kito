@@ -4,6 +4,33 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.25.0]
+
+A lane says which assistant works in it, and on what model (phase 24,
+[ADR 0010](docs/adr/0010-assistant-in-a-lane.md)).
+
+- **`assistant` on a lane**: a name (`claude-code`), and a version and a
+  model when known. In `lanes`, `lane_status`, `board` and the answer of
+  `open_lane`; `kito lanes` and `kito board` say it.
+- **Through the MCP server** it is the name the program gave when it
+  connected, with nothing to set up, and the model if the agent gives
+  `open_lane` one (`model`, optional).
+- **Through the hooks**: a session says what it runs on when it starts
+  (Claude Code gives its model then), and the lane its next edit is in
+  keeps it. `kito hook before-edit` and `session-start` take
+  `--assistant` for the hooks of other assistants; `before-edit` takes
+  `--model` and `--session` too. Claude Code is guessed from the mark it
+  leaves in the environment: a guess names a lane nobody named, and
+  never replaces a name a program gave of itself.
+- The MCP server says which program asks at every question about a lane:
+  a lane taken over by another assistant says so.
+- **`kito lane open --assistant NAME [--model M]`**, by hand.
+- The API stays version 2: `open_lane`, `before_edit` and `notices`
+  take `assistant`, `before_edit` takes `session`, and
+  `assistant_session` is new (needs `read`, records nothing).
+- It is a label: what the assistant's side said of itself, cleaned
+  before it is kept, and by which nothing is decided.
+
 ## [0.24.0]
 
 The registry is signed (phase 23,

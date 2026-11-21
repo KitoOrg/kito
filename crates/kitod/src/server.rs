@@ -81,6 +81,9 @@ struct Daemon {
     /// Counts the times a plugin was enabled or disabled: who listens to
     /// events is read again then.
     plugins_changed: AtomicU64,
+    /// What the sessions of assistants said they run on, the last one
+    /// said last (ADR 0010). Kept while the daemon runs, and no longer.
+    sessions: Mutex<Vec<(String, kito_core::AssistantSaid)>>,
     root: PathBuf,
     socket: PathBuf,
     /// What a client says first on the socket. `None` if it could not be
@@ -309,6 +312,43 @@ impl Daemon {
     }
 
     /// Executes a request. It is blocking code: it must be called outside the runtime.
+    /// How many sessions are remembered: one that started long ago says
+    /// what it runs on again when it starts again.
+    const SESSIONS_KEPT: usize = 256;
+
+    /// Remembers what a session of an assistant said it runs on (ADR 0010).
+    fn session_said(&self, session: &str, said: kito_core::AssistantSaid) {
+        let said = said.clean();
+        if session.is_empty() || session.len() > 128 || said.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let known = match sessions.iter().position(|(id, _)| id == session) {
+            Some(at) => sessions.remove(at).1,
+            None => kito_core::AssistantSaid::default(),
+        };
+        sessions.push((session.to_owned(), known.with(said)));
+        if sessions.len() > Self::SESSIONS_KEPT {
+            sessions.remove(0);
+        }
+    }
+
+    /// What a request says of the assistant behind it: what its session
+    /// said when it started, completed by what the request itself says.
+    fn said_of(&self, params: &Value) -> kito_core::AssistantSaid {
+        let own: kito_core::AssistantSaid = params
+            .get("assistant")
+            .and_then(|said| serde_json::from_value(said.clone()).ok())
+            .unwrap_or_default();
+        let own = own.clean();
+        let Some(session) = params.get("session").and_then(Value::as_str) else { return own };
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        match sessions.iter().find(|(id, _)| id == session) {
+            Some((_, known)) => known.clone().with(own),
+            None => own,
+        }
+    }
+
     fn handle(&self, request: &Request) -> Response {
         let id = request.id;
         let params = &request.params;
@@ -650,6 +690,7 @@ impl Daemon {
                     let intent = optional("intent").unwrap_or_default();
                     let scope = scope_of(params);
                     let (on, target) = (optional("on"), optional("target"));
+                    let said = self.said_of(params);
                     let (opened, overlaps, (why, why_note)) = self
                         .with_repo(|repo| {
                             // Building on a lane reads it; landing on it is
@@ -661,6 +702,14 @@ impl Daemon {
                             let opened =
                                 repo.open_lane_on(agent, task, base.as_deref(), &intent, &scope, stack)?;
                             let lane = repo.lane_of(&opened.id)?;
+                            // What its agent runs in, when that side said it (ADR 0010).
+                            let opened = match said.is_empty() {
+                                true => opened,
+                                false => {
+                                    repo.lane_assistant_said(lane, said.clone())?;
+                                    repo.lane_info(lane)?
+                                }
+                            };
                             // The person a server authenticated: the lane is theirs.
                             let opened = match params.get("on_behalf_of").and_then(person_of) {
                                 Some(person) => {
@@ -728,10 +777,28 @@ impl Daemon {
                         })
                         .collect();
                     let whole = params.get("whole").and_then(Value::as_bool).unwrap_or(false);
+                    // The hook that asks says what it runs in: the lane the
+                    // edit is in keeps it (ADR 0010). A lane that is gone
+                    // has nobody at work in it.
+                    let said = self.said_of(params);
+                    if let (Some(lane), false) = (lane, said.is_empty()) {
+                        let _ = self.with_repo(|repo| repo.lane_assistant_said(lane, said.clone()));
+                    }
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.before_edit(lane, &path, &lines, whole))
                             .map_err(internal)?,
                     ))
+                }
+                // The session of an assistant says what it runs on, before
+                // it is in any lane: the lanes it then edits in are told
+                // (ADR 0010). Nothing of the repository changes.
+                "assistant_session" => {
+                    let said: kito_core::AssistantSaid = params
+                        .get("assistant")
+                        .and_then(|said| serde_json::from_value(said.clone()).ok())
+                        .unwrap_or_default();
+                    self.session_said(text("session")?, said);
+                    Ok(json!({}))
                 }
                 "pull" => to_json(serde_json::to_value(self.pull().map_err(|why| (rpc::REFUSED, why))?)),
                 "reasons_behind" => {
@@ -860,6 +927,12 @@ impl Daemon {
                 }
                 "notices" => {
                     let lane = lane()?;
+                    // Asked for a lane by the program its agent runs in,
+                    // which says what it is (ADR 0010).
+                    let said = self.said_of(params);
+                    if !said.is_empty() {
+                        let _ = self.with_repo(|repo| repo.lane_assistant_said(lane, said.clone()));
+                    }
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.take_notices(lane)).map_err(internal)?,
                     ))
@@ -2015,6 +2088,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         key: rpc::ensure_socket_key(&root).ok(),
         plugin_failures: Mutex::default(),
         plugins_changed: AtomicU64::new(0),
+        sessions: Mutex::default(),
         repo: Mutex::new(Some(repo)),
         stats: Mutex::new(WatchStats::default()),
         signals,

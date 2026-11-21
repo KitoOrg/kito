@@ -102,6 +102,11 @@ pub struct LaneInfo {
     /// "0 of 1 approval", "changes requested by bob", "approved by bob".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
+    /// The assistant its agent runs in, and the model, as last said
+    /// (ADR 0010): `{"name": "claude-code", "version": "2.1.0", "model":
+    /// "claude-opus-5"}`. What that side said of itself: a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<kito_core::Assistant>,
 }
 
 /// Where a lane starts and where it lands, when not on the main lane.
@@ -631,6 +636,7 @@ impl Repo {
             parent,
             target,
             name,
+            assistant: None,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -692,6 +698,17 @@ impl Repo {
     pub fn set_lane_owner(&mut self, lane: LaneId, owner: kito_core::Author) -> Result<()> {
         let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
         at.record.owner = Some(owner);
+        let state = at.record.state;
+        self.put_lane_state(lane, state)
+    }
+
+    /// Takes in what is said of the assistant at work in a lane (ADR
+    /// 0010). The lane is written again only when it says something new.
+    pub fn lane_assistant_said(&mut self, lane: LaneId, said: kito_core::AssistantSaid) -> Result<()> {
+        let at = self.lanes.get_mut(&lane).ok_or(Error::NoSuchLane(lane))?;
+        if !kito_core::Assistant::told(&mut at.record.assistant, said) {
+            return Ok(());
+        }
         let state = at.record.state;
         self.put_lane_state(lane, state)
     }
@@ -813,6 +830,7 @@ impl Repo {
                 }
                 false => None,
             },
+            assistant: record.assistant.clone(),
         }
     }
 

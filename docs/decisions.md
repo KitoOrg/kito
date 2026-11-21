@@ -1309,6 +1309,40 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
+A lane says which assistant its agent runs in, and the model
+([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who
+watches lanes asked to see it. Three things were chosen.
+
+Nobody is asked to set anything up for the name: a program that speaks
+MCP names itself when it connects, and `kito-mcp` passes that on with
+`open_lane`. The model is harder, since no protocol says it: Claude Code
+tells its hooks when a session starts, Codex at every hook, and an agent
+can say what it believes it is. All three are taken, and what a hook
+says later replaces what the agent said. A name is said or worked out,
+and the two are kept apart: Claude Code is known in a hook only by the
+mark it leaves in the environment, which a program made from it may
+leave too. So that name is a guess. It names a lane nobody named, and
+where a program named itself otherwise the guess is dropped with the
+model that came with it: a wrong pair (one program's name, another's
+model) is worse than a missing one. The MCP server says who asks at
+every question about a lane, so a lane taken over by another assistant
+is known by its first question. A session's word is joined to a
+lane by the session's ID at the next edit, in the daemon's memory: it is
+not worth a place in the store, and a daemon that restarts loses a label
+until the next session, not a fact.
+
+It is kept as a label and nothing more. Kito cannot check it, so nothing
+may depend on it: no rule, no permission, no count. For the same reason
+it is cleaned before it is kept (short, and only what a name is written
+with): these words come from outside, and are shown to people and read
+by other agents.
+
+And Kito has no list of assistants. `claude-code` is kept as the
+program said it; how to draw it is for whoever shows the lane, which
+knows what it can draw. A list in Kito would be out of date with every
+new assistant, and wrong the day one changes its name.
+
 ### D-163 · Signing is Kito's own, and a registry with no key is said to have none
 A registry is signed and checked by the same program (`kito registry
 sign`, `kitod::registry`): two implementations of a signature are two

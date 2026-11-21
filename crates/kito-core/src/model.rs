@@ -387,6 +387,123 @@ pub enum LaneState {
     Closed,
 }
 
+/// The program an agent runs in while it works in a lane, and the model,
+/// as that program or the agent said them (ADR 0010). A label for whoever
+/// looks at the lane: nothing is decided by it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assistant {
+    /// How the program names itself: `claude-code`, `codex`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The model it runs: `claude-opus-5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// What is said of the assistant at work, at one moment: all of it, or
+/// the part that whoever says it knows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantSaid {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A name that was worked out, not said (the mark Claude Code leaves
+    /// in the environment of what it runs). It names the program only
+    /// where nothing else did; where a program named itself otherwise,
+    /// what comes with the guess is another program's, and is not taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guess: Option<String>,
+}
+
+/// Whether two names are of the same program: `codex` and
+/// `codex-mcp-client` are, `claude-code` and `claude-ai` are not.
+fn same_program(a: &str, b: &str) -> bool {
+    let within = |long: &str, short: &str| long.strip_prefix(short).is_some_and(|rest| rest.starts_with('-'));
+    a == b || within(a, b) || within(b, a)
+}
+
+impl AssistantSaid {
+    /// The longest name, version or model that is kept.
+    pub const LONGEST: usize = 64;
+
+    /// What was said, as it is kept: short, and written with what a name,
+    /// a version or a model are written with. The rest is dropped: these
+    /// words are shown to people and read by other agents, and come from
+    /// outside.
+    pub fn clean(self) -> AssistantSaid {
+        let word = |text: Option<String>, name: bool| {
+            let text = text?.trim().to_owned();
+            let text = match name {
+                true => text.to_lowercase().replace([' ', '_'], "-"),
+                false => text,
+            };
+            let written = |c: char| c.is_ascii_alphanumeric() || " ._:/+@()[]-".contains(c);
+            (!text.is_empty() && text.len() <= Self::LONGEST && text.chars().all(written)).then_some(text)
+        };
+        AssistantSaid {
+            name: word(self.name, true),
+            version: word(self.version, false),
+            model: word(self.model, false),
+            guess: word(self.guess, true),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.version.is_none() && self.model.is_none() && self.guess.is_none()
+    }
+
+    /// This, completed by what is said later of the same program; another
+    /// program's word stands alone.
+    pub fn with(self, later: AssistantSaid) -> AssistantSaid {
+        match (&self.name, &later.name) {
+            (Some(known), Some(named)) if !same_program(known, named) => later,
+            _ => AssistantSaid {
+                name: self.name.or(later.name),
+                version: later.version.or(self.version),
+                model: later.model.or(self.model),
+                guess: later.guess.or(self.guess),
+            },
+        }
+    }
+}
+
+impl Assistant {
+    /// Takes in what is said now. Another program replaces what was known
+    /// of the one before; the same one, or none named, completes it. A
+    /// model or a version alone says nothing of a lane no program was
+    /// named for. A name that was only worked out names a lane nobody
+    /// named; against a name that was said, it and what comes with it are
+    /// left out. Answers whether anything changed.
+    pub fn told(known: &mut Option<Assistant>, said: AssistantSaid) -> bool {
+        let said = said.clean();
+        let before = known.clone();
+        let name = match (said.name, said.guess, known.as_ref()) {
+            (Some(name), ..) => Some(name),
+            (None, Some(guess), None) => Some(guess),
+            (None, Some(guess), Some(now)) if !same_program(&now.name, &guess) => return false,
+            (None, ..) => None,
+        };
+        match (known.as_mut(), name) {
+            (Some(now), Some(name)) if !same_program(&now.name, &name) => {
+                *known = Some(Assistant { name, version: said.version, model: said.model });
+            }
+            (Some(now), _) => {
+                now.version = said.version.or(now.version.take());
+                now.model = said.model.or(now.model.take());
+            }
+            (None, Some(name)) => {
+                *known = Some(Assistant { name, version: said.version, model: said.model });
+            }
+            (None, None) => {}
+        }
+        *known != before
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lane {
     pub id: LaneId,
@@ -443,6 +560,10 @@ pub struct Lane {
     /// `main`. It cannot be closed and has checkpoints of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The assistant its agent runs in, and the model, as last said
+    /// (ADR 0010).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<Assistant>,
 }
 
 impl Lane {

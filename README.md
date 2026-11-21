@@ -656,6 +656,15 @@ in a lane, work as before. Holding an edit for its reasons can be turned
 off for a repository (`[agents] why = false` in `.kito/config.toml`): the
 reasons are then told when a lane declares, and nothing is held back.
 
+A lane says which assistant works in it, and on what model when that is
+known (`kito lanes`, `kito board`; `assistant` in what they answer as
+JSON). The program names itself to the MCP server; Claude Code's hooks
+say its model when a session starts; another assistant's hooks say
+theirs (`kito hook before-edit --file F --assistant codex --model M`);
+`kito lane open --assistant NAME` says it by hand. It is what that side
+said of itself: a label, by which nothing is decided
+([ADR 0010](docs/adr/0010-assistant-in-a-lane.md)).
+
 Hooks are settings of Claude Code: an interactive session runs them once
 the folder is trusted, and `claude -p` runs them at once. `kito` has to be
 on the `PATH`. A hook that cannot reach the daemon lets the edit through

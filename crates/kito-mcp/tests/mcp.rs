@@ -663,6 +663,23 @@ fn the_tools_reach_a_repository_kept_by_a_server() {
         )
         .unwrap();
     assert_eq!((lane["id"].as_str(), lane["owner"].as_str()), (Some("lane/1"), Some("ada")));
+    // Which program asked goes to the server with the lane; what a session
+    // said of itself is remembered there, and reaches the lane with an edit.
+    assert_eq!(lane["assistant"], json!({ "name": "test", "version": "0" }));
+    let mut hook = kitod::client::Client::connect(&here).unwrap();
+    hook.call_value(
+        "assistant_session",
+        json!({ "session": "session-1", "assistant": { "model": "claude-opus-5" } }),
+    )
+    .unwrap();
+    hook.call_value(
+        "before_edit",
+        json!({ "path": "src/shop.ts", "lane": "lane/1", "lines": [[1, 1]], "session": "session-1" }),
+    )
+    .unwrap();
+    let lanes = hook.call_value("lanes", json!({})).unwrap();
+    assert_eq!(lanes[0]["assistant"]["model"], "claude-opus-5", "{lanes}");
+    drop(hook);
     let who = mcp.tool("kito.who_touches", json!({ "target": "src/shop.ts:total" })).unwrap();
     assert_eq!(who[0]["agent"], "builder");
 
@@ -781,6 +798,54 @@ description = "Always fails."
     let listed = mcp.request("tools/list", json!({})).to_string();
     assert!(listed.contains("\"kito_hello_shout\"") && !listed.contains("kito_hello.shout"), "{listed}");
     assert_eq!(mcp.tool("kito_hello_plain", json!({})).unwrap(), json!({ "result": "just words" }));
+    drop(mcp);
+    stop_daemon(&root);
+}
+
+#[test]
+fn a_lane_opened_through_the_tools_says_which_program_asked() {
+    let (_tmp, root) = new_repo();
+    let mut mcp = Session::start(&root, &[]);
+    // The program named itself when it connected; the agent says its model.
+    let opened = mcp
+        .tool(
+            "kito.open_lane",
+            json!({
+                "agent": "alice", "intent": "prices in cents", "scope": ["src/shop.ts:total"],
+                "model": "claude-opus-5",
+            }),
+        )
+        .unwrap();
+    assert_eq!(opened["assistant"], json!({ "name": "test", "version": "0", "model": "claude-opus-5" }));
+    let board = mcp.tool("kito.board", json!({})).unwrap();
+    assert_eq!(board[0]["assistant"]["name"], "test");
+    // An agent that does not know its model says none.
+    let opened = mcp
+        .tool(
+            "kito.open_lane",
+            json!({ "agent": "bob", "intent": "a flat discount", "scope": ["src/shop.ts:discount"] }),
+        )
+        .unwrap();
+    assert_eq!(opened["assistant"], json!({ "name": "test", "version": "0" }));
+
+    // A lane another program was named for, asked about through the tools:
+    // the program that asks is the one its agent runs in now.
+    let mut direct = kitod::client::Client::connect(&root).unwrap();
+    let by_hand = direct
+        .call_value(
+            "open_lane",
+            json!({
+                "agent": "carol", "intent": "a receipt for every sale", "scope": ["src/receipt.ts"],
+                "assistant": { "name": "zcode", "model": "glm-5" },
+            }),
+        )
+        .unwrap();
+    assert_eq!(by_hand["assistant"], json!({ "name": "zcode", "model": "glm-5" }));
+    let lane = by_hand["id"].as_str().unwrap();
+    mcp.tool("kito.status", json!({ "lane": lane })).unwrap();
+    let now = direct.call_value("lane_status", json!({ "lane": lane })).unwrap();
+    assert_eq!(now["assistant"], json!({ "name": "test", "version": "0" }));
+    drop(direct);
     drop(mcp);
     stop_daemon(&root);
 }

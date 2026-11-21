@@ -1,0 +1,49 @@
+== 1. Through the MCP server: the program names itself, the agent says its model
+
+(a program connects to kito-mcp as "claude-code" 2.1.0, and calls open_lane with model "claude-opus-5")
+
+$ kito lanes
+lane/1   alice        active      base ckpt#1     0 ops   0 files  in claude-code (claude-opus-5)  prices in cents
+
+== 2. Claude Code's hooks: the model when a session starts, the session at each edit
+
+$ kito lanes
+lane/1   alice        active      base ckpt#1     0 ops   0 files  in claude-code (claude-opus-5)  prices in cents
+lane/2   bob          active      base ckpt#1     0 ops   0 files  say what the shop sells
+
+(a session of Claude Code starts on "claude-sonnet-5", then edits README.md in lane/2)
+
+$ kito board
+lane/1  alice (of ada) in claude-code (claude-opus-5)  active  prices in cents
+  scope    src/shop.ts:total
+lane/2  bob (of ada) in claude-code (claude-sonnet-5)  active  say what the shop sells
+  scope    README.md
+
+== 3. Another assistant takes lane/2 over
+
+$ kito hook before-edit --file /demo/shop/.kito/lanes/2/work/README.md --assistant codex --model gpt-5-codex
+
+$ kito --json lanes     (the part that says it)
+"id":"lane/1"
+"assistant":{"name":"claude-code","version":"2.1.0","model":"claude-opus-5"}
+"id":"lane/2"
+"assistant":{"name":"codex","model":"gpt-5-codex"}
+
+== 4. Opened by hand: said, or not said
+
+$ kito lane open carol --intent a line about returns --scope README.md --assistant zcode
+lane/3 opened for carol on ckpt#1.
+Working copy: /demo/shop/.kito/lanes/3/work
+Scope: README.md
+  overlap (file) with lane/2 of bob (ada), there for: say what the shop sells
+    README.md: bob is in this file too, on other parts of it
+Why it is the way it is:
+  README.md
+    "first version": ada, checkpoint ckpt#1
+Every save there is recorded on the lane; `kito integrate lane/3` brings it in.
+
+$ kito lanes
+lane/1   alice        active      base ckpt#1     0 ops   0 files  in claude-code (claude-opus-5)  prices in cents
+lane/2   bob          active      base ckpt#1     0 ops   0 files  in codex (gpt-5-codex)  say what the shop sells
+lane/3   carol        active      base ckpt#1     0 ops   0 files  in zcode  a line about returns
+lane/4   dave         active      base ckpt#1     0 ops   0 files  a line about delivery

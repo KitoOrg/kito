@@ -879,6 +879,26 @@ fn hook(cwd: &Path, args: &[&str], input: &Value) -> (Value, i32, String) {
     (answer, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// A hook run by an assistant that marks, or does not, what it runs.
+fn hook_in(cwd: &Path, args: &[&str], input: &Value, claude_code: bool) -> (Value, i32, String) {
+    use std::io::Write;
+    let mut command = command(cwd, args);
+    match claude_code {
+        true => command.env("CLAUDECODE", "1"),
+        false => command.env_remove("CLAUDECODE"),
+    };
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let answer = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (answer, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
 /// An edit as Claude Code announces it before making it.
 fn edit(file: &Path, old: &str, new: &str) -> Value {
     serde_json::json!({
@@ -2985,4 +3005,74 @@ fn a_registry_is_signed_and_checked_against_its_key() {
     }
     let (ok, said) = me(Some(&public), &["plugin", "search"]);
     assert!(!ok && said.contains("an older one (number 1) than this machine has seen (number 2)"), "{said}");
+}
+
+#[test]
+fn a_lane_says_which_assistant_works_in_it_and_on_what_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::write(root.join("README.md"), "# Shop\n").unwrap();
+    fs::write(root.join("NOTES.md"), "# Notes\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    let assistant = |lane: usize| json(root, &["--json", "lanes"])[lane]["assistant"].clone();
+
+    // Said when the lane is opened, and shown wherever the lane is.
+    let open = ["lane", "open", "alice", "--intent", "say what the shop sells", "--scope", "README.md"];
+    ok(root, &[&open[..], &["--assistant", "Codex", "--model", "gpt-5-codex"][..]].concat());
+    assert_eq!(assistant(0), serde_json::json!({ "name": "codex", "model": "gpt-5-codex" }));
+    assert!(ok(root, &["lanes"]).contains("  in codex (gpt-5-codex)"));
+    assert!(ok(root, &["board"]).contains(" in codex (gpt-5-codex)  active"));
+    // A model is somebody's: it is not said alone.
+    let alone = kito(root, &["lane", "open", "x", "--intent", "y", "--scope", "README.md", "--model", "m"]);
+    assert!(!alone.status.success());
+
+    // A lane nobody said anything of says nothing.
+    ok(root, &["lane", "open", "bob", "--intent", "a line about returns", "--scope", "NOTES.md"]);
+    assert_eq!(assistant(1), Value::Null);
+    assert!(!ok(root, &["lanes"]).lines().nth(1).unwrap().contains(" in "));
+
+    // Claude Code says its model when a session starts, and of which
+    // session an edit is: the lane the edit is in says both from then on.
+    let work = root.join(".kito/lanes/2/work");
+    let started = serde_json::json!({
+        "hook_event_name": "SessionStart", "session_id": "session-1", "cwd": root, "model": "claude-opus-5",
+    });
+    let said = hook_in(root, &["hook", "session-start"], &started, true);
+    assert_eq!(said.1, 0, "{said:?}");
+    let mut announced = edit(&work.join("NOTES.md"), "# Notes", "# Returns");
+    announced["session_id"] = "session-1".into();
+    assert_eq!(refusal(&hook_in(root, &["hook", "before-edit"], &announced, true)), "");
+    assert_eq!(assistant(1), serde_json::json!({ "name": "claude-code", "model": "claude-opus-5" }));
+    // An edit of a session that said nothing adds nothing, and takes nothing away.
+    announced["session_id"] = "session-2".into();
+    assert_eq!(refusal(&hook_in(root, &["hook", "before-edit"], &announced, true)), "");
+    assert_eq!(assistant(1), serde_json::json!({ "name": "claude-code", "model": "claude-opus-5" }));
+    // An assistant that does not mark what it runs is not taken for Claude Code.
+    ok(root, &["lane", "open", "carol", "--intent", "notes in order", "--scope", "NOTES.md"]);
+    let other = edit(&root.join(".kito/lanes/3/work/NOTES.md"), "# Notes", "# Notes, in order");
+    assert_eq!(refusal(&hook_in(root, &["hook", "before-edit"], &other, false)), "");
+    assert_eq!(assistant(2), Value::Null);
+
+    // Claude Code's mark is only a guess of who asks: in a lane another
+    // program was named for, neither it nor the session's model is taken.
+    let mut marked = edit(&root.join(".kito/lanes/1/work/README.md"), "# Shop", "# The shop");
+    marked["session_id"] = "session-1".into();
+    assert_eq!(refusal(&hook_in(root, &["hook", "before-edit"], &marked, true)), "");
+    assert_eq!(assistant(0), serde_json::json!({ "name": "codex", "model": "gpt-5-codex" }));
+
+    // Another assistant takes the first lane over: what was known of the
+    // one before goes with it. What it says later of itself is added.
+    let file = root.join(".kito/lanes/1/work/README.md");
+    let file = file.to_str().unwrap();
+    ok(root, &["hook", "before-edit", "--file", file, "--assistant", "zcode"]);
+    assert_eq!(assistant(0), serde_json::json!({ "name": "zcode" }));
+    ok(root, &["hook", "before-edit", "--file", file, "--assistant", "zcode", "--model", "glm-5"]);
+    assert_eq!(assistant(0), serde_json::json!({ "name": "zcode", "model": "glm-5" }));
+    // It is still said once the daemon started again: the lane keeps it.
+    ok(root, &["daemon", "stop"]);
+    assert_eq!(assistant(0), serde_json::json!({ "name": "zcode", "model": "glm-5" }));
+    ok(root, &["daemon", "stop"]);
 }

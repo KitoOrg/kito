@@ -18,6 +18,9 @@
 //! directory connected to a server, asks the server: the rules of a team
 //! are the same on every machine.
 //!
+//! They also say which assistant asks, and its model when it gives one:
+//! the lane an edit is in keeps it, for the people who watch (ADR 0010).
+//!
 //! A hook that cannot ask (no daemon, a broken connection) lets the edit
 //! through and says so: the rules are still checked when the lane is
 //! integrated. With `--file`, `before-edit` is for any other tool: it
@@ -31,6 +34,41 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+
+/// What a hook says of the assistant that runs it (ADR 0010): its name,
+/// when the command line gives it; a guess of it, when Claude Code's mark
+/// is in the environment; its session and its model, when the assistant
+/// says them.
+#[derive(Debug, Default)]
+pub struct Said {
+    pub assistant: Option<String>,
+    pub model: Option<String>,
+    pub session: Option<String>,
+    /// Worked out, not said: it never replaces a name a program gave.
+    pub guess: Option<String>,
+}
+
+impl Said {
+    /// Completed by what the assistant wrote on the standard input.
+    fn with(mut self, input: &Value) -> Said {
+        let text = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
+        self.session = self.session.or_else(|| text("session_id"));
+        self.model = self.model.or_else(|| text("model"));
+        // Claude Code marks everything it runs; so may a program made from it.
+        if self.assistant.is_none() && std::env::var("CLAUDECODE").is_ok_and(|mark| mark == "1") {
+            self.guess = Some("claude-code".to_owned());
+        }
+        self
+    }
+
+    /// The assistant, as the daemon is told of it; nothing to say: null.
+    fn assistant(&self) -> Value {
+        match self.assistant.is_some() || self.model.is_some() || self.guess.is_some() {
+            true => json!({ "name": self.assistant, "model": self.model, "guess": self.guess }),
+            false => Value::Null,
+        }
+    }
+}
 
 /// Where a file is, as far as Kito is concerned.
 #[derive(Debug, PartialEq, Eq)]
@@ -164,8 +202,8 @@ fn edit_of(input: &Value) -> Option<Edit> {
     Some(Edit { file, lines, whole })
 }
 
-/// Asks the daemon whether an edit may be made.
-fn ask(edit: &Edit) -> Result<EditAnswer, String> {
+/// Asks the daemon whether an edit may be made, saying what asks.
+fn ask(edit: &Edit, said: &Said) -> Result<EditAnswer, String> {
     let allowed = EditAnswer { allowed: true, kind: "ok".to_owned(), ..EditAnswer::default() };
     let (root, lane, rel) = match place_of(&edit.file) {
         Place::Elsewhere => return Ok(allowed),
@@ -190,6 +228,13 @@ fn ask(edit: &Edit) -> Result<EditAnswer, String> {
     let mut params = json!({ "path": rel, "lines": lines, "whole": edit.whole });
     if let Some(lane) = lane {
         params["lane"] = lane.into();
+        // The lane the edit is in says who works in it (ADR 0010).
+        if !said.assistant().is_null() {
+            params["assistant"] = said.assistant();
+        }
+        if let Some(session) = &said.session {
+            params["session"] = json!(session);
+        }
     }
     let mut client = Client::connect_or_start(&root).map_err(|e| e.to_string())?;
     client.call("before_edit", params).map_err(|e| e.to_string())
@@ -203,7 +248,7 @@ fn stdin_json() -> Value {
 
 /// `kito hook before-edit`: with `file`, for any tool, in words; without,
 /// what Claude Code says on the standard input, answered as it expects.
-pub fn before_edit(file: Option<&Path>, ranges: &[String]) -> ExitCode {
+pub fn before_edit(file: Option<&Path>, ranges: &[String], said: Said) -> ExitCode {
     if let Some(file) = file {
         let lines: Vec<(u32, u32)> = ranges
             .iter()
@@ -214,7 +259,7 @@ pub fn before_edit(file: Option<&Path>, ranges: &[String]) -> ExitCode {
             .collect();
         let file = std::env::current_dir().unwrap_or_default().join(file);
         let whole = lines.is_empty();
-        return match ask(&Edit { file, lines, whole }) {
+        return match ask(&Edit { file, lines, whole }, &said) {
             Ok(answer) if answer.allowed => ExitCode::SUCCESS,
             Ok(answer) => {
                 eprintln!("{}", answer.message);
@@ -228,7 +273,7 @@ pub fn before_edit(file: Option<&Path>, ranges: &[String]) -> ExitCode {
     }
     let input = stdin_json();
     let Some(edit) = edit_of(&input) else { return ExitCode::SUCCESS };
-    match ask(&edit) {
+    match ask(&edit, &said.with(&input)) {
         Ok(answer) if answer.allowed => ExitCode::SUCCESS,
         Ok(answer) => {
             let answer = json!({
@@ -376,10 +421,17 @@ fn said_by_plugins(root: &Path, client: &mut Client) -> String {
 
 /// `kito hook session-start`: the rules that are enforced here and who is
 /// on what, as the context a session starts with.
-pub fn session_start() -> ExitCode {
+pub fn session_start(said: Said) -> ExitCode {
     let input = stdin_json();
     let Some(root) = roots(&input).into_iter().next() else { return ExitCode::SUCCESS };
     let Ok(mut client) = Client::connect_or_start(&root) else { return ExitCode::SUCCESS };
+    // What the session runs on: the lanes it then edits in say it (ADR
+    // 0010). An older daemon, or a server's, that does not know: no matter.
+    let said = said.with(&input);
+    if let (Some(session), false) = (&said.session, said.assistant().is_null()) {
+        let told = json!({ "session": session, "assistant": said.assistant() });
+        let _ = client.call_value("assistant_session", told);
+    }
     let status: Value = client.call("status", json!({})).unwrap_or(Value::Null);
     let protected = status.get("protected").and_then(Value::as_bool).unwrap_or(false);
     let board: Vec<BoardLane> = client.call("board", json!({})).unwrap_or_default();

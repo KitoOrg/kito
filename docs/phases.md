@@ -2605,6 +2605,61 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 24 · which assistant works in a lane — done
+
+A lane said who works in it by a name and a person, and not what that
+agent is. The person who watches several lanes asked to see the
+assistant on each, and the model where it can be known. Released as
+0.25.0 ([ADR 0010](adr/0010-assistant-in-a-lane.md), D-164).
+
+### What is there
+
+- **A lane keeps an `assistant`**: a name, and a version and a model
+  when known. In `lanes`, `lane_status`, `board`, the answer of
+  `open_lane`; `kito lanes` and `kito board` say it (`in claude-code
+  (claude-opus-5)`).
+- **Said through the MCP server**: the name and version the program gave
+  when it connected, and the model if the agent gives `open_lane` one.
+- **Said by the hooks**: `kito hook session-start` says what the session
+  runs on (Claude Code gives its model then), `kito hook before-edit`
+  which session an edit is of, and the lane the edit is in keeps both.
+  Another assistant's hooks say `--assistant NAME` (`--model`,
+  `--session`). Claude Code is guessed from the mark it puts on what it
+  runs: the guess names a lane nobody named, and is dropped, with its
+  model, where a program named itself otherwise.
+- **Said at every question about a lane** by the MCP server: a lane
+  taken over by another assistant says so from its first question.
+- **Said by hand**: `kito lane open --assistant NAME [--model M]`.
+- The same program completes what is known; another replaces it.
+
+### How it was tested
+
+- `kito-core/tests/model.rs`: what is kept and what is dropped, the same
+  program under two names, another program, a session's word completed.
+- `kito-cli/tests/cli.rs`: from the command line and through the hooks
+  as Claude Code runs them: the model of a session reaching the lane its
+  edit is in, a session that said nothing, an assistant that is not
+  Claude Code, Claude Code's mark in a lane named for another program, a
+  lane taken over, a daemon started again.
+- `kito-mcp/tests/mcp.rs`: the program's name and the agent's model
+  through the tools; a lane named for another program, asked about; and
+  through a server, with a session's word joined there.
+- `kitod/tests/api.rs`: `assistant_session` is written down under `read`.
+- `scripts/demo-phase24.sh`, kept in `docs/demo/phase24-demo.txt`.
+
+### Known limitations
+
+- **Nothing checks it.** It is what the assistant's side said.
+- **Claude Code's model is known from a session's start**, with the
+  daemon running: a model changed in the middle of a session is not
+  seen, and a daemon that restarted has forgotten the sessions.
+- **Only the last assistant of a lane is kept**, not those before.
+- **No real assistant was run for it**: the hooks were given what Claude
+  Code's and Codex's documentation say they write (read 2026-11-21).
+  What each names itself to an MCP server is not in their documentation.
+- **Not run on macOS or Windows** since 0.20.0: the project's CI is
+  stopped by the account's billing.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

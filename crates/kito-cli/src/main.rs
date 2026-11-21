@@ -452,6 +452,13 @@ enum LaneCmd {
         /// (main). It waits until the work it was built on is there
         #[arg(long, value_name = "LANE")]
         target: Option<String>,
+        /// The assistant the agent runs in (claude-code, codex): shown
+        /// with the lane. An assistant set up for Kito says it by itself
+        #[arg(long, value_name = "NAME")]
+        assistant: Option<String>,
+        /// With --assistant: the model it runs (claude-opus-5)
+        #[arg(long, value_name = "MODEL", requires = "assistant")]
+        model: Option<String>,
     },
     /// Create a permanent lane, such as `staging`: lanes land on it under
     /// checkpoints of its own, it has its own git branch and checks, and
@@ -580,11 +587,26 @@ enum HookCmd {
         /// The lines about to be replaced, as 12 or 12-18 (default: the whole file)
         #[arg(long = "lines")]
         lines: Vec<String>,
+        /// The assistant that asks (codex, zcode): the lane the edit is
+        /// in says it. Claude Code is known by itself
+        #[arg(long, value_name = "NAME")]
+        assistant: Option<String>,
+        /// The model it runs, when the assistant says it
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Its session, as the assistant names it: what the session said
+        /// when it started is said of the lane too
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
     /// After a shell command: what it changed where it should not have
     AfterShell,
     /// When a session starts: the rules that are enforced, and who is on what
-    SessionStart,
+    SessionStart {
+        /// The assistant that starts (codex, zcode). Claude Code is known by itself
+        #[arg(long, value_name = "NAME")]
+        assistant: Option<String>,
+    },
 }
 
 type Outcome = Result<(), String>;
@@ -2090,6 +2112,12 @@ fn lane_line(lane: &LaneInfo) -> String {
     if let Some(review) = &lane.review {
         line.push_str(&format!("  [{review}]"));
     }
+    if let Some(assistant) = &lane.assistant {
+        match &assistant.model {
+            Some(model) => line.push_str(&format!("  in {} ({model})", assistant.name)),
+            None => line.push_str(&format!("  in {}", assistant.name)),
+        }
+    }
     match (&lane.parent, &lane.target) {
         (Some(parent), Some(target)) if parent == target => line.push_str(&format!("  on {parent}")),
         (Some(parent), Some(target)) => line.push_str(&format!("  on {parent}, lands on {target}")),
@@ -2539,7 +2567,13 @@ fn cmd_board(cli: &Cli) -> Outcome {
             (state, _, Some(review)) => format!("{} ({review})", state.replace('_', " ")),
             (state, ..) => state.replace('_', " "),
         };
-        println!("{}  {}{whose}  {state}  {}", text("id"), text("agent"), text("intent"));
+        // What its agent runs in, as that side said it (ADR 0010).
+        let with = match (lane["assistant"]["name"].as_str(), lane["assistant"]["model"].as_str()) {
+            (Some(name), Some(model)) => format!(" in {name} ({model})"),
+            (Some(name), None) => format!(" in {name}"),
+            _ => String::new(),
+        };
+        println!("{}  {}{whose}{with}  {state}  {}", text("id"), text("agent"), text("intent"));
         let scope: Vec<&str> =
             lane["scope"].as_array().into_iter().flatten().filter_map(|item| item["item"].as_str()).collect();
         let broad = match lane["broad"].as_bool() {
@@ -2669,16 +2703,15 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 println!("{}", done["done"].as_str().unwrap_or_default());
             }
         }
-        LaneCmd::Open { agent, intent, scope, task, base, on, target } => {
-            let opened: Value = client
-                .call(
-                    "open_lane",
-                    json!({
-                        "agent": agent, "task": task, "base": base, "intent": intent, "scope": scope,
-                        "on": on, "target": target,
-                    }),
-                )
-                .map_err(fail)?;
+        LaneCmd::Open { agent, intent, scope, task, base, on, target, assistant, model } => {
+            let mut params = json!({
+                "agent": agent, "task": task, "base": base, "intent": intent, "scope": scope,
+                "on": on, "target": target,
+            });
+            if assistant.is_some() {
+                params["assistant"] = json!({ "name": assistant, "model": model });
+            }
+            let opened: Value = client.call("open_lane", params).map_err(fail)?;
             if cli.json {
                 print_json(&opened);
             } else {
@@ -3440,9 +3473,19 @@ fn run() -> ExitCode {
     // A hook answers whoever runs it in its own words and with its own code.
     if let Cmd::Hook { what } = &cli.command {
         return match what {
-            HookCmd::BeforeEdit { file, lines } => hook::before_edit(file.as_deref(), lines),
+            HookCmd::BeforeEdit { file, lines, assistant, model, session } => {
+                let said = hook::Said {
+                    assistant: assistant.clone(),
+                    model: model.clone(),
+                    session: session.clone(),
+                    guess: None,
+                };
+                hook::before_edit(file.as_deref(), lines, said)
+            }
             HookCmd::AfterShell => hook::after_shell(),
-            HookCmd::SessionStart => hook::session_start(),
+            HookCmd::SessionStart { assistant } => {
+                hook::session_start(hook::Said { assistant: assistant.clone(), ..hook::Said::default() })
+            }
         };
     }
     // An assistant set up by its plugin: the exit code is the plugin's.

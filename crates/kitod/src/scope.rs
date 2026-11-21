@@ -91,6 +91,9 @@ pub struct BoardLane {
     /// When it last recorded something, in milliseconds since the epoch.
     pub last_change_ms: Option<u64>,
     pub overlaps: Vec<Overlap>,
+    /// The assistant its agent runs in, and the model, as last said (ADR 0010).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<kito_core::Assistant>,
 }
 
 /// How an item is written.
@@ -1043,6 +1046,7 @@ impl Repo {
                 out_of_scope: claims.out_of_scope.clone(),
                 last_change_ms,
                 overlaps: self.overlaps_of(&claims, *lane, false)?,
+                assistant: info.assistant,
             });
         }
         Ok(board)

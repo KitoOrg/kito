@@ -42,6 +42,8 @@ const ALLOWED: &[&str] = &[
     "before_edit",
     "reasons_behind",
     "after_shell",
+    // What the session of an assistant runs on (ADR 0010).
+    "assistant_session",
     // Notes on code (ADR 0003).
     "add_note",
     "notes",
@@ -79,6 +81,7 @@ const READ: &[&str] = &[
     // of the repository.
     "before_edit",
     "after_shell",
+    "assistant_session",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
 ];

@@ -83,7 +83,8 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     "task": { "type": "string", "description": "The task it belongs to (task #55)" },
                     "base": { "type": "string", "description": "A checkpoint to start from (ckpt#12) instead of the current state" },
                     "on": { "type": "string", "description": "Another lane to start on, as it is now, before it has landed (lane/1), or a permanent lane by its name (staging): to build on work in progress, or to land on staging instead of main. Your lane then lands on that lane" },
-                    "target": { "type": "string", "description": "With `on`: the lane to land on instead, one below it (main). Your lane waits until the work it was built on is there" }
+                    "target": { "type": "string", "description": "With `on`: the lane to land on instead, one below it (main). Your lane waits until the work it was built on is there" },
+                    "model": { "type": "string", "description": "The model you are, if you know its exact name (claude-opus-5): shown with the lane to the people who watch it. Leave it out rather than guess" }
                 },
                 "required": ["agent", "intent", "scope"]
             }),
@@ -385,7 +386,7 @@ again: it goes ahead. If it undoes one of them on purpose, say so with set_inten
 
 /// Runs a tool, and adds to its answer what the lane has not been told yet
 /// about the other lanes.
-fn call(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
+fn call(root: &Path, tool: &str, args: Value, asked_by: &Value) -> Result<Value, String> {
     let named = args.get("lane").and_then(Value::as_str).filter(|lane| *lane != "main").map(str::to_owned);
     let mut value = run(root, tool, args)?;
     // The lane the answer is for: the one the tool named, or the one an
@@ -400,8 +401,9 @@ fn call(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
     };
     if let Some(lane) = lane {
         let mut client = Client::connect_or_start(root).map_err(|e| e.to_string())?;
-        // A lane that is gone has nothing to be told.
-        if let Ok(notices) = client.call_value("notices", json!({ "lane": lane })) {
+        // A lane that is gone has nothing to be told. The lane is told
+        // which program asks: the one its agent runs in now (ADR 0010).
+        if let Ok(notices) = client.call_value("notices", json!({ "lane": lane, "assistant": asked_by })) {
             if notices.as_array().is_some_and(|list| !list.is_empty()) {
                 if !value.is_object() {
                     value = json!({ "result": value });
@@ -665,24 +667,37 @@ impl ServerHandler for Kito {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.into_owned();
         let Some(tool) = name.strip_prefix(&self.prefix).map(str::to_owned) else {
             return Err(McpError::invalid_params(format!("unknown tool: {name}"), None));
         };
-        let args = Value::Object(request.arguments.unwrap_or_default());
+        let mut args = Value::Object(request.arguments.unwrap_or_default());
+        // Which program asks, as it named itself when it connected (ADR
+        // 0010): said of the lane it opens, and of a lane it asks about.
+        let client = context.peer.peer_info().map(|info| info.client_info.clone());
+        let asked_by = json!({
+            "name": client.as_ref().map(|client| client.name.clone()),
+            "version": client.as_ref().map(|client| client.version.clone()),
+        });
+        if tool == "open_lane" {
+            // With the model its agent says it is.
+            let model = args.as_object_mut().and_then(|given| given.remove("model"));
+            args["assistant"] = asked_by.clone();
+            args["assistant"]["model"] = model.unwrap_or(Value::Null);
+        }
         let root = self.root.clone();
         // The daemon's client is blocking: off the thread that drives the protocol.
         let own = self.tools.iter().any(|known| known.name == name.as_str());
         let prefix = self.prefix.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             if own {
-                return call(&root, &tool, args);
+                return call(&root, &tool, args, &asked_by);
             }
             match plugin_tools(&root, &prefix).into_iter().find(|offered| offered.name == tool) {
                 Some(offered) => call_plugin(&root, &offered, &args),
-                None => call(&root, &tool, args),
+                None => call(&root, &tool, args, &asked_by),
             }
         })
         .await

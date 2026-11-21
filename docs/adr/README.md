@@ -39,3 +39,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0004 · Review of a lane](0004-review-of-a-lane.md) (accepted)
 - [0005 · Plugins](0005-plugins.md) (accepted)
 - [0006 · Plugins for the server](0006-server-plugins.md) (accepted)
+- [0010 · A lane says which assistant works in it](0010-assistant-in-a-lane.md)
+  (accepted)

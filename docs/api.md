@@ -58,6 +58,15 @@ The answers are the types the daemon serializes, in `crates/kitod/src`:
 the file named in the last column defines each, field by field, with what
 it means.
 
+A lane says the assistant its agent runs in when that side said it
+(`assistant`: `name`, and `version` and `model` when known;
+[ADR 0010](adr/0010-assistant-in-a-lane.md)), in `lanes`, `lane_status`,
+`board` and the answer of `open_lane`. It is what the assistant said of
+itself: a label, by which nothing is decided. Where `assistant` is a
+parameter it may carry `guess` in place of `name`: a name that was
+worked out and not said, which names a lane nobody named and is left out,
+with what comes with it, where a program named itself otherwise.
+
 ## Anybody who reached the daemon
 
 | Method | Parameters | Answers |
@@ -89,15 +98,16 @@ it means.
 | `plugins` | | The plugins this repository names | `plugins.rs` (`PluginInfo`) |
 | `plugin_call` | `ask`, `[params]` | Asks the plugin of the same name on the server this directory is connected to (`kito-<name> answer <ask>` there), and returns what it answers. Refused in a repository of its own | `connected.rs`, `kito-server` |
 | `sync` | `[lane]` | Records what is saved and not recorded yet; changes nothing else | `server.rs` |
-| `before_edit` | `path`, `[lane]`, `[lines]`, `[whole]` | Whether an edit may be made, and what to read first | `guard.rs` (`EditAnswer`) |
+| `before_edit` | `path`, `[lane]`, `[lines]`, `[whole]`, `[assistant]`, `[session]` | Whether an edit may be made, and what to read first. What it says of the assistant that asks, and what its session said, is kept by the lane | `guard.rs` (`EditAnswer`) |
 | `after_shell` | `[since_ms]`, `[lanes]`, `[main]` | What a command changed where it should not have | `guard.rs` |
 | `reasons_behind` | `lane` | The reasons behind what a lane replaced, not told yet | `guard.rs` (`Replaced`) |
+| `assistant_session` | `session`, `assistant` (`[name]`, `[version]`, `[model]`) | Nothing. What the session of an assistant runs on is remembered while the daemon runs (the last 256), and said of the lanes that session then edits in: nothing of the repository changes | `server.rs` |
 
 ## `write`
 
 | Method | Parameters | Answers | Defined in |
 | --- | --- | --- | --- |
-| `open_lane` | `agent`, `intent`, `scope`, `[task]`, `[base]`, `[on]`, `[target]` | The lane, its working copy, and why what it declared is the way it is | `lanes.rs`, `guard.rs` |
+| `open_lane` | `agent`, `intent`, `scope`, `[task]`, `[base]`, `[on]`, `[target]`, `[assistant]` (`name`, `[version]`, `[model]`: what the agent runs in, ADR 0010) | The lane, its working copy, and why what it declared is the way it is | `lanes.rs`, `guard.rs` |
 | `close_lane` | `lane` | The lane as it was closed | `lanes.rs` (`LaneInfo`) |
 | `extend_scope` | `lane`, `scope` | The scope now, and the why of what was added | `guard.rs` (`ScopeWhy`) |
 | `set_intent` | `summary`, `[lane]`, `[task]`, `[prompt]` | The intent the next changes are recorded with | `lanes.rs` |
@@ -105,7 +115,7 @@ it means.
 | `put_file` | `lane`, `path`, `content`, `[executable]`, `[base]`, `[writer]` | What became of a file saved from elsewhere: recorded, merged, or a conflict | `files.rs` (`Put`) |
 | `remove_file` | `lane`, `path`, `[base]`, `[writer]` | The same, for a removal | `files.rs` (`Put`) |
 | `claim_writer` | `lane`, `writer` | Makes this machine the one that writes the lane | `server.rs` |
-| `notices` | `lane` | What the lane's agent must be told, taken once | `repo.rs` |
+| `notices` | `lane`, `[assistant]` | What the lane's agent must be told, taken once. Whoever asks may say what it is: the lane keeps it | `repo.rs` |
 | `add_note` | `on`, `text`, `[lane]`, `[agent]` | The note | `notes.rs` (`NoteInfo`) |
 | `remove_note` | `note` | The note, removed | `notes.rs` (`NoteInfo`) |
 | `comment` | `lane`, `text`, `[on]`, `[reply_to]`, `[agent]` | The comment | `comments.rs` (`CommentInfo`) |
