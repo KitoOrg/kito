@@ -88,6 +88,26 @@ enum PluginCmd {
 }
 
 #[derive(Subcommand)]
+enum RegistryCmd {
+    /// Make a key for a registry: the file is the secret that signs it,
+    /// and what is printed is what everybody checks it with
+    Key {
+        /// Where the secret is written: kept off the machine that serves
+        /// the registry
+        file: PathBuf,
+    },
+    /// Sign a registry kept in a directory: its index gets the next
+    /// number, and every file a signature beside it
+    Sign {
+        /// The directory that holds index.json and plugins/
+        dir: PathBuf,
+        /// The file `kito registry key` wrote
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum AssistantCmd {
     /// Set a coding assistant up for Kito in this repository: its tools,
     /// its rules, its hooks, written by the plugin that knows it
@@ -392,6 +412,11 @@ enum Cmd {
     },
     /// Repository status
     Status,
+    /// A registry of plugins of your own: its key, and its signature
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCmd,
+    },
     /// Manage the daemon
     Daemon {
         #[command(subcommand)]
@@ -624,6 +649,12 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
             println!("{} {} is installed in {}", manifest.name, manifest.version, added.dir.display());
             if let Some(source) = &source {
                 println!("  from {} (SHA-256 {})", source.url, source.sha256);
+                match source.signed {
+                    true => println!("  the registry's files were checked against its key"),
+                    false => println!(
+                        "  the registry was not checked against a key: nothing but its address says these files are its own"
+                    ),
+                }
             }
             println!("  `kito plugin enable {}` lets it run in a repository.", manifest.name);
         }
@@ -860,6 +891,55 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                 (true, false) => println!("{name} is disabled in this repository."),
                 (false, _) => println!("{name} was not enabled in this repository."),
             }
+        }
+    }
+    Ok(())
+}
+
+/// `kito registry key | sign`: for whoever keeps a registry (ADR 0009).
+fn cmd_registry(cli: &Cli, command: &RegistryCmd) -> Outcome {
+    use std::io::Write;
+    match command {
+        RegistryCmd::Key { file } => {
+            let (secret, public) = kitod::registry::new_key()?;
+            // Never written over, and for its owner only: it signs for everybody.
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options
+                .open(file)
+                .and_then(|mut out| writeln!(out, "{secret}"))
+                .map_err(|e| format!("{}: {e} (a key is never written over)", file.display()))?;
+            if cli.json {
+                print_json(&json!({ "public": public, "secret_file": file }));
+                return Ok(());
+            }
+            println!(
+                "The secret is in {}: whoever has it signs for this registry. Keep it off the machine",
+                file.display()
+            );
+            println!("that serves the registry, and keep a copy: without it the registry needs a new key.");
+            println!("What everybody checks the registry with:");
+            println!("{public}");
+            println!("  KITO_REGISTRY_KEY={public}");
+        }
+        RegistryCmd::Sign { dir, key } => {
+            let secret = std::fs::read_to_string(key).map_err(|e| format!("{}: {e}", key.display()))?;
+            let secret = secret.trim();
+            let public =
+                kitod::registry::public_of(secret).map_err(|why| format!("{}: {why}", key.display()))?;
+            let (serial, plugins) = kitod::registry::sign_dir(dir, secret)?;
+            if cli.json {
+                print_json(&json!({ "serial": serial, "plugins": plugins, "public": public }));
+                return Ok(());
+            }
+            println!(
+                "{} is signed: its index is number {serial}, with {}.",
+                dir.display(),
+                count(plugins as u64, "plugin", "plugins")
+            );
+            println!("Checked with the key {public}");
         }
     }
     Ok(())
@@ -3450,6 +3530,7 @@ fn run() -> ExitCode {
         Cmd::Hook { .. } => Ok(()),
         Cmd::Pull => cmd_pull(&cli),
         Cmd::Plugin { command } => cmd_plugin(&cli, command),
+        Cmd::Registry { command } => cmd_registry(&cli, command),
         Cmd::External(_) | Cmd::Assistant { .. } => unreachable!("answered above"),
         Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),

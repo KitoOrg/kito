@@ -2564,6 +2564,47 @@ only be changed on its machine. Released as 0.23.0
   stopped by the account's billing. Archives are unpacked with `tar` in
   the tests.
 
+## Phase 23 · the registry is signed — done
+
+The registry tied a download to what it listed, and said nothing of who
+the registry is: whoever served its files, or carried them, decided what
+a name installs. Released as 0.24.0
+([ADR 0009](adr/0009-signed-registry.md), D-163).
+
+### What is there
+
+- **A key for a registry** (Ed25519), and a signature beside each of its
+  files. `kito registry key`, `kito registry sign`.
+- **Checked when the key is known**: `KITO_REGISTRY_KEY` for any
+  registry, a key written in Kito for the one at kito.sh (none yet). A
+  file not signed by it is refused, and nothing of the registry is used.
+- **No going back**: a numbered index, remembered per registry on each
+  machine; a plugin's file held to the index's latest version.
+- `plugin add` says whether the registry was checked; so does
+  `/-/admin/plugins`.
+
+### How it was tested
+
+- `kitod::registry`: a signed registry taken; another's key, a changed
+  file, a missing or unreadable signature refused; one of two keys; an
+  old plugin file and an old index, signed as they were, refused; a
+  registry whose files do not agree not signed.
+- `kito-cli/tests/cli.rs`: the same from the command line, with a key
+  made by `kito registry key` and a registry signed by `kito registry
+  sign`; a key that cannot be read.
+- `scripts/demo-phase23.sh`, kept in `docs/demo/phase23-demo.txt`.
+
+### Known limitations
+
+- **The registry at kito.sh has no key yet.** Making it is its keeper's
+  to do; until it is written in Kito, that registry is not checked.
+- **A machine's first look cannot tell an old index from the current
+  one.** The number protects from the second look on.
+- **A lost secret means a new key**, told to everybody again.
+- **Keys have no end date**, and one signer is enough.
+- **Not run on macOS or Windows** since 0.20.0: the project's CI is
+  stopped by the account's billing.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

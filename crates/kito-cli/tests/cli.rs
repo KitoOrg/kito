@@ -2869,3 +2869,120 @@ fn a_plugin_takes_out_what_it_wrote_when_it_goes() {
     assert!(String::from_utf8_lossy(&again.stderr).contains("the plugin `hello` is not installed"));
     ok(root, &["daemon", "stop"]);
 }
+
+#[test]
+fn a_registry_is_signed_and_checked_against_its_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (registry, mine) = (base.join("registry"), base.join("my-config"));
+    fs::create_dir_all(registry.join("plugins")).unwrap();
+    // `key`: what the person checks the registry with, or nothing.
+    let me = |key: Option<&str>, args: &[&str]| -> (bool, String) {
+        let mut command = command(&base, args);
+        command
+            .env("KITO_NO_CLAUDE", "1")
+            .env("KITO_CONFIG_DIR", &mine)
+            .env("KITO_REGISTRY", format!("file://{}", registry.display()))
+            .env_remove("KITO_REGISTRY_KEY");
+        if let Some(key) = key {
+            command.env("KITO_REGISTRY_KEY", key);
+        }
+        let out = command.output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+
+    // A registry of one plugin, as its keeper has it.
+    let source = hello_plugin(&base, LISTED);
+    let platform = kitod::registry::platform();
+    let archive = registry.join("hello.tar.gz");
+    let packed = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&base)
+        .arg(source.file_name().unwrap())
+        .status();
+    assert!(packed.unwrap().success());
+    let sum = kitod::registry::sha256_hex(&fs::read(&archive).unwrap());
+    let index =
+        serde_json::json!({ "registry": 1, "plugins": { "hello": { "about": "x", "latest": "0.9.0" } } });
+    fs::write(registry.join("index.json"), index.to_string()).unwrap();
+    let plugin = serde_json::json!({ "name": "hello", "about": "x", "versions": { "0.9.0": {
+        "api": 2, "files": { platform.as_str(): { "url": "hello.tar.gz", "sha256": sum } },
+    }}});
+    fs::write(registry.join("plugins/hello.json"), plugin.to_string()).unwrap();
+
+    // Its keeper makes a key, once, and signs it.
+    let secret = base.join("registry.key");
+    let (ok, said) = me(None, &["registry", "key", secret.to_str().unwrap()]);
+    assert!(ok, "{said}");
+    let public = said
+        .lines()
+        .find(|line| line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap()
+        .to_owned();
+    assert!(said.contains(&format!("KITO_REGISTRY_KEY={public}")), "{said}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&secret).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let (ok, said) = me(None, &["registry", "key", secret.to_str().unwrap()]);
+    assert!(!ok && said.contains("a key is never written over"), "{said}");
+
+    // Not signed yet: whoever checks it is refused, whoever does not is told so.
+    let (ok, said) = me(Some(&public), &["plugin", "search"]);
+    assert!(
+        !ok && said.contains("it is not signed, and this registry's files are checked against its key"),
+        "{said}"
+    );
+    let (ok, said) = me(None, &["plugin", "add", "hello"]);
+    assert!(
+        ok && said.contains("the registry was not checked against a key: nothing but its address says"),
+        "{said}"
+    );
+
+    let (ok, said) =
+        me(None, &["registry", "sign", registry.to_str().unwrap(), "--key", secret.to_str().unwrap()]);
+    assert!(ok && said.contains("its index is number 1, with 1 plugin.") && said.contains(&public), "{said}");
+    assert!(registry.join("index.json.sig").is_file() && registry.join("plugins/hello.json.sig").is_file());
+    let (ok, said) = me(Some(&public), &["plugin", "add", "hello"]);
+    assert!(ok && said.contains("the registry's files were checked against its key"), "{said}");
+    assert_eq!(me(Some(&public), &["plugin", "search"]).1, "hello 0.9.0  x\n");
+
+    // Changed since it was signed, or signed by somebody else: nothing of it is taken.
+    let listed = fs::read_to_string(registry.join("plugins/hello.json")).unwrap();
+    fs::write(registry.join("plugins/hello.json"), listed.replace(&sum, &"0".repeat(64))).unwrap();
+    let (ok, said) = me(Some(&public), &["plugin", "add", "hello"]);
+    assert!(
+        !ok && said.contains("it is not signed with a key of this registry: nothing of it is taken"),
+        "{said}"
+    );
+    fs::write(registry.join("plugins/hello.json"), &listed).unwrap();
+    let other = "ab".repeat(32);
+    let (ok, said) = me(Some(&other), &["plugin", "search"]);
+    assert!(!ok && said.contains("not signed with a key of this registry"), "{said}");
+    // A key that cannot be read is not "no key".
+    let (ok, said) = me(Some("not-a-key"), &["plugin", "search"]);
+    assert!(!ok && said.contains("KITO_REGISTRY_KEY: `not-a-key` is not a key of a registry"), "{said}");
+    // One of two keys: how a registry changes its key.
+    assert!(me(Some(&format!("{other},{public}")), &["plugin", "search"]).0);
+
+    // Signed again, its index has the next number, and does not go back.
+    let before: Vec<(String, Vec<u8>)> = ["index.json", "index.json.sig"]
+        .iter()
+        .map(|file| ((*file).to_owned(), fs::read(registry.join(file)).unwrap()))
+        .collect();
+    let (ok, said) =
+        me(None, &["registry", "sign", registry.to_str().unwrap(), "--key", secret.to_str().unwrap()]);
+    assert!(ok && said.contains("number 2"), "{said}");
+    assert!(me(Some(&public), &["plugin", "search"]).0);
+    for (file, bytes) in &before {
+        fs::write(registry.join(file), bytes).unwrap();
+    }
+    let (ok, said) = me(Some(&public), &["plugin", "search"]);
+    assert!(!ok && said.contains("an older one (number 1) than this machine has seen (number 2)"), "{said}");
+}

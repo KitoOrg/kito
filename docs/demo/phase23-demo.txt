@@ -1,0 +1,52 @@
+== 1. A key, once, and the registry signed
+
+$ kito registry key /demo/registry.key
+The secret is in /demo/registry.key: whoever has it signs for this registry. Keep it off the machine
+that serves the registry, and keep a copy: without it the registry needs a new key.
+What everybody checks the registry with:
+…
+  KITO_REGISTRY_KEY=…
+
+$ ls /demo/registry /demo/registry/plugins
+/demo/registry:
+index.json
+index.json.sig
+kito-hello-0.9.0.tar.gz
+plugins
+
+/demo/registry/plugins:
+hello.json
+hello.json.sig
+
+== 2. Somebody who knows the key
+
+$ export KITO_REGISTRY_KEY=<the key>
+
+$ kito plugin add hello
+hello 0.9.0 is installed in /demo/config/plugins/hello
+  from file:///demo/registry/kito-hello-0.9.0.tar.gz (SHA-256 …)
+  the registry's files were checked against its key
+  `kito plugin enable hello` lets it run in a repository.
+
+== 3. Changed since it was signed, and another's key
+
+$ kito plugin add hello
+kito: file:///demo/registry/plugins/hello.json: it is not signed with a key of this registry: nothing of it is taken
+
+$ KITO_REGISTRY_KEY=<another key> kito plugin search
+kito: file:///demo/registry/index.json: it is not signed with a key of this registry: nothing of it is taken
+
+$ KITO_REGISTRY_KEY= kito plugin add hello   (nobody told this person the key)
+  the registry is not signed: nothing but its address says these files are its own
+
+== 4. An old index, served again
+
+$ kito registry sign /demo/registry --key /demo/registry.key
+/demo/registry is signed: its index is number 2, with 1 plugin.
+Checked with the key …
+
+$ kito plugin search
+hello 0.9.0  Says what it is told
+
+$ kito plugin search
+kito: file:///demo/registry: its index is an older one (number 1) than this machine has seen (number 2): a registry does not go back, and nothing of it is taken

@@ -4,6 +4,33 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.24.0]
+
+The registry is signed (phase 23,
+[ADR 0009](docs/adr/0009-signed-registry.md)): who holds a registry's
+key decides what a name installs, and nobody who serves or carries its
+files does.
+
+- **A registry's files are signed** with its key (Ed25519), a signature
+  beside each (`index.json.sig`). With the key known, a file that is not
+  signed by it, or changed since, is refused, and nothing of that
+  registry is used.
+- **`KITO_REGISTRY_KEY`** says the key of a registry (several, with
+  commas: one is enough). The key of the registry at kito.sh is to be
+  written in Kito itself; it is not made yet, and that registry is taken
+  as its address gives it until it is. `plugin add` says whether the
+  registry was checked.
+- **A signed index does not go back**: it is numbered, and one numbered
+  lower than this machine saw before is refused. A plugin's file must
+  have the version the index says is the latest.
+- **`kito registry key <file>`** makes a key; **`kito registry sign
+  <directory> --key <file>`** signs a registry kept in a directory.
+- `/-/admin/plugins` says whether the server's registry is checked
+  (`registry_signed`).
+- Outside this repository: a kitchen's tools run confined to the lane,
+  as `kito lane run` runs a command (`kito-kitchen` 0.3); issues at
+  GitHub as the tasks of lanes (`kito-github` 0.2).
+
 ## [0.23.0]
 
 A registry of plugins (phase 22,

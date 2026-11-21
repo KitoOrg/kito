@@ -88,6 +88,8 @@ pub fn listed(server: &Server) -> Value {
     let registry = kitod::registry::base();
     let mut said =
         json!({ "installed": installed, "registry": registry, "platform": kitod::registry::platform() });
+    // Whether what the registry lists is checked against its key (ADR 0009).
+    said["registry_signed"] = kitod::registry::checked().unwrap_or(false).into();
     match kitod::registry::index() {
         Ok(index) => {
             let all: Vec<Value> = index

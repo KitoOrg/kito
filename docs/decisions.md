@@ -1309,6 +1309,29 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-163 · Signing is Kito's own, and a registry with no key is said to have none
+A registry is signed and checked by the same program (`kito registry
+sign`, `kitod::registry`): two implementations of a signature are two
+chances to disagree, and a team that keeps a registry of its own has
+Kito and nothing else. The library is the one TLS already brought
+(`ring`), so nothing new is trusted. Keys and signatures are written as
+hexadecimal, which needs no decoder and is hard to get subtly wrong.
+
+Three things are decided so that "signed" cannot quietly mean less.
+A key that cannot be read stops everything: the person who set
+`KITO_REGISTRY_KEY` meant the registry to be checked. A registry with no
+key known is taken, since a team's directory of files and every test
+are that, and each install says so in a line. And the registry at
+kito.sh has no key yet: making it is the person's to do, on a machine of
+their choosing, and writing a key nobody holds into Kito would be worse
+than writing none.
+
+An old signed file is still signed. The index is numbered, and a machine
+remembers the highest number it saw of each registry; a plugin's file is
+held to the index's latest version. That stops an old index and an old
+plugin file from being served again to a machine that has seen later
+ones. It does not help a machine's first look, and says so.
+
 ### D-162 · A server is changed from a browser by the people its machine named
 Installing a plugin puts a program on the server and enabling it runs
 that program: the first thing a browser can do there that is not about

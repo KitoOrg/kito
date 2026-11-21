@@ -43,6 +43,8 @@ getrandom = "0.2"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+# The registry's signatures (ADR 0009): the library rustls already brings.
+ring = "0.17"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true

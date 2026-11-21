@@ -573,6 +573,11 @@ user admin <name>`) do the same from a browser (`/-/admin/plugins`, the
 page is in `kito-web`): by name, from the server's registry, and nothing
 else. The registry at kito.sh lists nothing yet.
 
+A registry is **signed** ([ADR 0009](docs/adr/0009-signed-registry.md)):
+`kito registry key <file>` makes its key, `kito registry sign <directory>
+--key <file>` signs it, and whoever sets `KITO_REGISTRY_KEY` takes only
+what that key signed. A signed index is numbered and does not go back.
+
 What a program may ask the daemon, and under which permission, is in
 [docs/api.md](docs/api.md): the daemon's API, version 2.
 `crates/kito-cli/examples/kito-hello.rs` is the smallest plugin there is,

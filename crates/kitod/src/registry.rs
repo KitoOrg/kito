@@ -9,6 +9,11 @@
 //! What is downloaded is checked against the SHA-256 the registry gave,
 //! unpacked apart, and installed only if the manifest inside is the
 //! plugin and the version that were asked for. Nothing of it is run.
+//!
+//! A registry whose key is known is signed (ADR 0009): each of its files
+//! has a signature beside it (`index.json.sig`), made with that key, and
+//! a file without one, or with another's, is not taken. Its index is
+//! numbered, and does not go back.
 
 use crate::plugins::{self, Installed, Manifest};
 use serde::{Deserialize, Serialize};
@@ -21,6 +26,14 @@ use std::path::{Component, Path, PathBuf};
 pub const DEFAULT: &str = "https://kito.sh/registry";
 /// In the environment: another registry (a team's own; `file://` too).
 pub const ENV_REGISTRY: &str = "KITO_REGISTRY";
+/// In the environment: the keys the registry's files are signed with,
+/// as hexadecimal, with commas between them. With one, a file that is not
+/// signed by it is not taken.
+pub const ENV_REGISTRY_KEY: &str = "KITO_REGISTRY_KEY";
+/// The keys of the registry at kito.sh. None yet: nothing is published
+/// there, and until its key is made and written here its files are taken
+/// as its address gives them.
+const PINNED: &[&str] = &[];
 /// The version of the registry's format this reads.
 pub const FORMAT: u32 = 1;
 /// The most a file of the registry, and an archive, may weigh.
@@ -35,7 +48,15 @@ const FILES_AT_MOST: usize = 4096;
 #[serde(default)]
 pub struct Index {
     pub registry: u32,
+    /// How many times the registry was signed: a signed index with a
+    /// lower number than one already seen is an old one, served again.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub serial: u64,
     pub plugins: BTreeMap<String, Listed>,
+}
+
+fn is_zero(serial: &u64) -> bool {
+    *serial == 0
 }
 
 /// A plugin as the index lists it.
@@ -83,6 +104,47 @@ pub struct Source {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    /// The registry's files were checked against its key.
+    pub signed: bool,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len()).step_by(2).map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok()).collect()
+}
+
+/// The keys a registry's files must be signed with: the ones said in the
+/// environment, or for the registry at kito.sh the ones Kito was built
+/// with. None: the registry is taken as its address gives it.
+pub fn keys_for(base: &str) -> Result<Vec<Vec<u8>>, String> {
+    let said = std::env::var(ENV_REGISTRY_KEY).ok().filter(|said| !said.trim().is_empty());
+    let keys: Vec<&str> = match &said {
+        Some(said) => said.split(',').map(str::trim).collect(),
+        None if base == DEFAULT => PINNED.to_vec(),
+        None => Vec::new(),
+    };
+    keys.into_iter()
+        .map(|key| {
+            // A key that cannot be read is never "no key": the registry
+            // would be taken unchecked by whoever meant it to be checked.
+            unhex(key).filter(|bytes| bytes.len() == 32).ok_or_else(|| {
+                format!("{ENV_REGISTRY_KEY}: `{key}` is not a key of a registry (64 hexadecimal digits)")
+            })
+        })
+        .collect()
+}
+
+/// `true` if this person's registry is one whose files are checked
+/// against a key.
+pub fn checked() -> Result<bool, String> {
+    Ok(!keys_for(&base())?.is_empty())
 }
 
 /// The registry this person's Kito asks.
@@ -103,7 +165,7 @@ pub fn platform() -> String {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex(&Sha256::digest(bytes))
 }
 
 /// Reads what is at an address: HTTPS, a file (`file://`), or HTTP on
@@ -145,39 +207,132 @@ fn fetch(url: &str, at_most: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn listed<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
+/// `true` if the bytes of a file of the registry are signed by one of
+/// its keys (`<file>.sig` beside it); `false` if no key is known for the
+/// registry, which is then taken as it is. `Err`: a key is known, and
+/// the file is not signed by it.
+fn signed(url: &str, bytes: &[u8], keys: &[Vec<u8>]) -> Result<bool, String> {
+    if keys.is_empty() {
+        return Ok(false);
+    }
+    let refuse = |why: &str| format!("{url}: {why}: nothing of it is taken");
+    let signature =
+        fetch(&format!("{url}.sig"), 1024).map_err(|why| match why.ends_with("it is not there") {
+            true => refuse("it is not signed, and this registry's files are checked against its key"),
+            false => why,
+        })?;
+    let signature = unhex(&String::from_utf8_lossy(&signature))
+        .filter(|signature| signature.len() == 64)
+        .ok_or_else(|| refuse("what is beside it is not a signature"))?;
+    let by = |key: &Vec<u8>| {
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+            .verify(bytes, &signature)
+            .is_ok()
+    };
+    match keys.iter().any(by) {
+        true => Ok(true),
+        false => Err(refuse("it is not signed with a key of this registry")),
+    }
+}
+
+/// A file of the registry, and whether it was checked against a key.
+fn listed<T: serde::de::DeserializeOwned>(url: &str, keys: &[Vec<u8>]) -> Result<(T, bool), String> {
     let bytes = fetch(url, LIST_AT_MOST)?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{url}: it is not what a registry says ({e})"))
+    let signed = signed(url, &bytes, keys)?;
+    let said =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{url}: it is not what a registry says ({e})"))?;
+    Ok((said, signed))
+}
+
+/// Where this person's Kito remembers how far each signed registry had
+/// got: `registries.json`, next to their plugins.
+fn seen_file() -> Option<PathBuf> {
+    Some(plugins::plugins_dir()?.parent()?.join("registries.json"))
+}
+
+/// A signed index does not go back: one numbered lower than the last
+/// this machine saw of that registry is an old one, and whoever serves
+/// it again wants an old version installed.
+fn not_older(base: &str, serial: u64, seen: Option<&Path>) -> Result<(), String> {
+    let Some(seen) = seen else { return Ok(()) };
+    let mut all: BTreeMap<String, u64> = std::fs::read_to_string(seen)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let before = all.get(base).copied().unwrap_or(0);
+    if serial < before {
+        return Err(format!(
+            "{base}: its index is an older one (number {serial}) than this machine has seen (number {before}): a \
+             registry does not go back, and nothing of it is taken"
+        ));
+    }
+    if serial > before {
+        all.insert(base.to_owned(), serial);
+        let _ = std::fs::create_dir_all(seen.parent().unwrap_or(seen));
+        let _ = std::fs::write(seen, serde_json::to_string_pretty(&all).unwrap_or_default());
+    }
+    Ok(())
+}
+
+fn index_of(base: &str, keys: &[Vec<u8>], seen: Option<&Path>) -> Result<(Index, bool), String> {
+    let (index, signed): (Index, bool) = listed(&format!("{base}/index.json"), keys)?;
+    if index.registry != FORMAT {
+        return Err(format!(
+            "{base}: it is a registry of format {}, and this Kito reads format {FORMAT}: update Kito",
+            index.registry
+        ));
+    }
+    if signed {
+        not_older(base, index.serial, seen)?;
+    }
+    Ok((index, signed))
 }
 
 /// Every plugin the registry has.
 pub fn index() -> Result<Index, String> {
     let base = base();
-    let index: Index = listed(&format!("{base}/index.json"))?;
-    match index.registry {
-        FORMAT => Ok(index),
-        other => Err(format!(
-            "{base}: it is a registry of format {other}, and this Kito reads format {FORMAT}: update Kito"
-        )),
-    }
+    index_of(&base, &keys_for(&base)?, seen_file().as_deref()).map(|(index, _)| index)
 }
 
-/// One plugin, with its versions.
-pub fn plugin(name: &str) -> Result<Plugin, String> {
+fn plugin_of(
+    base: &str,
+    keys: &[Vec<u8>],
+    seen: Option<&Path>,
+    name: &str,
+) -> Result<(Plugin, bool), String> {
     plugins::check_name("plugin", name)?;
-    let base = base();
-    let found: Plugin = listed(&format!("{base}/plugins/{name}.json")).map_err(|why| {
-        match why.ends_with("it is not there") {
+    let url = format!("{base}/plugins/{name}.json");
+    let (found, signed): (Plugin, bool) =
+        listed(&url, keys).map_err(|why| match why.ends_with("it is not there") {
             true => format!(
                 "the registry ({base}) has no plugin `{name}`: `kito plugin search` lists what it has"
             ),
             false => why,
-        }
-    })?;
-    match found.name == name {
-        true => Ok(found),
-        false => Err(format!("{base}: what it lists as `{name}` says it is `{}`", found.name)),
+        })?;
+    if found.name != name {
+        return Err(format!("{base}: what it lists as `{name}` says it is `{}`", found.name));
     }
+    if signed {
+        // A plugin's file is signed by itself, so an old one is still
+        // signed. The index, which does not go back, says which version
+        // is the latest: a file that does not have it is an old file.
+        let (index, _) = index_of(base, keys, seen)?;
+        let latest = index.plugins.get(name).map(|listed| listed.latest.as_str());
+        if !latest.is_some_and(|latest| found.versions.contains_key(latest)) {
+            return Err(format!(
+                "{url}: it does not have the version the registry's index says is the latest ({}): it is an \
+                 older file, and nothing of it is taken",
+                latest.unwrap_or("none: the index does not list this plugin")
+            ));
+        }
+    }
+    Ok((found, signed))
+}
+
+/// One plugin, with its versions.
+pub fn plugin(name: &str) -> Result<Plugin, String> {
+    let base = base();
+    plugin_of(&base, &keys_for(&base)?, seen_file().as_deref(), name).map(|(plugin, _)| plugin)
 }
 
 /// A plugin this person has, and the later version the registry lists
@@ -211,6 +366,78 @@ pub fn outdated() -> Result<Vec<Outdated>, String> {
         }
     }
     Ok(found)
+}
+
+/// A new key for a registry: what is kept secret, to sign with, and what
+/// is told to everybody, to check with. Both as hexadecimal.
+pub fn new_key() -> Result<(String, String), String> {
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|e| format!("no randomness to make a key from: {e}"))?;
+    let public = public_of(&hex(&seed))?;
+    Ok((hex(&seed), public))
+}
+
+fn pair_of(secret: &str) -> Result<ring::signature::Ed25519KeyPair, String> {
+    let seed = unhex(secret).filter(|seed| seed.len() == 32).ok_or("it is not the key of a registry")?;
+    ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed)
+        .map_err(|_| "it is not the key of a registry".to_owned())
+}
+
+/// What is told to everybody of a key that is kept secret.
+pub fn public_of(secret: &str) -> Result<String, String> {
+    use ring::signature::KeyPair as _;
+    Ok(hex(pair_of(secret)?.public_key().as_ref()))
+}
+
+/// Signs a registry kept in a directory with its secret key: the index
+/// gets the next number, and every file a signature beside it. A registry
+/// whose files do not agree is not signed: nobody could install from it.
+/// Returns the index's number and how many plugins were signed.
+pub fn sign_dir(dir: &Path, secret: &str) -> Result<(u64, usize), String> {
+    let pair = pair_of(secret)?;
+    let read = |path: &Path| std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
+    let write = |path: &Path, bytes: &[u8]| {
+        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let index_path = dir.join("index.json");
+    let mut said: serde_json::Value = serde_json::from_slice(&read(&index_path)?)
+        .map_err(|e| format!("{}: it is not what a registry says ({e})", index_path.display()))?;
+    let index: Index =
+        serde_json::from_value(said.clone()).map_err(|e| format!("{}: {e}", index_path.display()))?;
+    if index.registry != FORMAT {
+        return Err(format!("{}: it is not a registry of format {FORMAT}", index_path.display()));
+    }
+    // Every plugin the index lists has its file, and the file the version
+    // the index says is the latest.
+    let mut files = Vec::new();
+    for (name, listed) in &index.plugins {
+        let path = dir.join("plugins").join(format!("{name}.json"));
+        let bytes = read(&path)?;
+        let plugin: Plugin =
+            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        if plugin.name != *name || !plugin.versions.contains_key(&listed.latest) {
+            return Err(format!(
+                "{}: the index says `{name}` is at {}, and this file is of `{}` and does not have that version: \
+                 nothing was signed",
+                path.display(),
+                listed.latest,
+                plugin.name
+            ));
+        }
+        files.push((path, bytes));
+    }
+    let serial = index.serial + 1;
+    said["serial"] = serial.into();
+    let mut bytes = serde_json::to_vec_pretty(&said).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    write(&index_path, &bytes)?;
+    files.push((index_path, bytes));
+    for (path, bytes) in &files {
+        let mut beside = path.clone().into_os_string();
+        beside.push(".sig");
+        write(Path::new(&beside), format!("{}\n", hex(pair.sign(bytes).as_ref())).as_bytes())?;
+    }
+    Ok((serial, files.len() - 1))
 }
 
 /// A version as numbers, for telling which is later: `0.10.1` after `0.9`.
@@ -332,7 +559,8 @@ impl Drop for Apart {
 /// registry said is refused, and nothing is installed.
 pub fn install(name: &str, version: Option<&str>) -> Result<(Installed, Source), String> {
     let base = base();
-    let listed = plugin(name)?;
+    let keys = keys_for(&base)?;
+    let (listed, signed) = plugin_of(&base, &keys, seen_file().as_deref(), name)?;
     let (number, file) = pick(&listed, version)?;
     let url = match file.url.contains("://") {
         true => file.url.clone(),
@@ -359,7 +587,7 @@ pub fn install(name: &str, version: Option<&str>) -> Result<(Installed, Source),
         ));
     }
     let installed = plugins::install_from(&dir)?;
-    Ok((installed, Source { registry: base, version: number.to_owned(), url, sha256: sum }))
+    Ok((installed, Source { registry: base, version: number.to_owned(), url, sha256: sum, signed }))
 }
 
 #[cfg(test)]
@@ -440,6 +668,97 @@ mod tests {
         }
         assert!(!tmp.path().join("out").exists());
         assert!(unpack(b"not an archive", &tmp.path().join("bad")).is_err());
+    }
+
+    /// A registry of files with one plugin, signed with `secret`.
+    fn signed_registry(dir: &Path, secret: &str, latest: &str) {
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        let index =
+            serde_json::json!({ "registry": 1, "plugins": { "web": { "about": "x", "latest": latest } } });
+        let serial = std::fs::read_to_string(dir.join("index.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Index>(&text).ok())
+            .map_or(0, |index| index.serial);
+        let mut index = index;
+        index["serial"] = serial.into();
+        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
+        let mut versions = serde_json::Map::new();
+        for number in ["0.1.0", latest] {
+            versions.insert(number.to_owned(), serde_json::json!({ "api": 1, "files": {} }));
+        }
+        let plugin = serde_json::json!({ "name": "web", "about": "x", "versions": versions });
+        std::fs::write(dir.join("plugins/web.json"), plugin.to_string()).unwrap();
+        sign_dir(dir, secret).unwrap();
+    }
+
+    #[test]
+    fn a_registry_whose_key_is_known_is_taken_only_as_that_key_signed_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("registry");
+        let base = format!("file://{}", dir.display());
+        let (secret, public) = new_key().unwrap();
+        assert_eq!(public_of(&secret).unwrap(), public);
+        let keys = vec![unhex(&public).unwrap()];
+        let seen = tmp.path().join("registries.json");
+        signed_registry(&dir, &secret, "0.1.0");
+
+        // Checked, and said to be. With no key known, taken as it is.
+        let (index, signed) = index_of(&base, &keys, Some(&seen)).unwrap();
+        assert!(signed && index.serial == 1 && index.plugins.contains_key("web"));
+        assert!(plugin_of(&base, &keys, Some(&seen), "web").unwrap().1);
+        assert!(!index_of(&base, &[], Some(&seen)).unwrap().1);
+
+        // Another's key, a file changed since, a file with no signature.
+        let (_, other) = new_key().unwrap();
+        let why = index_of(&base, &[unhex(&other).unwrap()], None).unwrap_err();
+        assert!(why.contains("not signed with a key of this registry"), "{why}");
+        let good = std::fs::read(dir.join("plugins/web.json")).unwrap();
+        std::fs::write(
+            dir.join("plugins/web.json"),
+            String::from_utf8_lossy(&good).replace("\"x\"", "\"y\""),
+        )
+        .unwrap();
+        assert!(plugin_of(&base, &keys, Some(&seen), "web").unwrap_err().contains("not signed with a key"));
+        std::fs::write(dir.join("plugins/web.json"), &good).unwrap();
+        let signature = std::fs::read(dir.join("index.json.sig")).unwrap();
+        std::fs::remove_file(dir.join("index.json.sig")).unwrap();
+        assert!(index_of(&base, &keys, Some(&seen))
+            .unwrap_err()
+            .contains("it is not signed, and this registry's"));
+        std::fs::write(dir.join("index.json.sig"), "zz").unwrap();
+        assert!(index_of(&base, &keys, Some(&seen)).unwrap_err().contains("is not a signature"));
+        std::fs::write(dir.join("index.json.sig"), &signature).unwrap();
+        // One of several keys is enough: a registry changes its key by having two for a while.
+        assert!(index_of(&base, &[unhex(&other).unwrap(), keys[0].clone()], Some(&seen)).unwrap().1);
+
+        // Kept from before: the first index, and the plugin's first file, signed as they were.
+        let old: Vec<(&str, Vec<u8>)> =
+            ["index.json", "index.json.sig", "plugins/web.json", "plugins/web.json.sig"]
+                .into_iter()
+                .map(|file| (file, std::fs::read(dir.join(file)).unwrap()))
+                .collect();
+        signed_registry(&dir, &secret, "0.2.0");
+        assert_eq!(index_of(&base, &keys, Some(&seen)).unwrap().0.serial, 2);
+        assert!(plugin_of(&base, &keys, Some(&seen), "web").unwrap().0.versions.contains_key("0.2.0"));
+        // The plugin's old file, served again: signed, and too old for the index.
+        for (file, bytes) in &old[2..] {
+            std::fs::write(dir.join(file), bytes).unwrap();
+        }
+        let why = plugin_of(&base, &keys, Some(&seen), "web").unwrap_err();
+        assert!(why.contains("the latest (0.2.0): it is an older file"), "{why}");
+        // The old index too: signed, and a registry does not go back.
+        for (file, bytes) in &old[..2] {
+            std::fs::write(dir.join(file), bytes).unwrap();
+        }
+        let why = index_of(&base, &keys, Some(&seen)).unwrap_err();
+        assert!(why.contains("an older one (number 1) than this machine has seen (number 2)"), "{why}");
+        // A machine that never saw the later one cannot tell, and takes it.
+        assert!(index_of(&base, &keys, Some(&tmp.path().join("another.json"))).is_ok());
+
+        // A registry whose files do not agree is not signed at all.
+        std::fs::write(dir.join("plugins/web.json"), r#"{"name":"other","versions":{}}"#).unwrap();
+        assert!(sign_dir(&dir, &secret).unwrap_err().contains("nothing was signed"));
+        assert!(sign_dir(&dir, "abc").unwrap_err().contains("not the key of a registry"));
     }
 
     #[test]
