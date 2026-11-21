@@ -2730,7 +2730,24 @@ fn cmd_daemon_stop(cli: &Cli) -> Outcome {
     Ok(())
 }
 
+/// The command line runs on a thread with room to spare: the main thread
+/// of a Windows program has 1 MB of stack, which the commands, as many as
+/// they are now, do not fit in when built without optimization.
 fn main() -> ExitCode {
+    const STACK: usize = 16 * 1024 * 1024;
+    let ran = std::thread::Builder::new().stack_size(STACK).spawn(run).map(std::thread::JoinHandle::join);
+    match ran {
+        Ok(Ok(code)) => code,
+        // It panicked, and said so.
+        Ok(Err(_)) => ExitCode::from(101),
+        Err(e) => {
+            eprintln!("kito: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> ExitCode {
     // `kito log | head`: whoever was reading stopped, which is no failure
     // of ours and needs no report.
     let report = std::panic::take_hook();
