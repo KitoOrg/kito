@@ -22,6 +22,7 @@ pub mod notes;
 pub mod plugins;
 pub mod pull;
 pub mod refs;
+pub mod registry;
 pub mod rename;
 pub mod repo;
 pub mod review;

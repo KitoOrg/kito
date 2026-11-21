@@ -47,11 +47,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum PluginCmd {
-    /// Install a plugin for the user this server runs as: the directory
-    /// that holds its `kito-plugin.toml` and its program
+    /// Install a plugin for the user this server runs as: by its name,
+    /// from the registry, or from a directory that holds its
+    /// `kito-plugin.toml` and its program
     Add {
+        /// The plugin, as the registry lists it: `web`, or `web@0.4.0`
+        #[arg(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
         #[arg(long, value_name = "DIR")]
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Let a plugin run on this server, with what it asks for
     Enable {
@@ -231,8 +235,22 @@ fn adds(manifest: &kitod::plugins::Manifest) -> Vec<String> {
 fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
     use kitod::plugins;
     match command {
-        PluginCmd::Add { path } => {
-            let added = plugins::install_from(path)?;
+        PluginCmd::Add { name, path } => {
+            let (added, source) = match (name, path) {
+                (_, Some(path)) => (plugins::install_from(path)?, None),
+                (Some(name), None) => {
+                    let (name, version) = match name.split_once('@') {
+                        Some((name, version)) => (name, Some(version)),
+                        None => (name.as_str(), None),
+                    };
+                    let (added, source) = kitod::registry::install(name, version)?;
+                    (added, Some(source))
+                }
+                (None, None) => return Err("say which plugin: its name, or --path <dir>".to_owned()),
+            };
+            if let Some(source) = &source {
+                println!("from {} (SHA-256 {})", source.url, source.sha256);
+            }
             println!(
                 "{} {} is installed in {}",
                 added.manifest.name,

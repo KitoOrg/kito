@@ -39,6 +39,10 @@ webpki-roots.workspace = true
 sha2.workspace = true
 rustix.workspace = true
 getrandom = "0.2"
+# The registry of plugins (ADR 0008): read over HTTPS, archives unpacked.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true

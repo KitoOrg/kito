@@ -1309,6 +1309,27 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-160 · A plugin's archive is a `.tar.gz` everywhere, and read as hostile
+The registry lists one archive of a plugin for each platform. It is a
+gzipped tar on every platform, Windows too (Kito's own release for
+Windows is a zip, which is what a person opens; a plugin's archive is
+opened by Kito). One format is one reader to get right.
+
+That reader takes nothing on trust: the registry's checksum says the
+file is the one that was listed, not that it is harmless. Only plain
+files and directories are unpacked, only at paths inside the archive's
+own directory, at most 4096 files and a gigabyte; a link, a device, a
+path with `..` or a root in it refuse the whole archive. It is unpacked
+in a directory of its own, the manifest is read there, and only a plugin
+whose name and version are the ones the registry listed is installed.
+Nothing of it runs while installing.
+
+A file's address may be whole (anywhere that speaks HTTPS) or beside the
+registry's own files, which keeps a registry that is a directory in one
+piece. Another registry is named by `KITO_REGISTRY`; a person's Kito has
+no configuration file of its own to say it in yet. Plain HTTP is read
+from this machine only.
+
 ### D-159 · A plugin has its say when a session starts, after Kito's
 A team's kitchen is no use if an agent must think of asking for it. A
 plugin with `[session]` in its manifest is run when a session starts

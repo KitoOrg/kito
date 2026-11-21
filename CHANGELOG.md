@@ -4,6 +4,23 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [Unreleased]
+
+A registry of plugins ([ADR 0008](docs/adr/0008-plugin-registry.md)),
+under way:
+
+- **`kito plugin add <name>`** (and `<name>@<version>`; the same for
+  `kito-server plugin add`): the plugin is downloaded from what the
+  registry lists, checked against the registry's SHA-256, unpacked
+  apart, and installed only if the manifest inside is the plugin and the
+  version asked for. `--path` stays.
+- **`kito plugin search [words]`**: what the registry has.
+- The registry is `https://kito.sh/registry`, or the one `KITO_REGISTRY`
+  names: a team's own, or files on this machine (`file://`).
+- Nothing is published yet: the registry at kito.sh is empty.
+- Not yet: taking a plugin out cleanly, a server's plugins from a
+  browser, `outdated` and `update`.
+
 ## [0.22.0]
 
 A team's kitchen (phase 21, [ADR 0007](docs/adr/0007-kitchens.md)): what

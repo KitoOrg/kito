@@ -39,13 +39,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum PluginCmd {
-    /// Install a plugin for you: the directory that holds its
-    /// `kito-plugin.toml` and its program
+    /// Install a plugin for you: by its name, from the registry, or from
+    /// a directory that holds its `kito-plugin.toml` and its program
     Add {
+        /// The plugin, as the registry lists it: `web`, or `web@0.4.0`
+        #[arg(required_unless_present = "path", conflicts_with = "path")]
+        name: Option<String>,
         /// A directory with a plugin built or unpacked here
         #[arg(long, value_name = "DIR")]
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
+    /// What the registry has: every plugin, or those that say these words
+    Search { words: Vec<String> },
     /// Remove a plugin you installed
     Remove { name: String },
     /// The plugins you installed, and what this repository says of each
@@ -576,15 +581,60 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
         listed.and_then(|listed| listed.as_array().cloned()).unwrap_or_default()
     };
     match command {
-        PluginCmd::Add { path } => {
-            let added = plugins::install_from(path)?;
+        PluginCmd::Add { name, path } => {
+            // From a directory, or by its name from the registry (ADR 0008).
+            let (added, source) = match (name, path) {
+                (_, Some(path)) => (plugins::install_from(path)?, None),
+                (Some(name), None) => {
+                    let (name, version) = match name.split_once('@') {
+                        Some((name, version)) => (name, Some(version)),
+                        None => (name.as_str(), None),
+                    };
+                    let (added, source) = kitod::registry::install(name, version)?;
+                    (added, Some(source))
+                }
+                (None, None) => return Err("say which plugin: its name, or --path <dir>".to_owned()),
+            };
             let manifest = &added.manifest;
             if cli.json {
-                print_json(&json!({ "name": manifest.name, "version": manifest.version, "dir": added.dir }));
+                print_json(&json!({
+                    "name": manifest.name, "version": manifest.version, "dir": added.dir, "from": source,
+                }));
                 return Ok(());
             }
             println!("{} {} is installed in {}", manifest.name, manifest.version, added.dir.display());
+            if let Some(source) = &source {
+                println!("  from {} (SHA-256 {})", source.url, source.sha256);
+            }
             println!("  `kito plugin enable {}` lets it run in a repository.", manifest.name);
+        }
+        PluginCmd::Search { words } => {
+            let index = kitod::registry::index()?;
+            let words: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
+            let says = |name: &str, about: &str| {
+                let text = format!("{name} {about}").to_lowercase();
+                words.iter().all(|word| text.contains(word))
+            };
+            let found: Vec<_> =
+                index.plugins.iter().filter(|(name, listed)| says(name, &listed.about)).collect();
+            if cli.json {
+                let found: Vec<Value> = found
+                    .iter()
+                    .map(|(name, listed)| json!({ "name": name, "about": listed.about, "latest": listed.latest }))
+                    .collect();
+                print_json(&json!({ "registry": kitod::registry::base(), "plugins": found }));
+                return Ok(());
+            }
+            match (found.is_empty(), index.plugins.is_empty()) {
+                (true, true) => println!("The registry ({}) lists no plugin yet.", kitod::registry::base()),
+                (true, false) => {
+                    println!("The registry ({}) has no plugin that says that.", kitod::registry::base())
+                }
+                _ => {}
+            }
+            for (name, listed) in found {
+                println!("{name} {}  {}", listed.latest, listed.about);
+            }
         }
         PluginCmd::Remove { name } => match plugins::uninstall(name)? {
             true => println!("{name} is removed. Repositories that enabled it say that it is missing."),
@@ -604,7 +654,9 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                 return Ok(());
             }
             if installed.is_empty() && here.is_empty() {
-                println!("No plugins. `kito plugin add --path <dir>` installs one.");
+                println!(
+                    "No plugins. `kito plugin add <name>` installs one (`kito plugin search` lists them)."
+                );
             }
             for plugin in &installed {
                 let manifest = &plugin.manifest;

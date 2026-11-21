@@ -2603,3 +2603,120 @@ fn a_plugin_has_its_say_when_a_session_starts() {
     assert!(!told(root).contains("Mind the step."));
     ok(root, &["daemon", "stop"]);
 }
+
+const LISTED: &str = r#"name = "hello"
+version = "0.9.0"
+description = "Says what it is told"
+api = 2
+permissions = ["read"]
+
+[[command]]
+name = "hello"
+about = "Says what it is told"
+"#;
+
+#[test]
+fn a_plugin_is_installed_by_its_name_from_a_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (registry, mine) = (base.join("registry"), base.join("my-config"));
+    fs::create_dir_all(registry.join("plugins")).unwrap();
+    fs::create_dir_all(registry.join("files")).unwrap();
+    let me = |args: &[&str]| -> (bool, String) {
+        let out = command(&base, args)
+            .env("KITO_NO_CLAUDE", "1")
+            .env("KITO_CONFIG_DIR", &mine)
+            .env("KITO_REGISTRY", format!("file://{}/", registry.display()))
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+
+    // An empty registry says so.
+    fs::write(registry.join("index.json"), "{\"registry\": 1, \"plugins\": {}}").unwrap();
+    let (ok, said) = me(&["plugin", "search"]);
+    assert!(ok && said.contains("lists no plugin yet"), "{said}");
+
+    // The plugin as its author packs it: one directory, in an archive.
+    let source = hello_plugin(&base, LISTED);
+    let platform = kitod::registry::platform();
+    let archive = registry.join(format!("files/kito-hello-0.9.0-{platform}.tar.gz"));
+    let packed = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&base)
+        .arg(source.file_name().unwrap())
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let sum = kitod::registry::sha256_hex(&fs::read(&archive).unwrap());
+    // What the registry says of it: `version` as listed, the file by its checksum.
+    let list = |version: &str, sum: &str| {
+        let index = serde_json::json!({ "registry": 1, "plugins": {
+            "hello": { "about": "Says what it is told", "latest": version },
+            "web": { "about": "Kito in a browser", "latest": "0.4.0" },
+        }});
+        fs::write(registry.join("index.json"), index.to_string()).unwrap();
+        let plugin = serde_json::json!({ "name": "hello", "about": "Says what it is told", "versions": {
+            version: { "api": 2, "files": { platform.as_str(): {
+                // Beside the registry's own files.
+                "url": format!("files/kito-hello-0.9.0-{platform}.tar.gz"), "sha256": sum, "size": 1,
+            }}},
+            "9.0.0": { "api": 99, "files": { platform.as_str(): { "url": "files/later.tar.gz", "sha256": "0" } } },
+        }});
+        fs::write(registry.join("plugins/hello.json"), plugin.to_string()).unwrap();
+    };
+    list("0.9.0", &sum);
+
+    let (ok, said) = me(&["plugin", "search"]);
+    assert!(ok && said == "hello 0.9.0  Says what it is told\nweb 0.4.0  Kito in a browser\n", "{said}");
+    assert_eq!(me(&["plugin", "search", "BROWSER"]).1, "web 0.4.0  Kito in a browser\n");
+    assert!(me(&["plugin", "search", "nothing-like-it"]).1.contains("has no plugin that says that"));
+
+    // What the registry does not have, and what does not fit this Kito.
+    let (ok, said) = me(&["plugin", "add", "nope"]);
+    assert!(!ok && said.contains("has no plugin `nope`: `kito plugin search` lists what it has"), "{said}");
+    let (ok, said) = me(&["plugin", "add", "hello@0.1.0"]);
+    assert!(!ok && said.contains("`hello` has no version 0.1.0"), "{said}");
+    let (ok, said) = me(&["plugin", "add", "hello@9.0.0"]);
+    assert!(!ok && said.contains("update Kito"), "{said}");
+
+    // A file that is not the one the registry listed installs nothing.
+    list("0.9.0", &"0".repeat(64));
+    let (ok, said) = me(&["plugin", "add", "hello"]);
+    assert!(!ok && said.contains("is not the file the registry listed for `hello` 0.9.0"), "{said}");
+    assert!(said.contains("nothing was installed") && !mine.join("plugins/hello").exists(), "{said}");
+    // Nor does one that is another version than the registry says.
+    list("0.9.1", &sum);
+    let (ok, said) = me(&["plugin", "add", "hello"]);
+    assert!(
+        !ok && said.contains("the registry lists it as `hello` 0.9.1, and it is `hello` 0.9.0"),
+        "{said}"
+    );
+    assert!(!mine.join("plugins/hello").exists());
+
+    // The latest that fits is installed, and where it came from is said.
+    list("0.9.0", &sum);
+    let (ok, said) = me(&["plugin", "add", "hello"]);
+    assert!(ok, "{said}");
+    assert!(said.starts_with("hello 0.9.0 is installed in "), "{said}");
+    assert!(said.contains(&format!("(SHA-256 {sum})")) && said.contains("files/kito-hello-0.9.0-"), "{said}");
+    assert!(mine.join("plugins/hello/kito-plugin.toml").is_file());
+    assert!(me(&["plugin", "list"]).1.contains("hello 0.9.0"));
+    // Its program is still one.
+    let ran =
+        Command::new(mine.join("plugins/hello").join(format!("kito-hello{}", std::env::consts::EXE_SUFFIX)))
+            .args(["exit", "7"])
+            .status()
+            .unwrap();
+    assert_eq!(ran.code(), Some(7));
+    // Asked for by its version, the same.
+    let (ok, said) = me(&["plugin", "add", "hello@0.9.0"]);
+    assert!(ok && said.contains("hello 0.9.0 is installed"), "{said}");
+    // A name or a directory, not both and not neither.
+    assert!(!me(&["plugin", "add"]).0);
+}
