@@ -318,6 +318,34 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                     request.id,
                     json!({ "user": name, "email": user.email, "role": role.map(Role::word) }),
                 ),
+                // The plugins that run in the directories connected here (ADR 0007).
+                "server.client_plugins" => Response::ok(request.id, json!(server.client_plugins())),
+                // A plugin on a client's machine asks the plugin of the same
+                // name here: answered by the server, not by a repository.
+                "plugin_call" => {
+                    let text = |key: &str| request.params.get(key).and_then(Value::as_str);
+                    let who =
+                        (name.as_str(), repo.as_ref().map(|(repo, _)| repo.as_str()), role.map(Role::word));
+                    let answer = match (text("plugin"), text("ask"), who) {
+                        (Some(plugin), Some(ask), (user, Some(repo), Some(role))) => {
+                            // People and plugins changed since this client connected count.
+                            let now = Server::open(&server.dir);
+                            let server = now.as_ref().unwrap_or(server);
+                            let params = request.params.get("params").cloned().unwrap_or(Value::Null);
+                            server
+                                .answer(plugin, ask, &params, (user, repo, role))
+                                .map_err(|why| (rpc::REFUSED, why))
+                        }
+                        (_, _, (_, None, _)) | (_, _, (_, _, None)) => {
+                            Err((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))
+                        }
+                        _ => Err((rpc::INVALID_PARAMS, "`plugin_call` wants `plugin` and `ask`".to_owned())),
+                    };
+                    match answer {
+                        Ok(value) => Response::ok(request.id, value),
+                        Err((code, why)) => Response::err(request.id, code, why),
+                    }
+                }
                 method if !ALLOWED.contains(&method) => Response::err(
                     request.id,
                     rpc::METHOD_NOT_FOUND,

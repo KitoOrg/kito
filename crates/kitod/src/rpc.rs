@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// rely on them (ADR 0005, `docs/api.md`). Adding a method or an optional
 /// field of an answer does not change it; removing one, or changing what
 /// it means, does.
-pub const API: u32 = 1;
+pub const API: u32 = 2;
 
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;

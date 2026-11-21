@@ -4,6 +4,20 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [Unreleased]
+
+A team's kitchen ([ADR 0007](docs/adr/0007-kitchens.md)), under way:
+
+- **Plugins run in a directory connected to a server**: those the
+  server enabled for its clients (`kito-server plugin enable <name>
+  --for-clients`), with what of a repository the server gave them, for
+  whoever has them installed. A person enables nothing there.
+- **`plugin_call`**: a plugin asks the plugin of its own name on the
+  server, which runs `kito-<name> answer <question>` and is told who
+  asks, about which repository and with which role. The daemon's API is
+  version 2; plugins written for version 1 run as they did.
+- Not yet: the kitchen itself (`kito-kitchen`).
+
 ## [0.21.0]
 
 Plugins for the server (phase 20,

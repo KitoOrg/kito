@@ -60,6 +60,10 @@ enum PluginCmd {
         /// server_admin, read, write, integrate, admin
         #[arg(long, value_delimiter = ',', value_name = "PERMISSIONS")]
         only: Option<Vec<String>>,
+        /// It runs in the directories connected to this server too, for
+        /// whoever has it installed, and may ask its counterpart here
+        #[arg(long)]
+        for_clients: bool,
     },
     /// Stop a plugin from running on this server
     Disable { name: String },
@@ -237,7 +241,7 @@ fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
             );
             println!("  `kito-server plugin enable {}` lets it run on this server.", added.manifest.name);
         }
-        PluginCmd::Enable { name, only } => {
+        PluginCmd::Enable { name, only, for_clients } => {
             let only = match only {
                 None => None,
                 Some(words) => Some(
@@ -251,10 +255,15 @@ fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
                 ),
             };
             let mut server = Server::open(&dir_of(cli))?;
-            let found = server.enable_plugin(name, only)?;
+            let found = server.enable_plugin(name, only, *for_clients)?;
             let given: Vec<&str> = server.config.plugins[name].permissions.iter().map(|p| p.word()).collect();
             let given = if given.is_empty() { "nothing".to_owned() } else { given.join(", ") };
             println!("{name} is enabled on this server. It may: {given}.");
+            if *for_clients {
+                println!(
+                    "  it runs in the directories connected to this server too, for whoever has it installed"
+                );
+            }
             for what in adds(&found.manifest) {
                 println!("  {what}");
             }
@@ -276,9 +285,10 @@ fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
                 let version =
                     found.as_ref().map(|found| format!(" {}", found.manifest.version)).unwrap_or_default();
                 let given: Vec<&str> = config.permissions.iter().map(|p| p.word()).collect();
-                let state = match config.enabled {
-                    true => format!("enabled ({})", given.join(", ")),
-                    false => "disabled".to_owned(),
+                let state = match (config.enabled, config.for_clients) {
+                    (true, true) => format!("enabled ({}), for clients too", given.join(", ")),
+                    (true, false) => format!("enabled ({})", given.join(", ")),
+                    (false, _) => "disabled".to_owned(),
                 };
                 println!("{name}{version}  [{state}]");
                 match &found {

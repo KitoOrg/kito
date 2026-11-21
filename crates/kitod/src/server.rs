@@ -422,6 +422,13 @@ impl Daemon {
                     self.plugin_failures.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
                     Ok(json!({ "name": name, "changed": changed }))
                 }
+                // A plugin asks its counterpart on a server (ADR 0007):
+                // this repository is on none.
+                "plugin_call" => Err((
+                    rpc::REFUSED,
+                    "this repository is not connected to a server: there is no plugin there to ask"
+                        .to_owned(),
+                )),
                 "plugin_key" => {
                     let name = text("name")?;
                     let key = self.with_repo(|repo| repo.plugin_key(name)).map_err(internal)?;

@@ -99,6 +99,8 @@ const READ: &[&str] = &[
     "conflicts",
     "integration_result",
     "plugins",
+    // Asks its own counterpart on the server (ADR 0007).
+    "plugin_call",
     "mirror_status",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
@@ -182,6 +184,10 @@ pub struct PluginConfig {
     pub enabled: bool,
     /// What it was given.
     pub permissions: Vec<Permission>,
+    /// On a server: it runs in the directories connected to it too, for
+    /// whoever has it installed (ADR 0007).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub for_clients: bool,
 }
 
 /// A command a plugin adds: `kito <name>`.
@@ -601,36 +607,38 @@ pub struct PluginInfo {
     pub problem: Option<String>,
 }
 
-impl crate::Repo {
-    fn plugin_info(&self, name: &str, config: &PluginConfig) -> PluginInfo {
-        let found = installed(name);
-        let manifest = found.as_ref().map(|found| found.manifest.clone()).unwrap_or_default();
-        let problem = match &found {
-            None => Some(format!("the plugin `{name}` is not installed here: `kito plugin add {name}`")),
-            Some(found) => found.manifest.unfit(),
-        };
-        PluginInfo {
-            name: name.to_owned(),
-            enabled: config.enabled,
-            permissions: config.permissions.clone(),
-            installed: found.is_some(),
-            version: manifest.version,
-            description: manifest.description,
-            asks: manifest.permissions,
-            gates: manifest.gates.iter().map(|gate| gate.name.clone()).collect(),
-            events: manifest.events.iter().flat_map(|event| event.kinds.iter().cloned()).collect(),
-            last_failure: None,
-            tools: manifest.tools,
-            assistant: manifest.assistant.map(|assistant| assistant.name),
-            commands: manifest.commands,
-            program: found.map(|found| program(&found.dir, name)),
-            problem,
-        }
+/// A plugin as a repository, or a directory connected to a server, has
+/// it: what was said of it there, and what this person has installed.
+pub fn info_of(name: &str, config: &PluginConfig) -> PluginInfo {
+    let found = installed(name);
+    let manifest = found.as_ref().map(|found| found.manifest.clone()).unwrap_or_default();
+    let problem = match &found {
+        None => Some(format!("the plugin `{name}` is not installed here: `kito plugin add {name}`")),
+        Some(found) => found.manifest.unfit(),
+    };
+    PluginInfo {
+        name: name.to_owned(),
+        enabled: config.enabled,
+        permissions: config.permissions.clone(),
+        installed: found.is_some(),
+        version: manifest.version,
+        description: manifest.description,
+        asks: manifest.permissions,
+        gates: manifest.gates.iter().map(|gate| gate.name.clone()).collect(),
+        events: manifest.events.iter().flat_map(|event| event.kinds.iter().cloned()).collect(),
+        last_failure: None,
+        tools: manifest.tools,
+        assistant: manifest.assistant.map(|assistant| assistant.name),
+        commands: manifest.commands,
+        program: found.map(|found| program(&found.dir, name)),
+        problem,
     }
+}
 
+impl crate::Repo {
     /// The plugins this repository names, enabled or not.
     pub fn plugins(&self) -> Vec<PluginInfo> {
-        self.config().plugins.iter().map(|(name, config)| self.plugin_info(name, config)).collect()
+        self.config().plugins.iter().map(|(name, config)| info_of(name, config)).collect()
     }
 
     /// Enables a plugin here, with the permissions said, or else with
@@ -665,10 +673,10 @@ impl crate::Repo {
         }
         given.sort();
         given.dedup();
-        let config = PluginConfig { enabled: true, permissions: given };
+        let config = PluginConfig { enabled: true, permissions: given, for_clients: false };
         write_config(&self.root().join(kito_store::STORE_DIR), name, Some(&config)).map_err(Error::Config)?;
         ensure_key(self.root(), name).map_err(Error::io(self.root()))?;
-        let info = self.plugin_info(name, &config);
+        let info = info_of(name, &config);
         self.set_plugin_config(name, config);
         Ok(info)
     }
@@ -931,7 +939,11 @@ mod tests {
     fn a_repository_s_word_on_a_plugin_is_written_among_what_is_there() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(CONFIG_FILE), "# Mine\n[verify]\ncommands = [\"true\"]\n").unwrap();
-        let web = PluginConfig { enabled: true, permissions: vec![Permission::Read, Permission::Integrate] };
+        let web = PluginConfig {
+            enabled: true,
+            permissions: vec![Permission::Read, Permission::Integrate],
+            for_clients: false,
+        };
         write_config(dir.path(), "web", Some(&web)).unwrap();
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
         assert!(text.starts_with("# Mine\n[verify]\ncommands = [\"true\"]\n"), "{text}");

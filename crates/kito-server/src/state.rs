@@ -112,6 +112,11 @@ const SESSIONS_FILE: &str = "sessions.toml";
 /// What a session's token starts with: told apart from the tokens an
 /// administrator hands out.
 pub const SESSION_PREFIX: &str = "kitos_";
+/// In the environment of a plugin that answers a client: who asks, about
+/// which repository, and what they may do there.
+pub const ENV_ASKED_BY: &str = "KITO_ASKED_BY";
+pub const ENV_ASKED_REPO: &str = "KITO_ASKED_REPO";
+pub const ENV_ASKED_ROLE: &str = "KITO_ASKED_ROLE";
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -560,6 +565,7 @@ impl Server {
         &mut self,
         name: &str,
         only: Option<Vec<kitod::plugins::Permission>>,
+        for_clients: bool,
     ) -> Result<kitod::plugins::Installed, String> {
         use kitod::plugins;
         plugins::check_name("plugin", name)?;
@@ -581,10 +587,68 @@ impl Server {
         }
         given.sort();
         given.dedup();
-        let config = plugins::PluginConfig { enabled: true, permissions: given };
+        let config = plugins::PluginConfig { enabled: true, permissions: given, for_clients };
         self.config.plugins.insert(name.to_owned(), config);
         self.save()?;
         Ok(found)
+    }
+
+    /// The plugins that run in the directories connected to this server
+    /// too (ADR 0007), with what of a repository each was given.
+    pub fn client_plugins(&self) -> Vec<(String, kitod::plugins::PluginConfig)> {
+        let for_clients =
+            self.config.plugins.iter().filter(|(_, config)| config.enabled && config.for_clients);
+        for_clients
+            .map(|(name, config)| {
+                let permissions = config
+                    .permissions
+                    .iter()
+                    .copied()
+                    .filter(|permission| permission.of_a_repository())
+                    .collect();
+                (name.clone(), kitod::plugins::PluginConfig { enabled: true, permissions, for_clients: true })
+            })
+            .collect()
+    }
+
+    /// Asks a plugin of this server one thing for the same plugin on
+    /// somebody's machine (ADR 0007): `kito-<plugin> answer <ask>`, with
+    /// the parameters on its input and who asks in its environment. The
+    /// answer is the last line it prints, and is data.
+    pub fn answer(
+        &self,
+        plugin: &str,
+        ask: &str,
+        params: &serde_json::Value,
+        (user, repo, role): (&str, &str, &str),
+    ) -> Result<serde_json::Value, String> {
+        let running = self.running();
+        let found =
+            running.iter().find(|(found, config)| found.manifest.name == plugin && config.for_clients);
+        let Some((found, _)) = found else {
+            return Err(format!(
+                "this server has no plugin `{plugin}` that answers its clients (`kito-server plugin enable \
+                 {plugin} --for-clients`)"
+            ));
+        };
+        kitod::plugins::check_name("question", ask)?;
+        let program = kitod::plugins::program(&found.dir, plugin);
+        let envs = [
+            (ENV_SERVER_DIR, self.dir.as_os_str().to_owned()),
+            (ENV_ASKED_BY, user.into()),
+            (ENV_ASKED_REPO, repo.into()),
+            (ENV_ASKED_ROLE, role.into()),
+        ];
+        let input = serde_json::to_vec(params).unwrap_or_default();
+        let within = std::time::Duration::from_secs(60);
+        let printed =
+            kitod::plugins::run_program(&program, &["answer", ask], &self.dir, &envs, &input, within)
+                .map_err(|why| format!("the plugin `{plugin}` of the server failed at `{ask}`: {why}"))?;
+        let text = String::from_utf8_lossy(&printed);
+        let last = text.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
+        serde_json::from_str(last).map_err(|_| {
+            format!("the plugin `{plugin}` of the server answered `{ask}` with something that is no answer")
+        })
     }
 
     /// Disables a plugin: nothing of it runs on this server. `false`: it

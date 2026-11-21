@@ -1309,6 +1309,28 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-158 · In a connected directory the server says which plugins run
+A directory connected to a server has no configuration of its own to
+enable a plugin in: the repository is the server's. So the server says
+which of its plugins run in the directories connected to it (`--for-
+clients`), and gives them what of a repository it gave them there; the
+directory's daemon asks the server, keeps the answer for fifteen
+seconds, and goes on with what it last heard when the server cannot be
+asked. A plugin still has a key of its own, kept in the directory, and
+is still refused what it was not given, by the directory's daemon before
+anything reaches the server. The server then applies the person's role
+as for any client: a plugin is never more than the person who runs it.
+
+`plugin_call` reaches the plugin of the same name on the server and no
+other: the directory's daemon knows which plugin asks by its key and
+writes the name itself, whatever the plugin sent. The server runs its
+plugin once for each question (`answer <question>`), as it does for
+signing in, with who asks in the environment and the parameters on the
+input; the answer is the last line printed. It needs `read`: asking is
+not changing, and what the server's plugin does with a question is the
+server's business. Events and gates of a plugin do not run in a
+connected directory: they are the repository's, on the server.
+
 ### D-157 · Signing in: sessions the server keeps, a provider it never trusts further
 A plugin that signs people in is run once for each step and answers who
 somebody is. What the server keeps of a person is `<method>:<subject>`,

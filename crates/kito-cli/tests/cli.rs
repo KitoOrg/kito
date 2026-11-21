@@ -2017,7 +2017,7 @@ fn a_plugin_is_installed_enabled_and_answered_what_it_was_given() {
 
     // Its commands are Kito's now, with what it needs to reach the daemon.
     let env = ok(root, &["hello", "env"]);
-    assert!(env.contains("api: 1\n") && env.contains("key: 64 characters\n"), "{env}");
+    assert!(env.contains("api: 2\n") && env.contains("key: 64 characters\n"), "{env}");
     // The repository, as the system names it.
     let told = env.lines().find_map(|line| line.strip_prefix("repo: ")).unwrap();
     assert_eq!(Path::new(told).canonical().unwrap(), root, "{env}");
@@ -2029,7 +2029,7 @@ fn a_plugin_is_installed_enabled_and_answered_what_it_was_given() {
     }
     assert_eq!(kito(root, &["hi", "exit", "7"]).status.code(), Some(7));
     let ping: Value = serde_json::from_str(&ok(root, &["hello", "ask", "ping"])).unwrap();
-    assert_eq!(ping["api"], 1);
+    assert_eq!(ping["api"], 2);
 
     // The daemon answers it what it was given: it reads and it writes...
     let lanes: Value = serde_json::from_str(&ok(root, &["hello", "ask", "lanes"])).unwrap();
@@ -2410,4 +2410,157 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     assert!(!no.status.success());
     assert!(errors(&no).contains("they said no at hello"), "{}", errors(&no));
     assert!(ok(&shop, &["repos"]).contains("shop"));
+}
+
+const FOR_CLIENTS: &str = r#"name = "hello"
+version = "0.7.0"
+description = "Says what it is told"
+api = 2
+permissions = ["read"]
+
+[[command]]
+name = "hello"
+about = "Says what it is told"
+"#;
+
+#[test]
+fn a_directory_connected_to_a_server_runs_the_plugins_the_server_lets_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (serverdir, mine) = (base.join("server"), base.join("my-config"));
+    let server = |args: &[&str]| {
+        let mut command = Command::new(kito_server());
+        command
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".server-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    };
+    let run = |args: &[&str]| -> String {
+        let out = server(args).output().unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // The person's own plugins are in one place, whatever directory they are in.
+    let me = |cwd: &Path, args: &[&str]| -> (bool, String) {
+        let out =
+            command(cwd, args).env("KITO_NO_CLAUDE", "1").env("KITO_CONFIG_DIR", &mine).output().unwrap();
+        let said =
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), said)
+    };
+    let src = base.join("src-repo");
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.py"), SHOP_PY).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-q", "-m", "start"]);
+    run(&["init", serverdir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let plugin = hello_plugin(&base, FOR_CLIENTS);
+    run(&["plugin", "add", "--path", plugin.to_str().unwrap()]);
+    // Enabled for the server alone, it runs nowhere else.
+    run(&["plugin", "enable", "hello"]);
+    let token = run(&["user", "add", "ada"]);
+    let token = token.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    struct Serving(std::process::Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        server(&["serve", "--listen", "127.0.0.1:0"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(serving.0.stdout.take().unwrap()), &mut line)
+        .unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap().to_owned();
+
+    let (connected, said) = me(&base, &["connect", &address, "shop", "--token", &token]);
+    assert!(connected, "{said}");
+    let shop = base.join("shop");
+    let (added, said) = me(&shop, &["plugin", "add", "--path", plugin.to_str().unwrap()]);
+    assert!(added, "{said}");
+    let (ran, said) = me(&shop, &["hello", "env"]);
+    assert!(!ran, "a plugin the server did not let run here ran: {said}");
+    // A person enables nothing in a connected directory: the server says.
+    let (enabled, said) = me(&shop, &["plugin", "enable", "hello"]);
+    assert!(!enabled && said.contains("the server says which plugins run"), "{said}");
+
+    // The server lets it run in the directories connected to it. What
+    // the server last said holds for a moment: a daemon started now asks.
+    let said = run(&["plugin", "enable", "hello", "--for-clients"]);
+    assert!(said.contains("runs in the directories connected to this server too"), "{said}");
+    assert!(run(&["plugin", "list"]).contains("[enabled (read), for clients too]"));
+    me(&shop, &["daemon", "stop"]);
+    let (ran, said) = me(&shop, &["hello", "env"]);
+    assert!(ran && said.contains("api: 2") && said.contains("key: 64 characters"), "{said}");
+    let (_, listed) = me(&shop, &["plugin", "list"]);
+    assert!(listed.contains("hello 0.7.0") && listed.contains("read"), "{listed}");
+
+    // With its own key it asks what the server gave it, through the
+    // directory's daemon, and is refused the rest.
+    let (asked, said) = me(&shop, &["hello", "ask", "status"]);
+    assert!(asked, "{said}");
+    let (asked, said) = me(&shop, &["hello", "ask", "close_lane", "{\"lane\":\"1\"}"]);
+    assert!(!asked && said.contains("the plugin `hello` may not ask `close_lane`"), "{said}");
+    let (asked, said) = me(&shop, &["hello", "ask", "plugin_key", "{\"name\":\"hello\"}"]);
+    assert!(!asked && said.contains("not for plugins"), "{said}");
+
+    // It asks its counterpart on the server, which is told who asks.
+    let (asked, said) =
+        me(&shop, &["hello", "ask", "plugin_call", "{\"ask\":\"greet\",\"params\":{\"n\":1}}"]);
+    assert!(asked, "{said}");
+    let answer: Value = serde_json::from_str(said.trim()).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(
+        answer,
+        serde_json::json!({
+            "asked": "greet", "params": { "n": 1 }, "by": "ada", "repo": "shop", "role": "integrate",
+            "on_the_server": true,
+        })
+    );
+    // Its own counterpart, whatever name it gives; and what that one
+    // fails at is said as a failure of the server's plugin.
+    let (asked, said) = me(&shop, &["hello", "ask", "plugin_call", "{\"ask\":\"greet\",\"plugin\":\"web\"}"]);
+    assert!(asked && said.contains("\"asked\":\"greet\""), "{said}");
+    let (asked, said) = me(&shop, &["hello", "ask", "plugin_call", "{\"ask\":\"explode\"}"]);
+    assert!(!asked && said.contains("the plugin `hello` of the server failed at `explode`"), "{said}");
+
+    // Somebody who does not have it installed is told so, and how. The
+    // directory's daemon is one person's: it is started again as theirs.
+    me(&shop, &["daemon", "stop"]);
+    let other = base.join("other-config");
+    let theirs = |args: &[&str]| {
+        let out =
+            command(&shop, args).env("KITO_NO_CLAUDE", "1").env("KITO_CONFIG_DIR", &other).output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let (ran, said) = theirs(&["hello", "env"]);
+    assert!(!ran && said.contains("the plugin `hello` is not installed here"), "{said}");
+    theirs(&["daemon", "stop"]);
+
+    // In a repository of its own there is no server to ask.
+    let alone = base.join("alone");
+    fs::create_dir_all(&alone).unwrap();
+    assert!(me(&alone, &["init"]).0);
+    assert!(me(&alone, &["plugin", "enable", "hello"]).0);
+    let (asked, said) = me(&alone, &["hello", "ask", "plugin_call", "{\"ask\":\"greet\"}"]);
+    assert!(!asked && said.contains("not connected to a server"), "{said}");
+    me(&alone, &["daemon", "stop"]);
+    me(&shop, &["daemon", "stop"]);
 }

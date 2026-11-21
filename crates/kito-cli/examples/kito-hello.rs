@@ -30,6 +30,12 @@
 //! signed in, nobody has while the file is not there, and `refuse` in it
 //! is a person who said no. In a browser the provider's answer is in the
 //! query (`code=<login>`). It knows everybody but `nobody`.
+//!
+//! For the same plugin in a directory connected to the server (ADR 0007):
+//! `kito-hello answer <question>` says what it was asked, by whom and
+//! about which repository, and fails for the question `explode`. From
+//! such a directory, `kito hello ask plugin_call '{"ask": "greet"}'`
+//! asks it.
 
 use kitod::client::Client;
 use std::path::PathBuf;
@@ -162,6 +168,27 @@ fn main() -> ExitCode {
                     ExitCode::from(1)
                 }
             }
+        }
+        Some("answer") => {
+            let asked = args.get(1).cloned().unwrap_or_default();
+            if asked == "explode" {
+                eprintln!("hello: it exploded");
+                return ExitCode::from(1);
+            }
+            let params: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap_or_default();
+            println!("thinking about it");
+            println!(
+                "{}",
+                serde_json::json!({
+                    "asked": asked,
+                    "params": params,
+                    "by": said("KITO_ASKED_BY"),
+                    "repo": said("KITO_ASKED_REPO"),
+                    "role": said("KITO_ASKED_ROLE"),
+                    "on_the_server": !said("KITO_SERVER_DIR").is_empty(),
+                })
+            );
+            ExitCode::SUCCESS
         }
         Some("sign-in") => {
             let told: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap_or_default();

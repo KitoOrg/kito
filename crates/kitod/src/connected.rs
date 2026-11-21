@@ -9,6 +9,7 @@
 
 use crate::client::{ClientError, Remote};
 use crate::mirror::{dir_name, unreachable, Mirror, MirrorInfo, Upstream};
+use crate::plugins::{Access, PluginConfig};
 use crate::rpc::{self, Request, Response};
 use kito_core::paths::Canonical as _;
 use serde_json::{json, Value};
@@ -17,7 +18,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A working copy with no watcher, or with saves that did not get
 /// through, is looked at whole this often.
@@ -58,7 +59,12 @@ struct Daemon {
     /// Connections to the server that nobody is using: a client that
     /// arrives takes one instead of opening its own.
     idle: Mutex<Vec<Upstream>>,
+    /// The plugins the server lets run here, as it last said, and when.
+    plugins: Mutex<Option<(Instant, BTreeMap<String, PluginConfig>)>>,
 }
+
+/// How long what the server said of its plugins is taken to still hold.
+const PLUGINS_HOLD: Duration = Duration::from_secs(15);
 
 /// How many connections to the server are kept for the next client.
 const IDLE_KEPT: usize = 4;
@@ -116,6 +122,91 @@ fn lane_in(value: &Value) -> Option<&str> {
 }
 
 impl Daemon {
+    /// The plugins that run in this directory: those the server enabled
+    /// for its clients (ADR 0007). A person enables nothing here. A server
+    /// that cannot be asked now is taken to say what it last said.
+    fn plugins(&self, up: &mut Upstream) -> BTreeMap<String, PluginConfig> {
+        let mut known = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, plugins)) = known.as_ref().filter(|(at, _)| at.elapsed() < PLUGINS_HOLD) {
+            return plugins.clone();
+        }
+        let said: Option<BTreeMap<String, PluginConfig>> = up
+            .call("server.client_plugins", json!({}))
+            .ok()
+            .and_then(|value| serde_json::from_value::<Vec<(String, PluginConfig)>>(value).ok())
+            .map(|plugins| plugins.into_iter().collect());
+        match (said, known.as_ref()) {
+            (Some(plugins), _) => {
+                *known = Some((Instant::now(), plugins.clone()));
+                plugins
+            }
+            (None, Some((_, plugins))) => plugins.clone(),
+            (None, None) => BTreeMap::new(),
+        }
+    }
+
+    /// Who a first line is from: the key of the socket is whoever can
+    /// read the directory's own data, the key of a plugin is that plugin.
+    fn who_said(&self, up: &mut Upstream, line: &str) -> Option<Access> {
+        if rpc::key_said(line, self.key.as_deref()?)? {
+            return Some(Access::Owner);
+        }
+        let said: Value = serde_json::from_str(line).ok()?;
+        let said = said.get("key")?.as_str()?;
+        crate::plugins::plugin_of_key(&self.root, said, &self.plugins(up))
+    }
+
+    /// What is asked about plugins, answered here. `None`: something else.
+    fn about_plugins(&self, up: &mut Upstream, who: &Access, request: &Request) -> Option<Answer> {
+        let params = &request.params;
+        let named = || {
+            let name = params.get("name").and_then(Value::as_str);
+            name.ok_or((rpc::INVALID_PARAMS, "missing parameter `name`".to_owned()))
+        };
+        Some(match request.method.as_str() {
+            "plugins" => {
+                let all: Vec<_> =
+                    self.plugins(up).iter().map(|(name, config)| crate::plugins::info_of(name, config)).collect();
+                serde_json::to_value(all).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))
+            }
+            "plugin_key" => named().and_then(|name| match self.plugins(up).contains_key(name) {
+                true => crate::plugins::ensure_key(&self.root, name)
+                    .map(|key| json!({ "name": name, "key": key }))
+                    .map_err(|e| (rpc::INTERNAL_ERROR, e.to_string())),
+                false => Err((
+                    rpc::REFUSED,
+                    format!(
+                        "the plugin `{name}` does not run in this directory: the server says which do \
+                         (`kito-server plugin enable {name} --for-clients`, there)"
+                    ),
+                )),
+            }),
+            "plugin_enable" | "plugin_disable" => Err((
+                rpc::REFUSED,
+                "in a directory connected to a server, the server says which plugins run: `kito-server plugin \
+                 enable <name> --for-clients`, there"
+                    .to_owned(),
+            )),
+            // A plugin asks the plugin of its own name on the server, and
+            // no other; whoever holds the socket's key says which.
+            "plugin_call" => {
+                let plugin = match who {
+                    Access::Plugin { name, .. } => Some(name.as_str()),
+                    Access::Owner => params.get("plugin").and_then(Value::as_str),
+                };
+                match plugin {
+                    Some(plugin) => {
+                        let mut asked = params.clone();
+                        asked["plugin"] = plugin.into();
+                        self.forward(up, "plugin_call", &asked)
+                    }
+                    None => Err((rpc::INVALID_PARAMS, "missing parameter `plugin`".to_owned())),
+                }
+            }
+            _ => return None,
+        })
+    }
+
     fn mirrors(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Running>> {
         self.mirrors.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -436,7 +527,10 @@ impl Daemon {
         Ok(())
     }
 
-    fn handle(self: &Arc<Self>, up: &mut Upstream, request: &Request) -> Answer {
+    fn handle(self: &Arc<Self>, up: &mut Upstream, who: &Access, request: &Request) -> Answer {
+        if let Some(answer) = self.about_plugins(up, who, request) {
+            return answer;
+        }
         let params = &request.params;
         let text = |key: &str| {
             params
@@ -536,17 +630,18 @@ impl Daemon {
 fn serve_client(daemon: &Arc<Daemon>, (read, mut writer): crate::ipc::Halves) {
     let kept = daemon.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
     let mut up = kept.unwrap_or_else(|| Upstream::new(&daemon.remote));
-    // Whoever speaks first says the key of the socket.
-    let mut trusted = daemon.key.is_none();
+    // Whoever speaks first says a key: the socket's, or the one of a
+    // plugin the server lets run here (ADR 0007).
+    let mut access = daemon.key.is_none().then_some(Access::Owner);
     for line in BufReader::new(read).lines() {
         let Ok(line) = line else { break };
-        if !trusted {
-            match daemon.key.as_deref().and_then(|key| rpc::key_said(&line, key)) {
-                Some(true) => {
-                    trusted = true;
+        let Some(who) = access.clone() else {
+            match daemon.who_said(&mut up, &line) {
+                Some(who) => {
+                    access = Some(who);
                     continue;
                 }
-                _ => {
+                None => {
                     let id = serde_json::from_str::<Request>(&line).map_or(0, |request| request.id);
                     if let Ok(mut out) = serde_json::to_vec(&Response::err(id, rpc::REFUSED, rpc::NO_KEY)) {
                         out.push(b'\n');
@@ -555,10 +650,14 @@ fn serve_client(daemon: &Arc<Daemon>, (read, mut writer): crate::ipc::Halves) {
                     return;
                 }
             }
-        }
+        };
         let (response, last) = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
-                let response = match daemon.handle(&mut up, &request) {
+                let answer = match who.refusal(&request.method) {
+                    Some(why) => Err((rpc::REFUSED, why)),
+                    None => daemon.handle(&mut up, &who, &request),
+                };
+                let response = match answer {
                     Ok(value) => Response::ok(request.id, value),
                     Err((code, message)) => Response::err(request.id, code, message),
                 };
@@ -609,6 +708,7 @@ pub fn serve(root: &Path) -> Result<(), String> {
         writer: writer_id(&kito),
         mirrors: Mutex::default(),
         idle: Mutex::default(),
+        plugins: Mutex::default(),
         remote: remote.clone(),
         key: rpc::ensure_socket_key(&root).ok(),
         root: root.clone(),

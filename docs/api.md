@@ -1,11 +1,12 @@
-# The daemon's API · version 1
+# The daemon's API · version 2
 
 What a program asks the daemon of a repository, and what plugins
 ([ADR 0005](adr/0005-plugins.md)) are answered. `kito`, `kito-mcp` and
 `kito-server` use nothing else.
 
-This is version **1**: the methods of Kito 0.19 and 0.20. `ping` answers
-the version a daemon speaks (`api`).
+This is version **2**: version 1 (Kito 0.19 to 0.21) and `plugin_call`
+(Kito 0.22). A plugin written for version 1 runs as it did. `ping`
+answers the version a daemon speaks (`api`).
 
 - Adding a method, or an optional field to an answer, does not change the
   number. A program ignores the fields it does not know.
@@ -86,6 +87,7 @@ it means.
 | `integration_result` | `job`, `[wait_ms]` | How an integration ended, waiting for it if it has not | `kito-integrate` (`IntegrationResult`) |
 | `events` | `[after]`, `[wait_ms]` | What happened since event `after`, waiting up to `wait_ms` for something: `events`, and `next` to ask with | `rpc.rs` (`Event`) |
 | `plugins` | | The plugins this repository names | `plugins.rs` (`PluginInfo`) |
+| `plugin_call` | `ask`, `[params]` | Asks the plugin of the same name on the server this directory is connected to (`kito-<name> answer <ask>` there), and returns what it answers. Refused in a repository of its own | `connected.rs`, `kito-server` |
 | `sync` | `[lane]` | Records what is saved and not recorded yet; changes nothing else | `server.rs` |
 | `before_edit` | `path`, `[lane]`, `[lines]`, `[whole]` | Whether an edit may be made, and what to read first | `guard.rs` (`EditAnswer`) |
 | `after_shell` | `[since_ms]`, `[lanes]`, `[main]` | What a command changed where it should not have | `guard.rs` |
@@ -146,5 +148,15 @@ and `shutdown`.
 The daemon of a connected directory (`kito connect`) answers the same
 methods by asking the server, as the person who connected, and adds
 `attach`, `detach`, `take` (`write`) and `mirror_status` (`read`) for the
-copies of lanes it keeps. It does not answer plugins yet: a plugin runs
-where the repository is.
+copies of lanes it keeps.
+
+It answers plugins too ([ADR 0007](adr/0007-kitchens.md)): not those a
+person enabled, which is not done there (`plugin_enable` and
+`plugin_disable` are refused), but those the server enabled for its
+clients (`kito-server plugin enable <name> --for-clients`), with what of
+a repository the server gave them, if the person has them installed.
+`plugin_call` is how such a plugin asks its counterpart on the server:
+the server runs `kito-<name> answer <ask>` with the parameters on its
+input and `KITO_SERVER_DIR`, `KITO_ASKED_BY`, `KITO_ASKED_REPO` and
+`KITO_ASKED_ROLE` in its environment, and the last line it prints is the
+answer. A plugin reaches the plugin of its own name and no other.
