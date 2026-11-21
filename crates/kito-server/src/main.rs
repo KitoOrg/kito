@@ -187,6 +187,14 @@ enum RepoCmd {
         /// Stop pushing
         #[arg(long)]
         no_push: bool,
+        /// The kitchen whose instructions its agents get, before the
+        /// repository's own: another repository of this server
+        #[arg(long, value_name = "REPOSITORY", conflicts_with = "no_kitchen")]
+        kitchen: Option<String>,
+        /// The standard kitchen: Kito's rules, and the repository's own
+        /// instructions
+        #[arg(long)]
+        no_kitchen: bool,
     },
 }
 
@@ -496,7 +504,19 @@ fn run(cli: &Cli) -> Result<(), String> {
             }
         }
         Cmd::Repo {
-            command: RepoCmd::Set { name, protect, unprotect, checks, no_checks, approvals, push, no_push },
+            command:
+                RepoCmd::Set {
+                    name,
+                    protect,
+                    unprotect,
+                    checks,
+                    no_checks,
+                    approvals,
+                    push,
+                    no_push,
+                    kitchen,
+                    no_kitchen,
+                },
         } => {
             let server = Server::open(&dir_of(cli))?;
             let root =
@@ -517,6 +537,18 @@ fn run(cli: &Cli) -> Result<(), String> {
             if let Some(approvals) = approvals {
                 rules["approvals"] = json!(approvals);
             }
+            // A kitchen is a repository of the server, next to this one.
+            if let Some(kitchen) = kitchen {
+                if kitchen == name {
+                    return Err(format!("`{name}` cannot be its own kitchen"));
+                }
+                server.repo(kitchen).ok_or_else(|| {
+                    format!("there is no repository `{kitchen}` on this server for a kitchen")
+                })?;
+                rules["kitchen"] = json!(format!("../{kitchen}"));
+            } else if *no_kitchen {
+                rules["kitchen"] = Value::Null;
+            }
             let now: Value = daemon.call("configure", rules).map_err(|e| e.to_string())?;
             let checks: Vec<String> = serde_json::from_value(now["checks"].clone()).unwrap_or_default();
             let rules = rules_of(
@@ -526,6 +558,17 @@ fn run(cli: &Cli) -> Result<(), String> {
                 now["push"].as_str(),
             );
             println!("{name}{rules}");
+            if kitchen.is_some() || *no_kitchen {
+                match now["kitchen"].as_str() {
+                    Some(path) => println!(
+                        "  its agents get the instructions of the kitchen {}",
+                        path.trim_start_matches("../")
+                    ),
+                    None => println!(
+                        "  its agents get the standard kitchen: Kito's rules, and its own instructions"
+                    ),
+                }
+            }
             server.tell("repo_changed", json!({ "repo": name, "what": format!("{name}{rules}") }));
         }
         Cmd::User { command: UserCmd::Add { name, email, repos, role, identity } } => {

@@ -183,6 +183,8 @@ pub struct Config {
     pub semantic: SemanticConfig,
     pub scope: ScopeConfig,
     pub review: ReviewConfig,
+    /// The kitchen attached to the repository (ADR 0012).
+    pub kitchen: KitchenConfig,
     /// The plugins this repository enabled, by name (ADR 0005).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub plugins: std::collections::BTreeMap<String, crate::plugins::PluginConfig>,
@@ -486,11 +488,38 @@ pub struct AgentsConfig {
     /// A change is held back once, until the agent that makes it was told
     /// the reasons the code it changes was written for.
     pub why: bool,
+    /// The files assistants read (`CLAUDE.md`, `.claude/`, …) are recorded
+    /// like any other (ADR 0012): by default they are kept out.
+    pub files_in_history: bool,
 }
 
 impl Default for AgentsConfig {
     fn default() -> Self {
-        AgentsConfig { why: true }
+        AgentsConfig { why: true, files_in_history: false }
+    }
+}
+
+/// The kitchen whose instructions the repository's agents get, before its
+/// own (ADR 0012).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KitchenConfig {
+    /// A directory with an `instructions/` folder: from the root of the
+    /// repository when it is not absolute. `None`: the standard kitchen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl Config {
+    /// The ignore patterns of a working copy, before those of `.gitignore`
+    /// and `.kitoignore`: the configured ones, and the files assistants
+    /// read unless they are recorded.
+    pub fn ignore_patterns(&self) -> Vec<String> {
+        let mut patterns = self.capture.ignore.clone();
+        if !self.agents.files_in_history {
+            patterns.extend(crate::instructions::ASSISTANT_FILES.iter().map(|path| path.to_string()));
+        }
+        patterns
     }
 }
 

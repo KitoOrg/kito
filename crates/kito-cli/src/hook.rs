@@ -432,6 +432,9 @@ pub fn session_start(said: Said) -> ExitCode {
         let told = json!({ "session": session, "assistant": said.assistant() });
         let _ = client.call_value("assistant_session", told);
     }
+    // What the assistants are told, as it is now: written for the next
+    // session to read (ADR 0012).
+    let _ = crate::instructions::write(&root, &mut client);
     let status: Value = client.call("status", json!({})).unwrap_or(Value::Null);
     let protected = status.get("protected").and_then(Value::as_bool).unwrap_or(false);
     let board: Vec<BoardLane> = client.call("board", json!({})).unwrap_or_default();

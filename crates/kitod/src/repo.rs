@@ -650,7 +650,7 @@ impl Repo {
         let config = Config::load(&store_dir).map_err(Error::Config)?;
         let providers = crate::refs::providers(&config, &root);
         let identity = identity::resolve(&config, &root);
-        let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.capture.ignore);
+        let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.ignore_patterns());
         let mut repo = Repo {
             root,
             store,
@@ -719,7 +719,7 @@ impl Repo {
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
         self.reload_providers();
-        self.main.ignore = IgnoreRules::new(&self.root, &self.config.capture.ignore);
+        self.main.ignore = IgnoreRules::new(&self.root, &self.config.ignore_patterns());
         self.identity = identity::resolve(&self.config, &self.root);
         self.main.author = self.identity.author();
         let ignore = self.lane_ignore();
@@ -1305,6 +1305,26 @@ impl Repo {
             self.pushed = (None, None);
         }
         Ok(())
+    }
+
+    /// Attaches a kitchen (ADR 0012): a directory, from the root when it is
+    /// not absolute. `None`: the standard kitchen.
+    pub fn set_kitchen(&mut self, kitchen: Option<String>) -> Result<()> {
+        let kitchen = kitchen.map(|path| path.trim().to_owned()).filter(|path| !path.is_empty());
+        crate::config::write_value(
+            &self.root.join(STORE_DIR),
+            "kitchen",
+            "path",
+            kitchen.as_deref().map(Into::into),
+        )
+        .map_err(Error::Config)?;
+        self.config.kitchen.path = kitchen;
+        Ok(())
+    }
+
+    /// What the repository tells its agents (ADR 0012).
+    pub fn instructions(&self) -> crate::instructions::Instructions {
+        crate::instructions::load(&self.root, self.config.kitchen.path.as_deref())
     }
 
     /// What a push to the git remote came to.

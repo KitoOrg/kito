@@ -111,9 +111,13 @@ const READ: &[&str] = &[
     "reasons_behind",
     // What the session of an assistant runs on: remembered, not recorded.
     "assistant_session",
+    // What agents are told (ADR 0012).
+    "instructions",
 ];
 
 const WRITE: &[&str] = &[
+    "instructions_set",
+    "instructions_remove",
     "open_lane",
     "close_lane",
     "extend_scope",

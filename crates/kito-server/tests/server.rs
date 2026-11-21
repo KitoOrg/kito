@@ -515,3 +515,65 @@ fn a_server_may_be_served_in_the_clear_on_its_own_machine() {
     let error = Client::remote(&remote(&address, &world.ada, "shop"), true).err().unwrap().to_string();
     assert!(error.contains("does not seem to encrypt") && error.contains("--plain"), "{error}");
 }
+
+#[test]
+fn what_agents_are_told_is_the_server_s_and_its_kitchen_comes_first() {
+    let mut world = World::new();
+    // The kitchen is another repository of the server: what its main lane has.
+    ok(&world.dir, &["repo", "set", "site", "--unprotect"]);
+    let style = world.repo("site").join("instructions/all/style.md");
+    fs::create_dir_all(style.parent().unwrap()).unwrap();
+    fs::write(&style, "Two spaces, never tabs.\n").unwrap();
+    fs::create_dir_all(world.repo("site").join("instructions/claude")).unwrap();
+    fs::write(world.repo("site").join("instructions/claude/brief.md"), "Answer briefly.\n").unwrap();
+    let set = ok(&world.dir, &["repo", "set", "shop", "--kitchen", "site"]);
+    assert!(set.contains("its agents get the instructions of the kitchen site"), "{set}");
+    assert!(
+        server(&world.dir, &["repo", "set", "shop", "--kitchen", "nowhere"]).output().unwrap().status.code()
+            != Some(0)
+    );
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop", "--role", "read"]));
+
+    let address = world.serve();
+    let mut ada = connect(&address, &world.ada, "shop");
+    let mut bob = connect(&address, &world.bob, "shop");
+    let mut carol = connect(&address, &carol, "shop");
+    let told = ada.call_value("instructions", json!({})).unwrap();
+    assert_eq!(told["kitchen"], "../site");
+    let names = |told: &Value| -> Vec<(String, String)> {
+        told["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (item["name"].as_str().unwrap().to_owned(), item["from"].as_str().unwrap().to_owned())
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(&told),
+        [
+            ("all/style.md".to_owned(), "kitchen".to_owned()),
+            ("claude/brief.md".to_owned(), "kitchen".to_owned())
+        ]
+    );
+
+    // The repository's own word wins, for everyone connected; one who may
+    // only read is told, and changes nothing.
+    ada.call_value("instructions_set", json!({ "name": "style", "text": "Tabs here." })).unwrap();
+    ada.call_value("instructions_set", json!({ "name": "claude/brief", "text": "" })).unwrap();
+    let told = bob.call_value("instructions", json!({})).unwrap();
+    assert_eq!(names(&told), [("all/style.md".to_owned(), "repository".to_owned())]);
+    assert_eq!(told["items"][0]["text"], "Tabs here.\n");
+    assert_eq!(told["items"][0]["overrides"], true);
+    assert_eq!(told["removed"], json!(["claude/brief.md"]));
+    let told = carol.call_value("instructions", json!({})).unwrap();
+    assert_eq!(told["items"][0]["text"], "Tabs here.\n");
+    let refused = carol.call_value("instructions_set", json!({ "name": "style", "text": "Mine." }));
+    assert!(refused.unwrap_err().to_string().contains("may read this repository"));
+    // Kept by Kito, not in the project's files.
+    assert!(world.repo("shop").join(".kito/instructions/all/style.md").is_file());
+    assert!(!world.repo("shop").join("instructions").exists());
+    let bad = bob.call_value("instructions_set", json!({ "name": "../../etc/x", "text": "no" }));
+    assert!(bad.unwrap_err().to_string().contains("is not the name of an instruction"));
+}

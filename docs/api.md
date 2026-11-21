@@ -102,6 +102,7 @@ with what comes with it, where a program named itself otherwise.
 | `after_shell` | `[since_ms]`, `[lanes]`, `[main]` | What a command changed where it should not have | `guard.rs` |
 | `reasons_behind` | `lane` | The reasons behind what a lane replaced, not told yet | `guard.rs` (`Replaced`) |
 | `assistant_session` | `session`, `assistant` (`[name]`, `[version]`, `[model]`) | Nothing. What the session of an assistant runs on is remembered while the daemon runs (the last 256), and said of the lanes that session then edits in: nothing of the repository changes | `server.rs` |
+| `instructions` | | What the repository's agents are told (ADR 0012): the kitchen attached, each instruction with where it comes from (`kitchen` or `repository`), and the kitchen's it took away | `instructions.rs` (`Instructions`) |
 
 ## `write`
 
@@ -120,6 +121,8 @@ with what comes with it, where a program named itself otherwise.
 | `remove_note` | `note` | The note, removed | `notes.rs` (`NoteInfo`) |
 | `comment` | `lane`, `text`, `[on]`, `[reply_to]`, `[agent]` | The comment | `comments.rs` (`CommentInfo`) |
 | `resolve_comment` | `comment` | The comment, resolved | `comments.rs` (`CommentInfo`) |
+| `instructions_set` | `name` (`all/<file>` or `<assistant>/<file>`), `text` | `name`, `changed`. An empty text takes the kitchen's of that name away | `instructions.rs` |
+| `instructions_remove` | `name` | `name`, `changed` | `instructions.rs` |
 | `verdict` | `lane`, `verdict` (`approve`, `request_changes`, `withdraw`), `[text]`, `[agent]` | Where the review stands now | `verdicts.rs` (`ReviewInfo`) |
 
 ## `integrate`
@@ -138,7 +141,7 @@ with what comes with it, where a program named itself otherwise.
 | `checkpoint` | `label` | The checkpoint made of the main lane as it is |
 | `rollback` | `to`, `[paths]`, `[dry_run]` | What going back to a checkpoint changes, or changed |
 | `protect` | `[on]` | Whether the main lane is protected now |
-| `configure` | `[checks]`, `[push]`, `[approvals]` | The rules of the repository now |
+| `configure` | `[checks]`, `[push]`, `[approvals]`, `[kitchen]` (a directory, `null` for the standard kitchen) | The rules of the repository now |
 | `create_lane` | `name`, `[from]` | A permanent lane |
 | `export_git` | | Exports the checkpoints to git |
 | `import_scip` | `file` | Reads who uses what from a SCIP index |

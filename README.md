@@ -289,22 +289,53 @@ up Claude Code, as it always did, and names the others found.
 install script asks the same question once, and writes the answer with
 `kito assistant default`.
 
+### Instructions
+
+What the assistants are told is kept by Kito, not in the project: it is
+shared with everyone who works in the repository, through its server
+when it has one, and Kito writes it into `CLAUDE.md` and `AGENTS.md` at
+every session. Those files, and the assistants' settings (`.mcp.json`,
+`.claude/`, `.codex/`, `.zcode/`, …), stay out of the history and of git
+(`[agents] files_in_history = true` records them again).
+
+One standard, with a kitchen first and the repository's own over it:
+
+```text
+<kitchen>/instructions/all/style.md     every assistant, every repository of the kitchen
+<kitchen>/instructions/codex/plan.md    Codex only
+kito instructions set style             this repository's all/style.md: replaces the kitchen's
+```
+
+```bash
+kito instructions                       # what is told, and where each part comes from
+kito instructions show --for codex      # AGENTS.md as Codex gets it
+kito instructions set all/tests --file tests.md
+kito instructions remove all/tests
+kito instructions kitchen ../kitchen    # a directory with instructions/
+kito-server repo set shop --kitchen kitchen   # on a server: another of its repositories
+```
+
+Kito's rules always come first. A `CLAUDE.md` or `AGENTS.md` that was
+there before becomes an instruction the first time Kito writes it; lines
+written outside Kito's marks afterwards stay on that machine only.
+
 ### Claude Code
 
 `kito assistant add claude` (or `kito claude`, the same) writes:
 
 | File | What goes in it |
 | --- | --- |
-| `.gitignore` | `.kito/`, so that git does not see Kito's own directory |
+| `.gitignore` | `.kito/`, so that git does not see Kito's own directory, and the files assistants read |
 | `.mcp.json` | the `kito` server: `{ "command": "kito-mcp" }` |
 | `.claude/settings.json` | `mcp__kito__*` among the allowed tools: Claude calls them without asking each time; and three hooks (`kito hook`), which hold Claude to the rules whatever it decided to do: see [The rules as behaviour](#the-rules-as-behaviour) |
-| `CLAUDE.md` | the rules: one lane per task, edits only in the lane's working copy, `rename_symbol` for renames, integrate at the end |
+| `CLAUDE.md` | the rules: one lane per task, edits only in the lane's working copy, `rename_symbol` for renames, integrate at the end; then the [instructions](#instructions) |
 
 Each file is touched only for what is missing in it: what is already there
 stays as it is written, and a second run changes nothing. A file that is not
 what was expected (JSON that does not parse, say) is left alone and named.
-They are files of the project: Kito records them, and they reach git with
-the next checkpoint, so that whoever clones the project has them. To leave a
+They are not files of the project: Kito keeps them out of its history and
+of git, and whoever clones the project gets them with `kito assistant add
+claude`, the instructions with them. To leave a
 project as it is, `kito init --no-assistants` (or `KITO_NO_CLAUDE=1` in
 the environment); `kito assistant remove claude` takes them out.
 

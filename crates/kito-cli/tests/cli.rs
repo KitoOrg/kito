@@ -548,18 +548,21 @@ fn init_sets_the_project_up_for_claude_code() {
         serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap()).unwrap();
     assert_eq!(settings["permissions"]["allow"][0], "mcp__kito__*");
     assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "kito hook before-edit");
-    assert!(fs::read_to_string(root.join("CLAUDE.md")).unwrap().contains("`open_lane`"));
+    let rules = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(
+        rules.starts_with("<!-- kito: begin (written by Kito") && rules.contains("`open_lane`"),
+        "{rules}"
+    );
 
-    // They are files of the project like the others: recorded, and in git
-    // with the first checkpoint, where `.kito/` does not show.
+    // What the assistant reads is not the project's (ADR 0012): out of the
+    // history and of git; `.gitignore` is the project's, and says so.
     ok(root, &["sync"]);
-    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 5);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 2);
     ok(root, &["checkpoint", "-m", "start"]);
     assert_eq!(git(root, &["status", "--porcelain"]), "");
-    let tracked = git(root, &["ls-files"]);
-    for file in CLAUDE_FILES {
-        assert!(tracked.lines().any(|line| line == file), "{file} not in git:\n{tracked}");
-    }
+    assert_eq!(git(root, &["ls-files"]), ".gitignore\napp.ts\n");
+    let ignored = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(ignored.contains("/CLAUDE.md\n") && ignored.contains("/.claude/\n"), "{ignored}");
 
     // Asked again, there is nothing to do.
     let again = kito_as_installed(root, &["claude"]);
@@ -596,12 +599,18 @@ fn a_project_can_be_left_alone_and_set_up_later() {
     ] {
         assert!(out.contains(&format!("{change:<10}  {file}")), "{change} {file} in:\n{out}");
     }
-    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "target/\n.kito/\n");
-    assert!(fs::read_to_string(root.join("CLAUDE.md"))
-        .unwrap()
-        .starts_with("# Notes\n\n## Version control: Kito\n"));
+    assert!(fs::read_to_string(root.join(".gitignore")).unwrap().starts_with("target/\n.kito/\n# Read by"));
+    // What the project's own CLAUDE.md said is an instruction now, for
+    // everyone who works here; the file is written from them.
+    assert!(out.contains("what CLAUDE.md said is the instruction claude/project.md now"), "{out}");
+    let told = json(root, &["instructions", "--json"]);
+    assert_eq!(told["items"][0]["name"], "claude/project.md", "{told}");
+    assert_eq!(told["items"][0]["text"], "# Notes\n");
+    let rules = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(rules.starts_with("<!-- kito: begin") && rules.contains("\n# Notes\n"), "{rules}");
+    // It was in the history: it stays there, as any file that was.
     ok(root, &["sync"]);
-    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 4);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 2);
     ok(root, &["checkpoint", "-m", "claude"]);
     assert_eq!(git(root, &["status", "--porcelain"]), "");
     ok(root, &["daemon", "stop"]);
@@ -614,12 +623,9 @@ fn a_project_can_be_left_alone_and_set_up_later() {
     git(other, &["add", "-A"]);
     git(other, &["commit", "-q", "-m", "start"]);
     let out = kito_as_installed(other, &["import"]);
-    assert!(
-        out.contains("Set up for Claude Code:") && out.contains("Captured 4 changes not yet in git"),
-        "{out}"
-    );
+    assert!(out.contains("Set up for Claude Code:"), "{out}");
     let imported = json(other, &["status", "--json"]);
-    assert_eq!(imported["repo"]["files"], 5);
+    assert_eq!(imported["repo"]["files"], 2);
     ok(other, &["daemon", "stop"]);
 }
 
@@ -1498,7 +1504,6 @@ fn a_protected_main_lane_from_the_command_line() {
     for (args, why) in [
         (&["rollback", "ckpt#1"][..], "the main lane is protected"),
         (&["checkpoint", "-m", "by hand"], "every integration is a checkpoint"),
-        (&["claude"], "the set-up writes files in the main directory"),
     ] {
         let out = kito(root, args);
         assert!(!out.status.success(), "{args:?}");
@@ -3197,4 +3202,62 @@ fn every_assistant_is_added_the_same_way_and_new_projects_get_the_ones_said() {
     for dir in [&a, &b, &c, &d, &e, &f] {
         run(dir, &["daemon", "stop"]);
     }
+}
+
+#[test]
+fn instructions_are_kept_by_kito_written_for_each_assistant_and_a_kitchen_comes_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("shop");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("app.ts"), "export const a = 1;\n").unwrap();
+    kito_as_installed(&root, &["init"]);
+    let kitchen = tmp.path().join("kitchen");
+    fs::create_dir_all(kitchen.join("instructions/all")).unwrap();
+    fs::write(kitchen.join("instructions/all/style.md"), "Two spaces.\n").unwrap();
+    fs::write(kitchen.join("instructions/all/tests.md"), "Run the tests.\n").unwrap();
+    fs::create_dir_all(kitchen.join("instructions/codex")).unwrap();
+    fs::write(kitchen.join("instructions/codex/plan.md"), "Plan first.\n").unwrap();
+
+    let out = kito_as_installed(&root, &["instructions", "kitchen", kitchen.to_str().unwrap()]);
+    assert!(out.contains("wrote CLAUDE.md"), "{out}");
+    let claude = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(claude.contains("\nTwo spaces.\n") && !claude.contains("Plan first."), "{claude}");
+
+    // The repository's own word over the kitchen's; an empty one takes it away.
+    let mine = tmp.path().join("style.md");
+    fs::write(&mine, "# Style\n\nTabs.\n").unwrap();
+    let out = kito_as_installed(&root, &["instructions", "set", "style", "--file", mine.to_str().unwrap()]);
+    assert!(out.contains("all/style.md is set"), "{out}");
+    fs::write(&mine, "").unwrap();
+    kito_as_installed(&root, &["instructions", "set", "all/tests", "--file", mine.to_str().unwrap()]);
+    let list = kito_as_installed(&root, &["instructions"]);
+    assert!(list.contains(&format!("Kitchen: {}", kitchen.display())), "{list}");
+    assert!(list.contains("all/style.md             this repository, over the kitchen's: Style"), "{list}");
+    assert!(list.contains("codex/plan.md            the kitchen: Plan first."), "{list}");
+    assert!(list.contains("all/tests.md             the kitchen's, not told here"), "{list}");
+    let claude = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(claude.contains("# Style\n\nTabs.\n") && !claude.contains("Run the tests"), "{claude}");
+    let codex = kito_as_installed(&root, &["instructions", "show", "--for", "codex"]);
+    assert!(
+        codex.contains("Tabs.") && codex.contains("Plan first.") && codex.contains("`open_lane`"),
+        "{codex}"
+    );
+
+    // Lines of one's own, outside the marks, are kept and not shared.
+    fs::write(root.join("CLAUDE.md"), format!("Mine only.\n\n{claude}")).unwrap();
+    kito_as_installed(&root, &["instructions", "remove", "style"]);
+    let claude = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(
+        claude.starts_with("Mine only.\n\n<!-- kito: begin") && claude.contains("Two spaces."),
+        "{claude}"
+    );
+
+    // None of it is in the history.
+    ok(&root, &["sync"]);
+    assert_eq!(json(&root, &["status", "--json"])["repo"]["files"], 2);
+    // Taken out with the assistant: nothing of Kito's is left.
+    fs::write(root.join("CLAUDE.md"), claude.replace("Mine only.\n\n", "")).unwrap();
+    kito_as_installed(&root, &["assistant", "remove", "claude"]);
+    assert!(!root.join("CLAUDE.md").exists());
+    ok(&root, &["daemon", "stop"]);
 }

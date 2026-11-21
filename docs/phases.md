@@ -2605,6 +2605,63 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 26 · instructions as metadata — done
+
+What agents were told lived in `CLAUDE.md` and `AGENTS.md`, recorded and
+exported to git like code, and each person's copy could differ. The
+person asked that such files be kept out of the repository, shared
+through Kito and its server instead, by one standard, with a kitchen
+attached and the repository's own instructions over the kitchen's.
+Released as 0.27.0 ([ADR 0012](adr/0012-instructions.md), D-166).
+
+### What is there
+
+- **Instructions**: `all/<name>.md` for every assistant,
+  `<assistant>/<name>.md` for one, kept in `.kito/instructions/`; a
+  kitchen's `instructions/` come first, the repository's own win, an
+  empty one takes the kitchen's away.
+- **`kito instructions`** lists them and where each comes from; `show
+  --for <assistant>`, `set <name> [--file]`, `remove <name>`, `kitchen
+  <dir> | --none`, `write`.
+- **`CLAUDE.md` and `AGENTS.md` are written by Kito** from them, between
+  its marks, when an assistant is added or removed, when one changes, and
+  at every session start. What a file said before becomes an instruction.
+- **Out of the history and of git by default**: `CLAUDE.md`, `AGENTS.md`,
+  `GEMINI.md`, `.mcp.json`, `.claude/`, `.codex/`, `.zcode/`, `.cursor/`
+  and the others; `.gitignore` names them. `[agents] files_in_history =
+  true` keeps the old way.
+- **Through a server**: a connected directory reads and changes the
+  server's instructions, by the person's role; `kito-server repo set
+  <repo> --kitchen <repo>` attaches a kitchen kept on the server.
+- **kito-kitchen 0.4.0**: a new kitchen starts with `instructions/`.
+- **kito-claude 0.1.2**: taking Claude Code out takes Kito's marked part
+  of `CLAUDE.md` with it.
+
+### How it was tested
+
+- `kitod` unit tests: names, layers, overriding and taking away.
+- `kito-cli/tests/cli.rs`: init leaves the files out of the history and
+  of git; a `CLAUDE.md` that was in git becomes an instruction; a kitchen
+  directory, an override, a removal, `show --for codex`, lines outside
+  the marks kept, the file taken away with the assistant.
+- `kito-server/tests/server.rs`: a kitchen kept as a repository of the
+  server, an override seen by another person, a reader refused a change.
+- kito-kitchen, kito-codex, kito-zcode, kito-claude: their tests under
+  this Kito.
+- `scripts/demo-phase26.sh`, kept in `docs/demo/phase26-demo.txt`.
+
+### Known limitations
+
+- **Instructions have no history**: an event says each change, and the
+  last text is all there is.
+- **A file already in the history stays recorded** until it is removed
+  from the project in a lane.
+- **Written at session start**: an assistant that read its file before
+  the hook ran sees a change at its next session.
+- **A kitchen on a server is read as its main directory is**, without
+  the parts kito-kitchen picks for each repository.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 25 · one way to add an assistant — done
 
 Setting up an assistant took a different set of commands for each, and

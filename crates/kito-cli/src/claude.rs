@@ -3,7 +3,8 @@
 //! Four files of the project, each one touched only for what is missing in
 //! it:
 //!
-//! - `.gitignore`: `.kito/` stays out of git;
+//! - `.gitignore`: `.kito/` stays out of git, and so do the files
+//!   assistants read (ADR 0012);
 //! - `.mcp.json`: the `kito` MCP server, as Claude Code reads it for a
 //!   project;
 //! - `.claude/settings.json`: its tools may be called without asking, and
@@ -109,6 +110,13 @@ For every task that changes files, work in a lane, with the tools of the
      it, and tell the user it waits for approval.
 8. A task that is given up ends with `close_lane` too.
 ";
+
+/// `text` without the rules any version of Kito wrote in it, untouched.
+pub fn without_rules(text: &str) -> String {
+    [RULES, RULES_BEFORE_HOOKS, RULES_BEFORE_WHY, RULES_BEFORE_APPROVAL, RULES_BEFORE_SCOPE]
+        .iter()
+        .fold(text.to_owned(), |text, rules| text.replace(rules, ""))
+}
 
 /// The rules as version 0.10 wrote them.
 const RULES_BEFORE_HOOKS: &str = "## Version control: Kito
@@ -336,7 +344,8 @@ pub fn setup(root: &Path) -> Setup {
     // A directory connected to a server holds no files of the repository:
     // there is nothing for git to keep out.
     if !root.join(".kito").join("remote.toml").is_file() {
-        steps.insert(0, step(".gitignore", "`.kito/` stays out of git", ignore(root)));
+        steps
+            .insert(0, step(".gitignore", "`.kito/` and what assistants read stay out of git", ignore(root)));
     }
     Setup { steps, note: server_note() }
 }
@@ -433,11 +442,30 @@ fn ignore(root: &Path) -> Result<Change, String> {
     let path = root.join(".gitignore");
     let text = read(&path)?;
     let local = read(&root.join(".git").join("info").join("exclude")).ok().flatten();
-    if [&text, &local].into_iter().flatten().any(|text| ignores_kito(text)) {
+    let mut more = String::new();
+    if ![&text, &local].into_iter().flatten().any(|text| ignores_kito(text)) {
+        more.push_str(".kito/\n");
+    }
+    // What assistants read is not the project's (ADR 0012), unless the
+    // repository records it.
+    let recorded =
+        kitod::config::Config::load(&root.join(".kito")).is_ok_and(|config| config.agents.files_in_history);
+    let has =
+        |line: &str| [&text, &local].into_iter().flatten().any(|text| text.lines().any(|l| l.trim() == line));
+    let missing: Vec<&str> =
+        kitod::instructions::ASSISTANT_FILES.iter().copied().filter(|line| !recorded && !has(line)).collect();
+    if !missing.is_empty() {
+        more.push_str(ASSISTANTS_IGNORED);
+        missing.iter().for_each(|line| more.push_str(&format!("{line}\n")));
+    }
+    if more.is_empty() {
         return Ok(Change::Unchanged);
     }
-    write(&path, &with_lines(text.as_deref().unwrap_or(""), ".kito/\n"), text.is_some())
+    write(&path, &with_lines(text.as_deref().unwrap_or(""), &more), text.is_some())
 }
+
+/// What `.gitignore` says before the files assistants read.
+const ASSISTANTS_IGNORED: &str = "# Read by coding assistants: Kito writes them (kito instructions)\n";
 
 fn rules(path: &Path) -> Result<Change, String> {
     let text = read(path)?;
@@ -724,6 +752,22 @@ fn server_note() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn assistants_ignored() -> String {
+        let lines: String =
+            kitod::instructions::ASSISTANT_FILES.iter().map(|line| format!("{line}\n")).collect();
+        format!("{ASSISTANTS_IGNORED}{lines}")
+    }
+
+    #[test]
+    fn a_repository_that_records_them_does_not_keep_them_out_of_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".kito")).unwrap();
+        fs::write(root.join(".kito/config.toml"), "[agents]\nfiles_in_history = true\n").unwrap();
+        setup(root);
+        assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), ".kito/\n");
+    }
+
     fn changes(setup: &Setup) -> Vec<Change> {
         setup.steps.iter().map(|step| step.change.clone()).collect()
     }
@@ -740,7 +784,10 @@ mod tests {
         assert_eq!(changes(&first), vec![Change::Created; 4]);
         assert!(first.changed());
 
-        assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), ".kito/\n");
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            format!(".kito/\n{}", assistants_ignored())
+        );
         assert_eq!(
             json(&root.join(".mcp.json")),
             serde_json::json!({ "mcpServers": { "kito": { "command": "kito-mcp" } } })
@@ -798,7 +845,10 @@ mod tests {
 
         assert_eq!(changes(&setup(root)), vec![Change::Updated; 4]);
 
-        assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "node_modules/\n.kito/\n");
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            format!("node_modules/\n.kito/\n{}", assistants_ignored())
+        );
         let rules = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
         assert_eq!(rules, format!("# The project\n\nUse tabs.\n\n{RULES}"));
 
@@ -903,7 +953,8 @@ mod tests {
         // arguments; the older form of the permission; the hooks among
         // others, with another timeout; the rules already in.
         fs::create_dir_all(root.join(".git/info")).unwrap();
-        fs::write(root.join(".git/info/exclude"), "# local\n/.kito/\n").unwrap();
+        let exclude = format!("# local\n/.kito/\n{}", kitod::instructions::ASSISTANT_FILES.join("\n"));
+        fs::write(root.join(".git/info/exclude"), exclude).unwrap();
         let server =
             r#"{"mcpServers":{"kito":{"command":"/opt/kito-mcp","args":["--tool-prefix","kito_"]}}}"#;
         fs::write(root.join(".mcp.json"), server).unwrap();

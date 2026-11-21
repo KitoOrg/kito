@@ -4,6 +4,23 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.27.0]
+
+What agents are told is kept by Kito and shared, not part of the
+repository (phase 26, [ADR 0012](docs/adr/0012-instructions.md)).
+
+- **Instructions**, one standard: `all/<name>.md` for every assistant,
+  `<assistant>/<name>.md` for one. A kitchen attached to the repository
+  gives its own first; the repository's win.
+- **`kito instructions`** (`show`, `set`, `remove`, `kitchen`, `write`).
+  In a directory connected to a server they are the server's, for
+  everyone; `kito-server repo set <repo> --kitchen <repo>`.
+- **`CLAUDE.md` and `AGENTS.md` are written by Kito** from them, at
+  every session. What they said before becomes an instruction.
+- **The files assistants read stay out of the history and of git** by
+  default, and `.gitignore` names them. `[agents] files_in_history =
+  true` keeps them recorded.
+
 ## [0.26.0]
 
 One way to add any assistant, and the ones a machine has (phase 25,

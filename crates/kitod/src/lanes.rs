@@ -228,7 +228,7 @@ impl Repo {
     /// the shared paths (links to what the main directory has).
     pub(crate) fn lane_ignore(&self) -> Vec<String> {
         let shared = self.config.lanes.share.iter().map(|path| format!("/{}", path.trim_matches('/')));
-        self.config.capture.ignore.iter().cloned().chain(shared).collect()
+        self.config.ignore_patterns().into_iter().chain(shared).collect()
     }
 
     pub(crate) fn lane_dir(&self, lane: LaneId) -> PathBuf {

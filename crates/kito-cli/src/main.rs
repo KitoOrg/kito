@@ -24,6 +24,7 @@ mod assistants;
 mod claude;
 mod claude_out;
 mod hook;
+mod instructions;
 mod log;
 
 #[derive(Parser)]
@@ -134,11 +135,51 @@ enum AssistantCmd {
 }
 
 #[derive(Subcommand)]
+enum InstructionsCmd {
+    /// What every assistant is told here, and where each part comes from
+    List,
+    /// What an assistant is told, as its file gives it
+    Show {
+        /// claude, codex, zcode
+        #[arg(long = "for", value_name = "ASSISTANT", default_value = "claude")]
+        assistant: String,
+    },
+    /// Set one of this repository's instructions, from a file or the
+    /// standard input: `all/<name>` for every assistant, `<assistant>/<name>`
+    /// for one. It replaces the kitchen's of the same name; an empty one
+    /// takes it away
+    Set {
+        name: String,
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
+    /// Remove one of this repository's instructions (the kitchen's of the
+    /// same name is told again)
+    Remove { name: String },
+    /// Attach a kitchen: a directory with an `instructions/` folder
+    Kitchen {
+        #[arg(value_name = "DIR", required_unless_present = "none", conflicts_with = "none")]
+        dir: Option<PathBuf>,
+        /// The standard kitchen: Kito's rules alone
+        #[arg(long)]
+        none: bool,
+    },
+    /// Write the files the assistants read now (it is done at every session)
+    Write,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Coding assistants (Claude Code, Codex, ZCode, …): `kito assistant add <name>`
     Assistant {
         #[command(subcommand)]
         command: AssistantCmd,
+    },
+    /// What the assistants are told here: kept by Kito and shared, not in
+    /// the project's files
+    Instructions {
+        #[command(subcommand)]
+        command: Option<InstructionsCmd>,
     },
     /// Plugins: programs that add to Kito (a web client, an assistant)
     Plugin {
@@ -1024,6 +1065,7 @@ fn run_plugin_here(
     client: &mut Client,
     plugin: &Value,
     args: &[OsString],
+    then_back: bool,
 ) -> Result<u8, String> {
     use kitod::plugins;
     let name = plugin["name"].as_str().unwrap_or_default();
@@ -1042,16 +1084,16 @@ fn run_plugin_here(
         .env(plugins::ENV_SOCKET, plugins::socket_name(root));
     // On Unix `kito` becomes the plugin: whoever stops one stops the
     // other, and a plugin that serves (a web client) is not left behind.
+    // Unless Kito has something to do after it (`then_back`): an
+    // assistant's files are written again once its plugin is done.
     #[cfg(unix)]
-    {
+    if !then_back {
         let failed = std::os::unix::process::CommandExt::exec(&mut command);
-        Err(format!("{}: {failed}", program.display()))
+        return Err(format!("{}: {failed}", program.display()));
     }
-    #[cfg(not(unix))]
-    {
-        let status = command.status().map_err(|e| format!("{}: {e}", program.display()))?;
-        Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
-    }
+    let _ = then_back;
+    let status = command.status().map_err(|e| format!("{}: {e}", program.display()))?;
+    Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
 }
 
 /// `kito assistant`: every assistant is set up the same way (ADR 0011):
@@ -1109,7 +1151,7 @@ fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
             ),
         });
     };
-    run_plugin_here(&root, &mut client, plugin, &["assistant".into(), what.into()])
+    run_plugin_here(&root, &mut client, plugin, &["assistant".into(), what.into()], true)
 }
 
 /// `kito assistant add <name>…`: each the same way, said as it goes.
@@ -1175,7 +1217,7 @@ fn assistant_remove_claude(cli: &Cli) -> Result<u8, String> {
         .find(|plugin| plugin["enabled"] == true && plugin["assistant"] == "claude")
         .cloned();
     if let Some(plugin) = plugin {
-        return run_plugin_here(&root, &mut client, &plugin, &["assistant".into(), "remove".into()]);
+        return run_plugin_here(&root, &mut client, &plugin, &["assistant".into(), "remove".into()], true);
     }
     let done = claude_out::remove(&root)?;
     if cli.json {
@@ -1321,7 +1363,7 @@ fn cmd_external(cli: &Cli, line: &[OsString]) -> Result<u8, String> {
             None => unknown(),
         });
     };
-    run_plugin_here(&root, &mut client, plugin, &line[1..])
+    run_plugin_here(&root, &mut client, plugin, &line[1..], false)
 }
 
 /// Where the review of a lane stands, as text.
@@ -1556,8 +1598,13 @@ fn assistants_after(cli: &Cli, root: &Path, client: &mut Client, new: &NewAssist
             if names.len() == 1 { "it" } else { "them" }
         );
     }
+    let written = instructions::write(root, client).unwrap_or_else(|why| vec![why]);
+    if !cli.json {
+        written.iter().for_each(|line| println!("Instructions: {line}"));
+    }
     json!({
         "set_up": new.wanted,
+        "instructions": written,
         "plugins": said,
         "also_found": new.others.iter().map(|one| one.name).collect::<Vec<_>>(),
     })
@@ -1624,11 +1671,170 @@ fn add_by_plugin(root: &Path, client: &mut Client, name: &str) -> Result<Vec<Str
     Ok(said)
 }
 
+/// The files assistants read, written again after one was set up or taken out.
+fn instructions_written(cli: &Cli) {
+    let Ok(root) = root_of(cli) else { return };
+    let Ok(mut client) = Client::connect_or_start(&root) else { return };
+    match instructions::write(&root, &mut client) {
+        Ok(lines) if !cli.json => lines.iter().for_each(|line| println!("Instructions: {line}")),
+        Ok(_) => {}
+        Err(why) => eprintln!("kito: the instructions were not written: {why}"),
+    }
+}
+
+/// `kito instructions` (ADR 0012).
+fn cmd_instructions(cli: &Cli, command: Option<&InstructionsCmd>) -> Outcome {
+    let root = root_of(cli)?;
+    let mut client = daemon(cli)?;
+    let write_now = |client: &mut Client| -> Outcome {
+        let lines = instructions::write(&root, client)?;
+        if !cli.json {
+            lines.iter().for_each(|line| println!("  {line}"));
+        }
+        Ok(())
+    };
+    match command.unwrap_or(&InstructionsCmd::List) {
+        InstructionsCmd::List => {
+            let got: Value = client.call("instructions", json!({})).map_err(fail)?;
+            if cli.json {
+                print_json(&got);
+                return Ok(());
+            }
+            match got["kitchen"].as_str() {
+                Some(kitchen) if got["kitchen_found"] == true => println!("Kitchen: {kitchen}"),
+                Some(kitchen) => {
+                    println!("Kitchen: {kitchen}, which is not there: only this repository's own")
+                }
+                None => println!("Kitchen: the standard one (Kito's rules alone)"),
+            }
+            println!("Every assistant is told Kito's rules first, then:");
+            let items = got["items"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                println!("  nothing more (`kito instructions set <name>` adds to it)");
+            }
+            for item in &items {
+                let name = item["name"].as_str().unwrap_or_default();
+                let from = match (item["from"].as_str(), item["overrides"] == true) {
+                    (Some("repository"), true) => "this repository, over the kitchen's",
+                    (Some("repository"), false) => "this repository",
+                    _ => "the kitchen",
+                };
+                let text = item["text"].as_str().unwrap_or_default();
+                let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+                println!("  {name:<24} {from}: {}", first.trim().trim_start_matches('#').trim());
+            }
+            for name in strings(&got["removed"]) {
+                println!("  {name:<24} the kitchen's, not told here");
+            }
+            Ok(())
+        }
+        InstructionsCmd::Show { assistant } => {
+            let got: Value = client.call("instructions", json!({})).map_err(fail)?;
+            let folders: Vec<&str> = vec!["all", assistant.as_str()];
+            let text = instructions::compose(got["items"].as_array().map_or(&[], Vec::as_slice), &folders);
+            match cli.json {
+                true => print_json(&json!({ "assistant": assistant, "text": text })),
+                false => print!("{text}"),
+            }
+            Ok(())
+        }
+        InstructionsCmd::Set { name, file } => {
+            let text = match file {
+                Some(file) => {
+                    std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?
+                }
+                None => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                        .map_err(|e| e.to_string())?;
+                    text
+                }
+            };
+            let done: Value =
+                client.call("instructions_set", json!({ "name": name, "text": text })).map_err(fail)?;
+            let name = done["name"].as_str().unwrap_or(name);
+            if !cli.json {
+                match (done["changed"] == true, text.trim().is_empty()) {
+                    (false, _) => println!("{name} says that already."),
+                    (true, true) => println!("{name} of the kitchen is not told here any more."),
+                    (true, false) => {
+                        println!("{name} is set: every assistant here gets it at its next session.")
+                    }
+                }
+            }
+            write_now(&mut client)?;
+            if cli.json {
+                print_json(&done);
+            }
+            Ok(())
+        }
+        InstructionsCmd::Remove { name } => {
+            let done: Value = client.call("instructions_remove", json!({ "name": name })).map_err(fail)?;
+            let name = done["name"].as_str().unwrap_or(name);
+            if !cli.json {
+                match done["changed"] == true {
+                    true => println!("{name} is removed."),
+                    false => println!("This repository has no instruction {name} of its own."),
+                }
+            }
+            write_now(&mut client)?;
+            if cli.json {
+                print_json(&done);
+            }
+            Ok(())
+        }
+        InstructionsCmd::Kitchen { dir, none } => {
+            let kitchen = match (dir, none) {
+                (Some(dir), false) => {
+                    let dir = std::path::absolute(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    if !dir.join(kitod::instructions::DIR).is_dir() {
+                        return Err(format!(
+                            "{} has no `instructions/` folder: a kitchen keeps them there, as `all/<name>.md` \
+                             and `<assistant>/<name>.md`",
+                            dir.display()
+                        ));
+                    }
+                    json!(dir.display().to_string())
+                }
+                _ => Value::Null,
+            };
+            let now: Value = client.call("configure", json!({ "kitchen": kitchen })).map_err(fail)?;
+            if !cli.json {
+                match now["kitchen"].as_str() {
+                    Some(kitchen) => {
+                        println!("The kitchen is {kitchen}: its instructions come before this repository's.")
+                    }
+                    None => println!(
+                        "The standard kitchen: Kito's rules, then this repository's own instructions."
+                    ),
+                }
+            }
+            write_now(&mut client)?;
+            if cli.json {
+                print_json(&now);
+            }
+            Ok(())
+        }
+        InstructionsCmd::Write => {
+            let lines = instructions::write(&root, &mut client)?;
+            match cli.json {
+                true => print_json(&lines),
+                false if lines.is_empty() => println!("The files assistants read here say it already."),
+                false => lines.iter().for_each(|line| println!("{line}")),
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Claude Code set up in this repository, by Kito itself.
 fn claude_here(cli: &Cli, root: &Path) -> Result<claude::Setup, String> {
     // On a protected main lane the files would be put back as soon as
     // they are written: said before, not found out after.
-    if Remote::load(root).is_none() {
+    // Its files are kept out of the history (ADR 0012): nothing to put back.
+    let recorded =
+        kitod::config::Config::load(&root.join(".kito")).is_ok_and(|config| config.agents.files_in_history);
+    if Remote::load(root).is_none() && recorded {
         let status: DaemonStatus = daemon(cli)?.call("status", json!({})).map_err(fail)?;
         if status.repo.protected {
             return Err("the main lane is protected, and the set-up writes files in the main directory: \
@@ -1648,6 +1854,7 @@ fn cmd_claude(cli: &Cli) -> Outcome {
     } else {
         setup.print();
     }
+    instructions_written(cli);
     Ok(())
 }
 
@@ -3849,7 +4056,11 @@ fn run() -> ExitCode {
     }
     // An assistant set up by its plugin: the exit code is the plugin's.
     if let Cmd::Assistant { command } = &cli.command {
-        return match cmd_assistant(&cli, command) {
+        let done = cmd_assistant(&cli, command);
+        if matches!(command, AssistantCmd::Add { .. } | AssistantCmd::Remove { .. }) && done.is_ok() {
+            instructions_written(&cli);
+        }
+        return match done {
             Ok(code) => ExitCode::from(code),
             Err(e) => {
                 eprintln!("kito: {e}");
@@ -3890,6 +4101,7 @@ fn run() -> ExitCode {
             &Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants },
         ),
         Cmd::Claude => cmd_claude(&cli),
+        Cmd::Instructions { command } => cmd_instructions(&cli, command.as_ref()),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),

@@ -93,7 +93,11 @@ fn rules(path: &Path, wanted: bool) -> Result<Option<Done>, String> {
     if wanted && now.lines().any(|line| line.trim_end() == HEADING) {
         return Ok(None);
     }
-    let rest = without_rules(now);
+    // Written by Kito from its instructions (ADR 0012): all of it is Kito's.
+    let rest = match now.contains("<!-- kito: begin") {
+        true => crate::instructions::own_part(now),
+        false => without_rules(now),
+    };
     let text = match wanted {
         false => rest,
         true if rest.trim().is_empty() => RULES.to_owned(),

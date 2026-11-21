@@ -1334,6 +1334,23 @@ what it always did. The answer can be given once (`kito assistant
 default`), and the install script asks for it, so most people are asked
 once in all.
 
+### D-166 · Instructions are metadata, and the files are written from them
+What agents are told is kept by Kito, in `.kito/instructions/` and in an
+attached kitchen, and `CLAUDE.md`, `AGENTS.md` and the assistants'
+settings stay out of the history and of git by default
+([ADR 0012](adr/0012-instructions.md)), because the person asked that
+such files not be part of the repository and that one standard share
+them across agents and people, through the server.
+
+The files are still written in the project, since that is where the
+assistants read them; Kito writes them at every session, so a change
+reaches everyone without a merge. Kito's part is between the marks its
+plugins already know, so they leave it be and needed no change. What a
+file said before is taken in as an instruction once, rather than lost;
+what is written outside the marks afterwards stays local. Instructions
+have no history of their own: an event says each change, which is enough
+for something that is told rather than built.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

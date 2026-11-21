@@ -1,0 +1,111 @@
+== 1. A new project
+
+$ kito init --assistant claude
+Kito repository created in /demo/shop/.kito
+Set up for Claude Code:
+  created     .gitignore             `.kito/` stays out of git
+  created     .mcp.json              the `kito` MCP server
+  created     .claude/settings.json  its tools need no asking; hooks check every edit
+  created     CLAUDE.md              the rules: one lane per task
+Start Claude Code in this directory: the first time it asks to trust the folder and to approve the `kito` server.
+Instructions: wrote CLAUDE.md
+The daemon is running: every save is recorded from now on.
+
+$ kito sync
+Everything is recorded (0 new operations).
+
+$ kito status
+Repository ........ /demo/shop
+Author ............ ada
+Tracked files ..... 2
+Symbols ........... 1
+Operations ........ 3 (3 since the last checkpoint)
+Checkpoints ....... 0
+Main lane ......... open: what is saved in the main directory is recorded
+Checks ............ none: a lane is integrated as soon as it merges
+
+$ cat .gitignore
+.kito/
+# Read by coding assistants: Kito writes them (kito instructions)
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/.mcp.json
+/.claude/
+/.codex/
+/.zcode/
+/.cursor/
+/.cursorrules
+/.windsurfrules
+/.github/copilot-instructions.md
+
+$ sed -n 1,3p CLAUDE.md
+<!-- kito: begin (written by Kito from `kito instructions` at every session: change them there, not here) -->
+
+## Version control: Kito
+
+== 2. A kitchen first, the repository's own word over it
+
+$ kito instructions kitchen /demo/kitchen
+The kitchen is /demo/kitchen: its instructions come before this repository's.
+  wrote CLAUDE.md
+
+$ kito instructions set style --file /demo/style.md
+all/style.md is set: every assistant here gets it at its next session.
+  wrote CLAUDE.md
+
+$ kito instructions
+Kitchen: /demo/kitchen
+Every assistant is told Kito's rules first, then:
+  all/money.md             the kitchen: Money
+  all/style.md             this repository, over the kitchen's: Style
+  codex/plans.md           the kitchen: Plans
+
+== 3. What each assistant is told
+
+$ tail -n 12 CLAUDE.md
+     it, and tell the user it waits for approval.
+8. A task that is given up ends with `close_lane` too.
+
+# Money
+
+Amounts are whole cents, never floats.
+
+# Style
+
+Tabs, as the code already has.
+
+<!-- kito: end -->
+
+$ sh -c kito instructions show --for codex | tail -n 10
+
+# Style
+
+Tabs, as the code already has.
+
+# Plans
+
+Write the plan before the first edit.
+
+<!-- kito: end -->
+
+== 4. A CLAUDE.md that was in the project
+
+$ kito init --no-assistants
+Kito repository created in /demo/books/.kito
+The daemon is running: every save is recorded from now on.
+
+$ kito assistant add claude
+Set up for Claude Code:
+  created     .gitignore             `.kito/` stays out of git
+  created     .mcp.json              the `kito` MCP server
+  created     .claude/settings.json  its tools need no asking; hooks check every edit
+  updated     CLAUDE.md              the rules: one lane per task
+Start Claude Code in this directory: the first time it asks to trust the folder and to approve the `kito` server.
+Instructions: what CLAUDE.md said is the instruction claude/project.md now, shared with everyone who works here
+Instructions: wrote CLAUDE.md
+
+$ kito instructions
+Kitchen: the standard one (Kito's rules alone)
+Every assistant is told Kito's rules first, then:
+  claude/project.md        this repository: Books

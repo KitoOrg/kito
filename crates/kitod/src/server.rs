@@ -397,20 +397,72 @@ impl Daemon {
                         params.get("checks").and_then(|checks| serde_json::from_value(checks.clone()).ok());
                     let push = params.get("push").map(|remote| remote.as_str().map(str::to_owned));
                     let approvals = params.get("approvals").and_then(Value::as_u64);
-                    let (now, approvals) = self
+                    let kitchen = params.get("kitchen").map(|kitchen| kitchen.as_str().map(str::to_owned));
+                    let (now, approvals, kitchen_now) = self
                         .with_repo(|repo| {
                             repo.configure(checks, push)?;
                             if let Some(approvals) = approvals {
                                 repo.set_required_approvals(approvals.min(99) as u32)?;
                             }
-                            Ok((repo.status()?, repo.required_approvals()))
+                            if let Some(kitchen) = kitchen.clone() {
+                                repo.set_kitchen(kitchen)?;
+                            }
+                            Ok((
+                                repo.status()?,
+                                repo.required_approvals(),
+                                repo.config().kitchen.path.clone(),
+                            ))
                         })
                         .map_err(internal)?;
                     // A remote just named gets what is already there.
                     self.push_wanted.notify_one();
-                    Ok(
-                        json!({ "protected": now.protected, "checks": now.checks, "push": now.push, "approvals": approvals }),
-                    )
+                    if kitchen.is_some() {
+                        let what = match &kitchen_now {
+                            Some(path) => format!("the kitchen is {path}"),
+                            None => "the standard kitchen".to_owned(),
+                        };
+                        self.events.emit("instructions", None, person_name(params), what);
+                    }
+                    Ok(json!({
+                        "protected": now.protected,
+                        "checks": now.checks,
+                        "push": now.push,
+                        "approvals": approvals,
+                        "kitchen": kitchen_now,
+                    }))
+                }
+                // What agents are told (ADR 0012): kept by Kito, out of
+                // the project's files.
+                "instructions" => {
+                    let got = self.with_repo(|repo| Ok(repo.instructions())).map_err(internal)?;
+                    to_json(serde_json::to_value(got))
+                }
+                "instructions_set" | "instructions_remove" => {
+                    let given = text("name")?;
+                    let name =
+                        crate::instructions::name_of(given).map_err(|why| (rpc::INVALID_PARAMS, why))?;
+                    let root = self.with_repo(|repo| Ok(repo.root().to_owned())).map_err(internal)?;
+                    let (changed, what) = match request.method.as_str() {
+                        "instructions_set" => {
+                            let body = params.get("text").and_then(Value::as_str).unwrap_or_default();
+                            let changed = crate::instructions::set(&root, &name, body)
+                                .map_err(|why| (rpc::INTERNAL_ERROR, why))?;
+                            let what = match body.trim().is_empty() {
+                                true => format!("{name} of the kitchen is not told here"),
+                                false => format!("{name} changed"),
+                            };
+                            (changed, what)
+                        }
+                        _ => {
+                            let changed = crate::instructions::remove(&root, &name)
+                                .map_err(|why| (rpc::INTERNAL_ERROR, why))?;
+                            (changed, format!("{name} removed"))
+                        }
+                    };
+                    if changed {
+                        self.events.emit("instructions", None, person_name(params), what);
+                    }
+                    Ok(json!({ "name": name, "changed": changed }))
                 }
                 "protect" => {
                     let on = params.get("on").and_then(Value::as_bool).unwrap_or(true);
