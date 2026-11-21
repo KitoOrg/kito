@@ -18,6 +18,22 @@ pub const MANIFEST: &str = "kito-plugin.toml";
 pub const ENV_REPO: &str = "KITO_REPO";
 pub const ENV_API: &str = "KITO_API";
 pub const ENV_KEY: &str = "KITO_PLUGIN_KEY";
+/// Where the daemon listens: the path of its Unix socket, or on Windows
+/// the name of its pipe. A plugin that is not written with Kito's own
+/// client cannot work it out by itself.
+pub const ENV_SOCKET: &str = "KITO_SOCKET";
+
+/// What [`ENV_SOCKET`] says for a repository.
+pub fn socket_name(root: &Path) -> String {
+    #[cfg(windows)]
+    {
+        crate::ipc::pipe_name(root)
+    }
+    #[cfg(not(windows))]
+    {
+        crate::rpc::socket_path(root).display().to_string()
+    }
+}
 
 /// A group of methods a plugin may be given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -252,6 +268,7 @@ pub fn run_plugin(
         .env(ENV_REPO, root)
         .env(ENV_API, crate::rpc::API.to_string())
         .env(ENV_KEY, key)
+        .env(ENV_SOCKET, socket_name(root))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -123,8 +123,10 @@ interface with a number.
 | `admin` | protect, configure, checkpoint, rollback |
 
 Kito starts a plugin with what it needs to reach the daemon in its
-environment: `KITO_REPO`, `KITO_API`, and `KITO_PLUGIN_KEY`, a key the
-daemon made for this plugin in this repository. The daemon answers that
+environment: `KITO_REPO`, `KITO_API`, `KITO_SOCKET` (where the daemon
+listens: the path of its socket, or the name of its pipe on Windows) and
+`KITO_PLUGIN_KEY`, a key the daemon made for this plugin in this
+repository. The daemon answers that
 key only what the repository gave the plugin, and refuses the rest with
 the name of the permission that is missing. The key of the socket, which
 `kito` itself uses, is not given to plugins.

@@ -2021,6 +2021,12 @@ fn a_plugin_is_installed_enabled_and_answered_what_it_was_given() {
     // The repository, as the system names it.
     let told = env.lines().find_map(|line| line.strip_prefix("repo: ")).unwrap();
     assert_eq!(Path::new(told).canonical().unwrap(), root, "{env}");
+    // And where the daemon listens, for a plugin with a client of its own.
+    let socket = env.lines().find_map(|line| line.strip_prefix("socket: ")).unwrap();
+    match cfg!(windows) {
+        true => assert!(socket.starts_with(r"\.\pipe\kito-"), "{env}"),
+        false => assert!(Path::new(socket).exists(), "{env}"),
+    }
     assert_eq!(kito(root, &["hi", "exit", "7"]).status.code(), Some(7));
     let ping: Value = serde_json::from_str(&ok(root, &["hello", "ask", "ping"])).unwrap();
     assert_eq!(ping["api"], 1);

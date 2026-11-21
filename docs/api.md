@@ -28,7 +28,9 @@ The first line says a key, alone:
 ```
 
 A plugin says the one Kito put in its environment (`KITO_PLUGIN_KEY`,
-with `KITO_REPO`, the repository's directory, and `KITO_API`). The key of
+with `KITO_REPO`, the repository's directory, `KITO_API`, and
+`KITO_SOCKET`: the path of the socket, or on Windows the name of the
+pipe, so that a plugin need not work it out). The key of
 a plugin opens what the repository gave that plugin (the permissions
 below) and nothing else. Then requests and answers, a line each:
 

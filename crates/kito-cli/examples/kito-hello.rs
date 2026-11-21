@@ -29,6 +29,7 @@ fn main() -> ExitCode {
             println!("repo: {}", said(kitod::plugins::ENV_REPO));
             println!("api: {}", said(kitod::plugins::ENV_API));
             println!("key: {} characters", said(kitod::plugins::ENV_KEY).len());
+            println!("socket: {}", said(kitod::plugins::ENV_SOCKET));
             ExitCode::SUCCESS
         }
         Some("exit") => ExitCode::from(args.get(1).and_then(|code| code.parse().ok()).unwrap_or(0u8)),

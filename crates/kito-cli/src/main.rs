@@ -714,6 +714,7 @@ fn run_plugin_here(
         .env(plugins::ENV_REPO, root)
         .env(plugins::ENV_API, kitod::rpc::API.to_string())
         .env(plugins::ENV_KEY, key["key"].as_str().unwrap_or_default())
+        .env(plugins::ENV_SOCKET, plugins::socket_name(root))
         .status()
         .map_err(|e| format!("{}: {e}", program.display()))?;
     // Stopped by a signal: as a shell says it.

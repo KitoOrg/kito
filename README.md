@@ -486,9 +486,10 @@ description = "The address of a lane in the web client"
 name = "codex"
 ```
 
-- **A command** is run in the repository with `KITO_REPO`, `KITO_API` and
-  `KITO_PLUGIN_KEY` in its environment: the key is what it says to the
-  daemon, which then knows it as that plugin.
+- **A command** is run in the repository with `KITO_REPO`, `KITO_API`,
+  `KITO_SOCKET` (where the daemon listens) and `KITO_PLUGIN_KEY` in its
+  environment: the key is what it says to the daemon, which then knows
+  it as that plugin.
 - **A gate** (`kito-web gate licence`) is asked after the checks, in the
   same confined copy of the merged result, with the lanes in it and
   their diffs as JSON on its input. It prints `{"result": "pass"}`,

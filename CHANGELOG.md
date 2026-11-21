@@ -22,7 +22,8 @@ belong in Kito is added by programs of their own.
 - **The daemon's API**, version 1, is written down in
   [docs/api.md](docs/api.md); `ping` answers `api`.
 - **Commands**: a command a plugin declares is a command of Kito in the
-  repositories that enabled it (`kito web`).
+  repositories that enabled it (`kito web`). It is run with `KITO_REPO`,
+  `KITO_API`, `KITO_SOCKET` and `KITO_PLUGIN_KEY` in its environment.
 - **Gates**: a plugin's `[[gate]]` is asked before a lane is integrated,
   after the checks, in the same confined copy: it answers pass, fail
   (the lane's checks failed, naming the gate) or wait (the lane waits,
