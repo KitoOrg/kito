@@ -472,6 +472,11 @@ fn every_integration_is_pushed_to_the_git_remote() {
     wait_for("the integration at the remote", || git_out(&remote, &["rev-parse", "main"]).trim() == commit);
     assert!(git_out(&remote, &["show", "main:src/shop.ts"]).contains("* 100"));
     wait_for("the event", || events(&ada).contains("\"pushed\""));
+    // The push of what was there before is an event of that kind too: the
+    // repository says this one is done once it has recorded it.
+    wait_for("the push to be recorded", || {
+        call(&ada, "status", json!({}))["repo"]["pushed"] == result["checkpoint"]
+    });
     let status = call(&ada, "status", json!({}));
     assert_eq!(status["repo"]["pushed"], result["checkpoint"]);
     assert_eq!(status["repo"]["push_error"], Value::Null);
