@@ -18,8 +18,16 @@ under way:
 - The registry is `https://kito.sh/registry`, or the one `KITO_REGISTRY`
   names: a team's own, or files on this machine (`file://`).
 - Nothing is published yet: the registry at kito.sh is empty.
-- Not yet: taking a plugin out cleanly, a server's plugins from a
-  browser, `outdated` and `update`.
+- **Taking a plugin out**: a plugin with `[cleanup]` in its manifest is
+  run one last time where it goes. `kito plugin disable <name>` (and
+  `kito-server plugin disable`) runs `kito-<name> cleanup repository`
+  (or `server`): what it wrote there comes out with it. Its key is
+  removed; what it kept of its own stays, unless `--purge`. `kito plugin
+  remove <name>` runs `cleanup person` first. A cleanup that fails is
+  said, and the plugin goes all the same; `--no-cleanup` does not run it.
+- **`kito-server plugin remove <name>`**: off the server's machine, once
+  it is disabled.
+- Not yet: a server's plugins from a browser, `outdated` and `update`.
 
 ## [0.22.0]
 

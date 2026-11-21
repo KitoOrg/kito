@@ -1309,6 +1309,28 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-161 · A plugin is asked to clean up, and goes whether it does or not
+What a plugin writes outside its own directory, only it knows how to
+take out: an assistant's rules merged into a file the project also
+writes in. So a plugin that says `[cleanup]` is run one last time where
+it goes, with the place as its argument (`repository`, `server`,
+`person`), while it still has its key. It is run by the command that
+takes it out, not by the daemon: the daemon disables, which cannot fail
+for a plugin's sake.
+
+Three rules keep this from turning on the person. A cleanup that fails,
+or takes more than a minute, is said and changes nothing: the plugin is
+disabled or removed all the same, since a broken plugin is the one that
+most needs to go. `--no-cleanup` does not run it, for a plugin nobody
+trusts any more. And what a plugin kept of its own (`.kito/plugins/
+<name>/`, `plugins/<name>/` on a server) is not the plugin's to delete
+nor Kito's to delete unasked: it stays for when the plugin is enabled
+again, and `--purge` removes it. The key always goes: a disabled
+plugin's key opens nothing, and should not lie around.
+
+On a server, `remove` is refused while the plugin is enabled: what runs
+is not pulled from under a server that serves.
+
 ### D-160 · A plugin's archive is a `.tar.gz` everywhere, and read as hostile
 The registry lists one archive of a plugin for each platform. It is a
 gzipped tar on every platform, Windows too (Kito's own release for

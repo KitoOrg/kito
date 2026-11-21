@@ -417,7 +417,9 @@ impl Daemon {
                 }
                 "plugin_disable" => {
                     let name = text("name")?;
-                    let changed = self.with_repo(|repo| repo.disable_plugin(name)).map_err(internal)?;
+                    let purge = params.get("purge").and_then(Value::as_bool).unwrap_or(false);
+                    let changed =
+                        self.with_repo(|repo| repo.disable_plugin(name, purge)).map_err(internal)?;
                     self.plugins_changed.fetch_add(1, Ordering::Relaxed);
                     self.plugin_failures.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
                     Ok(json!({ "name": name, "changed": changed }))

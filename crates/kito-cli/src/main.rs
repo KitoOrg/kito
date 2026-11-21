@@ -51,8 +51,14 @@ enum PluginCmd {
     },
     /// What the registry has: every plugin, or those that say these words
     Search { words: Vec<String> },
-    /// Remove a plugin you installed
-    Remove { name: String },
+    /// Remove a plugin you installed: it takes out what it wrote for you
+    /// outside any repository, then its program goes
+    Remove {
+        name: String,
+        /// Do not run the plugin one last time
+        #[arg(long)]
+        no_cleanup: bool,
+    },
     /// The plugins you installed, and what this repository says of each
     List,
     /// What a plugin is, asks for and adds
@@ -64,8 +70,17 @@ enum PluginCmd {
         #[arg(long, value_delimiter = ',', value_name = "PERMISSIONS")]
         only: Option<Vec<String>>,
     },
-    /// Stop a plugin from running in this repository
-    Disable { name: String },
+    /// Stop a plugin from running in this repository: it takes out what
+    /// it wrote here, and its key is gone
+    Disable {
+        name: String,
+        /// Remove what the plugin kept of its own here as well
+        #[arg(long)]
+        purge: bool,
+        /// Do not run the plugin one last time
+        #[arg(long)]
+        no_cleanup: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -636,10 +651,24 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                 println!("{name} {}  {}", listed.latest, listed.about);
             }
         }
-        PluginCmd::Remove { name } => match plugins::uninstall(name)? {
-            true => println!("{name} is removed. Repositories that enabled it say that it is missing."),
-            false => return Err(format!("the plugin `{name}` is not installed")),
-        },
+        PluginCmd::Remove { name, no_cleanup } => {
+            let found =
+                plugins::installed(name).ok_or_else(|| format!("the plugin `{name}` is not installed"))?;
+            // One last time, for what it wrote outside any repository.
+            if !*no_cleanup {
+                said_cleaning(name, "for you", plugins::cleanup(&found, "person", &found.dir, &[]));
+            }
+            let still =
+                here().iter().any(|plugin| plugin["name"] == name.as_str() && plugin["enabled"] == true);
+            plugins::uninstall(name)?;
+            println!("{name} is removed.");
+            match still {
+                true => println!(
+                    "This repository still enables it, and says that it is missing: `kito plugin disable {name}`."
+                ),
+                false => println!("Repositories that enabled it say that it is missing."),
+            }
+        }
         PluginCmd::List => {
             let (installed, here) = (plugins::all_installed(), here());
             let said = |name: &str| here.iter().find(|plugin| plugin["name"] == name);
@@ -744,15 +773,58 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                 );
             }
         }
-        PluginCmd::Disable { name } => {
-            let done: Value = daemon(cli)?.call("plugin_disable", json!({ "name": name })).map_err(fail)?;
-            match done["changed"] == true {
-                true => println!("{name} is disabled in this repository."),
-                false => println!("{name} was not enabled in this repository."),
+        PluginCmd::Disable { name, purge, no_cleanup } => {
+            let mut client = daemon(cli)?;
+            // One last time, while it still has its key: what it wrote
+            // in the project comes out with it.
+            if !*no_cleanup {
+                let listed: Value = client.call("plugins", json!({})).unwrap_or(Value::Null);
+                let plugin = listed.as_array().into_iter().flatten().find(|plugin| {
+                    plugin["name"] == name.as_str() && plugin["enabled"] == true && plugin["cleanup"] == true
+                });
+                if let Some(program) = plugin.and_then(|plugin| plugin["program"].as_str()) {
+                    let root = root_of(cli)?;
+                    let key: Value = client.call("plugin_key", json!({ "name": name })).map_err(fail)?;
+                    let ran = plugins::run_plugin(
+                        Path::new(program),
+                        &["cleanup", "repository"],
+                        &root,
+                        key["key"].as_str().unwrap_or_default(),
+                        &[],
+                        plugins::CLEANUP_WITHIN,
+                    );
+                    let ran = ran.map(|printed| String::from_utf8_lossy(&printed).trim().to_owned());
+                    said_cleaning(name, "here", Some(ran));
+                }
+            }
+            let done: Value =
+                client.call("plugin_disable", json!({ "name": name, "purge": purge })).map_err(fail)?;
+            match (done["changed"] == true, purge) {
+                (true, true) => {
+                    println!("{name} is disabled in this repository, and what it kept here is removed.")
+                }
+                (true, false) => println!("{name} is disabled in this repository."),
+                (false, _) => println!("{name} was not enabled in this repository."),
             }
         }
     }
     Ok(())
+}
+
+/// Says how a plugin's last run went: what it printed, or that it failed,
+/// which stops nothing. A broken plugin is not the one that cannot go.
+fn said_cleaning(name: &str, place: &str, ran: Option<Result<String, String>>) {
+    match ran {
+        None => {}
+        Some(Ok(printed)) => {
+            for line in printed.lines() {
+                println!("  {line}");
+            }
+        }
+        Some(Err(why)) => {
+            eprintln!("kito: the plugin `{name}` did not take out what it wrote {place} ({why}): it goes all the same")
+        }
+    }
 }
 
 /// Runs a program of an enabled plugin in the repository, with what it

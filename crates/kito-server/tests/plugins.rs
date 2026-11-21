@@ -200,3 +200,74 @@ fn a_plugin_is_told_what_happens_on_the_server() {
         let _ = daemon.call_value("shutdown", serde_json::json!({}));
     }
 }
+
+const LEAVES: &str = r#"name = "hello"
+version = "0.9.0"
+api = 2
+permissions = ["server_events"]
+
+[[server_event]]
+kinds = ["user_added"]
+
+[cleanup]
+about = "Takes out what it set up"
+"#;
+
+#[test]
+fn a_plugin_is_taken_off_a_server_as_cleanly_as_it_went_on() {
+    let (tmp, dir) = new_server();
+    let source = hello_plugin(tmp.path(), LEAVES);
+    let told = tmp.path().join("cleaned");
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_kito-server"))
+            .arg("--dir")
+            .arg(&dir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", dir.join(".personal-config"))
+            .env("KITO_HELLO_CLEANED", &told)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    assert!(run(&["plugin", "add", "--path", source.to_str().unwrap()]).0);
+    assert!(run(&["plugin", "enable", "hello"]).0);
+    // It keeps something of its own on the server.
+    assert!(run(&["user", "add", "ada"]).0);
+    let own = dir.join("plugins/hello");
+    assert!(own.join("events.log").is_file());
+
+    // What a server runs is not pulled from under it.
+    let (ok, said) = run(&["plugin", "remove", "hello"]);
+    assert!(
+        !ok && said.contains("is enabled on this server: `kito-server plugin disable hello` first"),
+        "{said}"
+    );
+
+    // Disabled: run one last time, as the server's. What it kept stays.
+    let (ok, said) = run(&["plugin", "disable", "hello"]);
+    assert!(ok && said.contains("hello is disabled on this server."), "{said}");
+    assert_eq!(fs::read_to_string(&told).unwrap(), "server server=true\n");
+    assert!(own.join("events.log").is_file());
+    // With --purge, that goes too; with --no-cleanup, it is not run.
+    assert!(run(&["plugin", "enable", "hello"]).0);
+    fs::remove_file(&told).unwrap();
+    let (ok, said) = run(&["plugin", "disable", "hello", "--purge", "--no-cleanup"]);
+    assert!(ok && said.contains("and what it kept here is removed"), "{said}");
+    assert!(!told.exists() && !own.exists());
+
+    // Removed from the machine: one last time for the server's user, and
+    // the server says nothing of it any more.
+    let (ok, said) = run(&["plugin", "remove", "hello"]);
+    assert!(ok && said.contains("hello is removed from this machine."), "{said}");
+    assert_eq!(fs::read_to_string(&told).unwrap(), "person server=false\n");
+    assert!(!dir.join(".personal-config/plugins/hello").exists());
+    assert!(!run(&["plugin", "list"]).1.contains("hello"));
+    assert!(!fs::read_to_string(dir.join("server.toml")).unwrap().contains("hello"));
+    let (ok, said) = run(&["plugin", "remove", "hello"]);
+    assert!(!ok && said.contains("the plugin `hello` is not installed"), "{said}");
+}

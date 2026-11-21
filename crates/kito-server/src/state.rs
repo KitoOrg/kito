@@ -653,15 +653,34 @@ impl Server {
 
     /// Disables a plugin: nothing of it runs on this server. `false`: it
     /// was not enabled.
-    pub fn disable_plugin(&mut self, name: &str) -> Result<bool, String> {
-        match self.config.plugins.get_mut(name).filter(|plugin| plugin.enabled) {
-            Some(plugin) => {
-                plugin.enabled = false;
-                let _ = std::fs::remove_file(self.failure_file(name));
-                self.save().map(|()| true)
-            }
+    pub fn disable_plugin(&mut self, name: &str, purge: bool) -> Result<bool, String> {
+        let was = self.config.plugins.get_mut(name).filter(|plugin| plugin.enabled).map(|plugin| {
+            plugin.enabled = false;
+        });
+        let _ = std::fs::remove_file(self.failure_file(name));
+        // What it kept of its own here stays for when it is enabled
+        // again, unless asked otherwise.
+        if purge && kitod::plugins::check_name("plugin", name).is_ok() {
+            let _ = std::fs::remove_dir_all(self.plugin_dir(name));
+        }
+        match was {
+            Some(()) => self.save().map(|()| true),
             None => Ok(false),
         }
+    }
+
+    /// Forgets a plugin that is not enabled: the server says nothing of
+    /// it any more. `Err`: it is enabled.
+    pub fn forget_plugin(&mut self, name: &str) -> Result<(), String> {
+        if self.config.plugins.get(name).is_some_and(|plugin| plugin.enabled) {
+            return Err(format!(
+                "the plugin `{name}` is enabled on this server: `kito-server plugin disable {name}` first"
+            ));
+        }
+        if self.config.plugins.remove(name).is_some() {
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// The plugins that run here: enabled, installed, written for an API

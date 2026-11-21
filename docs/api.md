@@ -134,7 +134,7 @@ it means.
 | `import_scip` | `file` | Reads who uses what from a SCIP index |
 | `reload` | | Reads the configuration again |
 | `plugin_enable` | `name`, `[permissions]` | The plugin, as the repository has it now |
-| `plugin_disable` | `name` | Whether something changed |
+| `plugin_disable` | `name`, `[purge]` | Whether something changed. The plugin's key is removed; with `purge`, what it kept in the repository too |
 
 A method this page does not list needs `admin`.
 

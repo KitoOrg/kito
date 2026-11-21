@@ -2720,3 +2720,90 @@ fn a_plugin_is_installed_by_its_name_from_a_registry() {
     // A name or a directory, not both and not neither.
     assert!(!me(&["plugin", "add"]).0);
 }
+
+const LEAVES: &str = r#"name = "hello"
+version = "0.9.0"
+api = 2
+permissions = ["read"]
+
+[assistant]
+name = "hello"
+
+[cleanup]
+about = "Takes HELLO.md out of the project"
+"#;
+
+#[test]
+fn a_plugin_takes_out_what_it_wrote_when_it_goes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let source = hello_plugin(root, LEAVES);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    let (rules, own) = (root.join("HELLO.md"), root.join(".kito/plugins/hello"));
+    let set_up = || {
+        ok(root, &["plugin", "enable", "hello"]);
+        ok(root, &["assistant", "add", "hello"]);
+        assert!(rules.is_file() && own.join("key").is_file());
+        // Something of its own, kept in the repository.
+        fs::write(own.join("notes"), "what it remembers").unwrap();
+    };
+
+    // Disabled: it is run one last time, and what it wrote in the project
+    // comes out. Its key is gone; what it kept stays for the next time.
+    set_up();
+    let said = ok(root, &["plugin", "disable", "hello"]);
+    assert_eq!(said, "  took HELLO.md out\nhello is disabled in this repository.\n");
+    assert!(!rules.exists() && !own.join("key").exists() && own.join("notes").is_file());
+    assert_eq!(ok(root, &["plugin", "disable", "hello"]), "hello was not enabled in this repository.\n");
+
+    // With --purge, what it kept goes too; with --no-cleanup, it is not run.
+    set_up();
+    let said = ok(root, &["plugin", "disable", "hello", "--purge", "--no-cleanup"]);
+    assert_eq!(said, "hello is disabled in this repository, and what it kept here is removed.\n");
+    assert!(rules.is_file() && !own.exists());
+    fs::remove_file(&rules).unwrap();
+
+    // A cleanup that fails is said, and the plugin goes all the same.
+    set_up();
+    fs::write(root.join("CLEANUP_FAIL"), "").unwrap();
+    let out = kito(root, &["plugin", "disable", "hello"]);
+    let warned = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{warned}");
+    assert!(
+        warned.contains("did not take out what it wrote here") && warned.contains("it would not come out"),
+        "{warned}"
+    );
+    assert!(warned.contains("it goes all the same"), "{warned}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello is disabled in this repository.\n");
+    assert!(
+        ok(root, &["plugin", "list"]).contains("not enabled") || !ok(root, &["status"]).contains("Plugin")
+    );
+    fs::remove_file(root.join("CLEANUP_FAIL")).unwrap();
+
+    // Removed from the person's machine: one last time for what it wrote
+    // outside any repository, and the repository that still wants it is said.
+    set_up();
+    let told = root.join("cleaned");
+    let out = command(root, &["plugin", "remove", "hello"])
+        .env("KITO_NO_CLAUDE", "1")
+        .env("KITO_HELLO_CLEANED", &told)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(said.starts_with("hello is removed.\nThis repository still enables it"), "{said}");
+    assert!(said.contains("`kito plugin disable hello`"), "{said}");
+    assert_eq!(fs::read_to_string(&told).unwrap(), "person server=false\n");
+    assert!(!root.join(".absent-personal-config/plugins/hello").exists());
+    // Gone, it can still be disabled here: nothing is left to run.
+    assert_eq!(
+        ok(root, &["plugin", "disable", "hello", "--purge"]),
+        "hello is disabled in this repository, and what it kept here is removed.\n"
+    );
+    assert!(!own.exists());
+    let again = kito(root, &["plugin", "remove", "hello"]);
+    assert!(String::from_utf8_lossy(&again.stderr).contains("the plugin `hello` is not installed"));
+    ok(root, &["daemon", "stop"]);
+}

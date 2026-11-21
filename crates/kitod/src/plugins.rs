@@ -248,6 +248,34 @@ pub struct AssistantSpec {
     pub name: String,
 }
 
+/// A plugin that has something to take out when it goes (ADR 0008):
+/// `kito-<plugin> cleanup repository | server | person` is run one last
+/// time where it is disabled or removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CleanupSpec {
+    /// What it takes out, for whoever reads the manifest.
+    pub about: String,
+}
+
+/// How long a plugin has to take out what it wrote.
+pub const CLEANUP_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs an installed plugin's cleanup for a place (`server`, `person`),
+/// in `dir` and with `envs`. `None`: it has none to run. What it printed,
+/// or why it failed: a cleanup that fails stops nothing.
+pub fn cleanup(
+    found: &Installed,
+    place: &str,
+    dir: &Path,
+    envs: &[(&str, std::ffi::OsString)],
+) -> Option<Result<String, String>> {
+    found.manifest.cleanup.as_ref()?;
+    let program = program(&found.dir, &found.manifest.name);
+    let ran = run_program(&program, &["cleanup", place], dir, envs, &[], CLEANUP_WITHIN);
+    Some(ran.map(|printed| String::from_utf8_lossy(&printed).trim().to_owned()))
+}
+
 /// A plugin that has something to say to an agent when a session starts
 /// (ADR 0007): `kito-<plugin> session` prints it, and Kito gives it after
 /// its own rules, saying whose words they are.
@@ -299,6 +327,8 @@ pub struct Manifest {
     pub assistant: Option<AssistantSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupSpec>,
     // What it does for a server (ADR 0006).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<SignInSpec>,
@@ -611,6 +641,9 @@ pub struct PluginInfo {
     /// It has something to say when a session starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub session: bool,
+    /// It has something to take out when it is disabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup: bool,
     /// What it last failed at, if it has not run well since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
@@ -645,6 +678,7 @@ pub fn info_of(name: &str, config: &PluginConfig) -> PluginInfo {
         tools: manifest.tools,
         assistant: manifest.assistant.map(|assistant| assistant.name),
         session: manifest.session.is_some(),
+        cleanup: manifest.cleanup.is_some(),
         commands: manifest.commands,
         program: found.map(|found| program(&found.dir, name)),
         problem,
@@ -697,18 +731,25 @@ impl crate::Repo {
         Ok(info)
     }
 
-    /// Disables a plugin here: nothing of it runs, and its key opens
-    /// nothing. `false`: it was not enabled.
-    pub fn disable_plugin(&mut self, name: &str) -> crate::Result<bool> {
-        let Some(mut config) = self.config().plugins.get(name).cloned().filter(|config| config.enabled)
-        else {
-            return Ok(false);
-        };
-        config.enabled = false;
-        write_config(&self.root().join(kito_store::STORE_DIR), name, Some(&config))
-            .map_err(crate::Error::Config)?;
-        self.set_plugin_config(name, config);
-        Ok(true)
+    /// Disables a plugin here: nothing of it runs, and its key is gone.
+    /// What it kept of its own here stays for when it is enabled again,
+    /// unless `purge`. `false`: it was not enabled.
+    pub fn disable_plugin(&mut self, name: &str, purge: bool) -> crate::Result<bool> {
+        let was = self.config().plugins.get(name).cloned().filter(|config| config.enabled);
+        if let Some(mut config) = was.clone() {
+            config.enabled = false;
+            write_config(&self.root().join(kito_store::STORE_DIR), name, Some(&config))
+                .map_err(crate::Error::Config)?;
+            self.set_plugin_config(name, config);
+        }
+        // Whether it was enabled or not: a name is a name before it is a path.
+        if check_name("plugin", name).is_ok() {
+            let _ = std::fs::remove_file(key_path(self.root(), name));
+            if purge {
+                let _ = std::fs::remove_dir_all(data_dir(self.root(), name));
+            }
+        }
+        Ok(was.is_some())
     }
 
     /// The key an enabled plugin says to the daemon.

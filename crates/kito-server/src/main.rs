@@ -69,8 +69,24 @@ enum PluginCmd {
         #[arg(long)]
         for_clients: bool,
     },
-    /// Stop a plugin from running on this server
-    Disable { name: String },
+    /// Stop a plugin from running on this server: it takes out what it
+    /// set up here
+    Disable {
+        name: String,
+        /// Remove what the plugin kept of its own on this server as well
+        #[arg(long)]
+        purge: bool,
+        /// Do not run the plugin one last time
+        #[arg(long)]
+        no_cleanup: bool,
+    },
+    /// Remove a plugin that is not enabled from the server's machine
+    Remove {
+        name: String,
+        /// Do not run the plugin one last time
+        #[arg(long)]
+        no_cleanup: bool,
+    },
     /// The plugins this server enabled, and what each was given
     List,
 }
@@ -232,6 +248,22 @@ fn adds(manifest: &kitod::plugins::Manifest) -> Vec<String> {
     adds
 }
 
+/// Says how a plugin's last run went: what it printed, or that it failed,
+/// which stops nothing.
+fn said_cleaning(name: &str, place: &str, ran: Option<Result<String, String>>) {
+    match ran {
+        None => {}
+        Some(Ok(printed)) => {
+            for line in printed.lines() {
+                println!("  {line}");
+            }
+        }
+        Some(Err(why)) => eprintln!(
+            "kito-server: the plugin `{name}` did not take out what it wrote {place} ({why}): it goes all the same"
+        ),
+    }
+}
+
 fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
     use kitod::plugins;
     match command {
@@ -286,12 +318,37 @@ fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
                 println!("  {what}");
             }
         }
-        PluginCmd::Disable { name } => {
+        PluginCmd::Disable { name, purge, no_cleanup } => {
             let mut server = Server::open(&dir_of(cli))?;
-            match server.disable_plugin(name)? {
-                true => println!("{name} is disabled on this server."),
-                false => println!("{name} was not enabled on this server."),
+            let enabled = server.config.plugins.get(name).is_some_and(|plugin| plugin.enabled);
+            // One last time, for what it set up on this server.
+            if let (true, false, Some(found)) = (enabled, *no_cleanup, plugins::installed(name)) {
+                let envs = [(state::ENV_SERVER_DIR, server.dir.as_os_str().to_owned())];
+                said_cleaning(name, "on this server", plugins::cleanup(&found, "server", &server.dir, &envs));
             }
+            match (server.disable_plugin(name, *purge)?, purge) {
+                (true, true) => {
+                    println!("{name} is disabled on this server, and what it kept here is removed.")
+                }
+                (true, false) => println!("{name} is disabled on this server."),
+                (false, _) => println!("{name} was not enabled on this server."),
+            }
+        }
+        PluginCmd::Remove { name, no_cleanup } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            // Disabled first: what runs is not pulled from under a server.
+            server.forget_plugin(name)?;
+            let found =
+                plugins::installed(name).ok_or_else(|| format!("the plugin `{name}` is not installed"))?;
+            if !*no_cleanup {
+                said_cleaning(
+                    name,
+                    "for the server's user",
+                    plugins::cleanup(&found, "person", &found.dir, &[]),
+                );
+            }
+            plugins::uninstall(name)?;
+            println!("{name} is removed from this machine.");
         }
         PluginCmd::List => {
             let server = Server::open(&dir_of(cli))?;

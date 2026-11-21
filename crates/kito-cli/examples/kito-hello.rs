@@ -169,6 +169,25 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // One last time, where it is disabled or removed (`[cleanup]`):
+        // it takes out what `assistant setup` wrote, and says where it
+        // was run in a file whoever tests it names.
+        Some("cleanup") => {
+            let place = args.get(1).cloned().unwrap_or_default();
+            let repo = PathBuf::from(said(kitod::plugins::ENV_REPO));
+            if place == "repository" && repo.join("CLEANUP_FAIL").is_file() {
+                eprintln!("hello: it would not come out");
+                return ExitCode::from(1);
+            }
+            if place == "repository" && std::fs::remove_file(repo.join("HELLO.md")).is_ok() {
+                println!("took HELLO.md out");
+            }
+            if let Some(told) = std::env::var_os("KITO_HELLO_CLEANED") {
+                let server = !said("KITO_SERVER_DIR").is_empty();
+                let _ = std::fs::write(told, format!("{place} server={server}\n"));
+            }
+            ExitCode::SUCCESS
+        }
         // What it says when a session starts (`[session]`).
         Some("session") => {
             println!("Mind the step.");
