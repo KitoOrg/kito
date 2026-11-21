@@ -1933,7 +1933,7 @@ fn a_lane_is_reviewed_from_the_command_line() {
     assert!(ok(root, &["board"]).contains("active (changes requested by ada)"));
     assert!(ok(root, &["lanes"]).contains("[changes requested by ada]"));
     let waits = ok(root, &["integrate", "1"]);
-    assert!(waits.contains("it waits for its review: changes requested by ada"), "{waits}");
+    assert!(waits.contains("it waits: changes requested by ada"), "{waits}");
     assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), shop);
     assert!(ok(root, &["board"]).contains("awaiting approval (asked by ada; changes requested by ada)"));
 
@@ -2086,4 +2086,171 @@ fn what_is_not_a_plugin_is_not_installed() {
     assert!(String::from_utf8_lossy(&none.stderr).contains("kito-plugin.toml"));
     assert!(String::from_utf8_lossy(&kito(root, &["plugin", "info", "hello"]).stderr)
         .contains("is not installed"));
+}
+
+const GATED: &str = "name = \"hello\"\nversion = \"0.2.0\"\napi = 1\npermissions = [\"read\"]\n\n[[gate]]\nname = \"licence\"\nabout = \"Every file is allowed in\"\n\n[[event]]\nkinds = [\"lane_opened\", \"commented\"]\n";
+
+/// How asking to integrate lane/1 ended, however it did.
+fn integrate_json(root: &Path) -> Value {
+    let out = kito(root, &["integrate", "1", "--json"]);
+    let results: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!("{e}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    });
+    results[0].clone()
+}
+
+/// Waits until `done` says so; fails after twenty seconds.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "still waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_gate_of_a_plugin_passes_fails_or_says_to_wait() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
+    fs::write(root.join("shop.ts"), "export const price = 1;\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    let source = hello_plugin(root, GATED);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    ok(root, &["plugin", "enable", "hello"]);
+    let info = ok(root, &["plugin", "info", "hello"]);
+    assert!(info.contains("gate licence  Every file is allowed in"), "{info}");
+    assert!(info.contains("run for: lane_opened, commented"), "{info}");
+    assert!(ok(root, &["status"]).contains("Plugin ............ hello 0.2.0 (read)"));
+
+    ok(root, &["lane", "open", "alice", "--intent", "a cheaper price", "--scope", "./"]);
+    let work = root.join(".kito/lanes/1/work");
+
+    // The gate is asked after the checks, and passes: it is in what was
+    // verified, with them.
+    fs::write(work.join("shop.ts"), "export const price = 0.5;\n").unwrap();
+    let done = integrate_json(root);
+    assert_eq!(done["result"], "integrated", "{done}");
+    assert_eq!(done["verification"]["commands"], serde_json::json!(["plugin hello: gate licence"]));
+
+    // It fails: nothing is integrated, and it says why, about what it was told.
+    fs::write(work.join("shop.ts"), "export const price = 0.25;\n").unwrap();
+    fs::write(work.join("GATE_FAIL"), "prices under 0.5 are not allowed\n").unwrap();
+    let failed = integrate_json(root);
+    assert_eq!(failed["result"], "verification_failed", "{failed}");
+    assert_eq!(failed["verification"]["failed_command"], "plugin hello: gate licence");
+    let why = failed["verification"]["output"].as_str().unwrap();
+    assert_eq!(why, "prices under 0.5 are not allowed: lane/1 by alice (2 files) onto main");
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), "export const price = 0.5;\n");
+    let said = String::from_utf8_lossy(&kito(root, &["integrate", "1"]).stdout).into_owned();
+    assert!(said.contains("plugin hello: gate licence") && said.contains("are not allowed"), "{said}");
+
+    // It says to wait: nothing failed, and the lane waits with its reason.
+    fs::remove_file(work.join("GATE_FAIL")).unwrap();
+    fs::write(work.join("GATE_WAIT"), "the ticket SHOP-12 is not approved yet\n").unwrap();
+    let waits = integrate_json(root);
+    assert_eq!(waits["result"], "awaiting_approval", "{waits}");
+    assert_eq!(
+        waits["missing"],
+        "the gate `licence` of the plugin `hello`: the ticket SHOP-12 is not approved yet"
+    );
+    assert!(ok(root, &["integrate", "1"]).contains("it waits: the gate `licence` of the plugin `hello`"));
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), "export const price = 0.5;\n");
+
+    // Asked again when integration is, it lets the lane in.
+    fs::remove_file(work.join("GATE_WAIT")).unwrap();
+    assert_eq!(integrate_json(root)["result"], "integrated");
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), "export const price = 0.25;\n");
+
+    // Disabled, the plugin gates nothing.
+    ok(root, &["plugin", "disable", "hello"]);
+    fs::write(work.join("shop.ts"), "export const price = 0.1;\n").unwrap();
+    fs::write(work.join("GATE_FAIL"), "never asked\n").unwrap();
+    let free = integrate_json(root);
+    assert_eq!(
+        (free["result"].as_str(), free["verification"].is_null()),
+        (Some("integrated"), true),
+        "{free}"
+    );
+}
+
+#[test]
+fn a_gate_that_gives_no_answer_or_never_ends_is_a_gate_that_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
+    fs::write(root.join("shop.ts"), "export const price = 1;\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    let manifest = "name = \"hello\"\nversion = \"0.2.0\"\napi = 1\n\n[[gate]]\nname = \"mute\"\n";
+    let source = hello_plugin(root, manifest);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    ok(root, &["plugin", "enable", "hello"]);
+    ok(root, &["lane", "open", "alice", "--intent", "a cheaper price", "--scope", "./"]);
+    fs::write(root.join(".kito/lanes/1/work/shop.ts"), "export const price = 0.5;\n").unwrap();
+
+    let mute = integrate_json(root);
+    assert_eq!(mute["result"], "verification_failed", "{mute}");
+    assert!(
+        mute["verification"]["output"].as_str().unwrap().contains("gave no answer that can be read"),
+        "{mute}"
+    );
+
+    // One that never ends is stopped when its time is up.
+    let slow = manifest.replace("\"mute\"", "\"slow\"\ntimeout_secs = 1");
+    let source = hello_plugin(root, &slow);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    let stopped = integrate_json(root);
+    assert_eq!(stopped["result"], "verification_failed", "{stopped}");
+    assert_eq!(stopped["verification"]["output"], "still running after 1 s: stopped");
+    assert_eq!(fs::read_to_string(root.join("shop.ts")).unwrap(), "export const price = 1;\n");
+}
+
+#[test]
+fn a_plugin_is_run_for_the_events_it_listed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
+    fs::write(root.join("shop.ts"), "export const price = 1;\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    let source = hello_plugin(root, GATED);
+    ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    ok(root, &["plugin", "enable", "hello"]);
+    let log = root.join(".kito/plugins/hello/events.log");
+    let told = || fs::read_to_string(&log).unwrap_or_default();
+
+    // After the fact, in order, and only the kinds it listed.
+    ok(root, &["lane", "open", "alice", "--intent", "a cheaper price", "--scope", "./"]);
+    ok(root, &["lane", "comment", "1", "Cheaper by how much?"]);
+    ok(root, &["lane", "comment", "1", "By half."]);
+    wait_until("the plugin to be told", || told().lines().count() == 3);
+    let lines: Vec<String> = told().lines().map(str::to_owned).collect();
+    assert!(lines[0].starts_with("lane_opened lane/1 "), "{lines:?}");
+    assert_eq!(lines[1..], ["commented lane/1 Cheaper by how much?", "commented lane/1 By half."]);
+
+    // One that fails is said, and the next event is still delivered.
+    ok(root, &["lane", "comment", "1", "This will explode."]);
+    wait_until("the failure to be known", || {
+        ok(root, &["plugin", "list"]).contains("last failed on `commented`")
+    });
+    let listed = ok(root, &["plugin", "list"]);
+    assert!(listed.contains("exit code 1: hello: it exploded"), "{listed}");
+    assert!(ok(root, &["plugin", "info", "hello"]).contains("it last failed on `commented`"));
+    assert!(ok(root, &["status"]).contains("Plugin ............ hello 0.2.0: last failed on `commented`"));
+    ok(root, &["lane", "comment", "1", "And after."]);
+    wait_until("the event after the failure", || told().contains("commented lane/1 And after."));
+    // It ran well since: nothing is held against it.
+    wait_until("the failure to be forgotten", || !ok(root, &["plugin", "list"]).contains("last failed"));
+
+    // Disabled, it is told nothing more.
+    ok(root, &["plugin", "disable", "hello"]);
+    ok(root, &["lane", "comment", "1", "Said to nobody."]);
+    ok(root, &["lane", "comment", "1", "Nor this."]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!told().contains("Said to nobody"), "{}", told());
 }

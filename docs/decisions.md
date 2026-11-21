@@ -1309,6 +1309,23 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-152 · Gates are asked with the checks; events are told after the fact
+A gate of a plugin runs where the checks do and as they do: in the copy
+of the merged result, after the commands, confined, stopped when its time
+is up, and in the same run when several lanes are checked together (it is
+then told every lane in the copy, and a run that fails is split as for
+any check). So a gate needs no machinery of its own, and what it said is
+in the verification of the checkpoint. It is told what it needs on its
+input and given no key. "Wait" is a report that did not pass and says
+why (`waits`): the lane is left `awaiting_approval` with that as what is
+missing, before the review is asked. Events are told by a thread that
+reads the daemon's own events and hands each to a queue per plugin: one
+at a time and in order for a plugin, never holding up what happened, and
+never anybody else's plugin. What a plugin last failed at is kept in the
+daemon until it runs well again, and is forgotten when the daemon stops.
+A plugin is not told its own `plugin_failed`. The lane of an event is
+named as the answer names it (`lane/1`), not as it was typed.
+
 ### D-151 · A plugin says a key of its own, and a method needs one permission
 The first line on the daemon's socket is a key. The socket's own key is
 whoever can read the repository's data, as before; the key of a plugin

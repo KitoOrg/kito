@@ -159,6 +159,30 @@ pub struct Command {
     pub about: String,
 }
 
+/// Events a plugin is run for: `kito-<name> event`, with the event as
+/// JSON on its input, one at a time and in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventSpec {
+    /// `integrated`, `commented`, `reviewed`…: as `kito watch` shows them.
+    pub kinds: Vec<String>,
+    /// Seconds after which it is stopped (default 30).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// A gate of integration: `kito-<name> gate <gate>` is asked before a
+/// lane is integrated, after the checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GateSpec {
+    pub name: String,
+    pub about: String,
+    /// Seconds after which it is stopped and counts as failed (default 60).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
 /// What a plugin is, as its `kito-plugin.toml` says.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -172,6 +196,31 @@ pub struct Manifest {
     pub permissions: Vec<Permission>,
     #[serde(rename = "command", skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<Command>,
+    #[serde(rename = "event", skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventSpec>,
+    #[serde(rename = "gate", skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<GateSpec>,
+}
+
+/// A gate, ready to be asked.
+#[derive(Clone, Debug)]
+pub struct GateRun {
+    pub plugin: String,
+    pub name: String,
+    pub program: PathBuf,
+    pub timeout: std::time::Duration,
+}
+
+/// A plugin that is run for events, and which.
+#[derive(Clone, Debug)]
+pub struct EventRun {
+    pub plugin: String,
+    pub program: PathBuf,
+    pub kinds: Vec<String>,
+    pub timeout: std::time::Duration,
+    /// The key it says to the daemon.
+    pub key: String,
+    pub root: PathBuf,
 }
 
 /// A name a plugin, or a command of one, can have: what is safe as a
@@ -201,6 +250,9 @@ impl Manifest {
         check_name("plugin", &manifest.name).map_err(|e| format!("{}: {e}", path.display()))?;
         for command in &manifest.commands {
             check_name("command", &command.name).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        for gate in &manifest.gates {
+            check_name("gate", &gate.name).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         if manifest.api == 0 {
             return Err(format!(
@@ -342,6 +394,15 @@ pub struct PluginInfo {
     pub asks: Vec<Permission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<Command>,
+    /// The gates of integration it adds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<String>,
+    /// The events it is run for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    /// What it last failed at, if it has not run well since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
     /// Where its program is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<PathBuf>,
@@ -366,6 +427,9 @@ impl crate::Repo {
             version: manifest.version,
             description: manifest.description,
             asks: manifest.permissions,
+            gates: manifest.gates.iter().map(|gate| gate.name.clone()).collect(),
+            events: manifest.events.iter().flat_map(|event| event.kinds.iter().cloned()).collect(),
+            last_failure: None,
             commands: manifest.commands,
             program: found.map(|found| program(&found.dir, name)),
             problem,
@@ -431,6 +495,73 @@ impl crate::Repo {
                 "the plugin `{name}` is not enabled in this repository: `kito plugin enable {name}`"
             ))),
         }
+    }
+
+    /// The plugins that run here: enabled, installed, and written for an
+    /// API this daemon speaks.
+    fn running(&self) -> Vec<Installed> {
+        let enabled = self.config().plugins.iter().filter(|(_, config)| config.enabled);
+        enabled
+            .filter_map(|(name, _)| installed(name))
+            .filter(|found| found.manifest.unfit().is_none())
+            .collect()
+    }
+
+    /// The gates an integration asks, in the order of the plugins' names.
+    pub fn gate_runs(&self) -> Vec<GateRun> {
+        let mut gates = Vec::new();
+        for found in self.running() {
+            for gate in &found.manifest.gates {
+                gates.push(GateRun {
+                    plugin: found.manifest.name.clone(),
+                    name: gate.name.clone(),
+                    program: program(&found.dir, &found.manifest.name),
+                    timeout: std::time::Duration::from_secs(gate.timeout_secs.unwrap_or(60).max(1)),
+                });
+            }
+        }
+        gates
+    }
+
+    /// The plugins that are run for events.
+    pub fn event_runs(&self) -> Vec<EventRun> {
+        let mut runs = Vec::new();
+        for found in self.running() {
+            let name = &found.manifest.name;
+            let Ok(key) = ensure_key(self.root(), name) else { continue };
+            for event in found.manifest.events.iter().filter(|event| !event.kinds.is_empty()) {
+                runs.push(EventRun {
+                    plugin: name.clone(),
+                    program: program(&found.dir, name),
+                    kinds: event.kinds.clone(),
+                    timeout: std::time::Duration::from_secs(event.timeout_secs.unwrap_or(30).max(1)),
+                    key: key.clone(),
+                    root: self.root().to_owned(),
+                });
+            }
+        }
+        runs
+    }
+
+    /// What the gates of an integration are told: where the work lands,
+    /// and each lane that is in the copy they look at, with its diff.
+    pub fn gates_told(&self, lanes: &[kito_core::LaneId], target: kito_core::LaneId) -> serde_json::Value {
+        let told: Vec<serde_json::Value> = lanes
+            .iter()
+            .map(|lane| {
+                let info = self.lane_info(*lane).ok();
+                let field = |get: fn(&crate::lanes::LaneInfo) -> Option<String>| info.as_ref().and_then(get);
+                serde_json::json!({
+                    "lane": lane.to_string(),
+                    "agent": field(|info| Some(info.agent.clone())),
+                    "owner": field(|info| info.owner.clone()),
+                    "intent": field(|info| info.intent.clone()),
+                    "task": field(|info| info.task.clone()),
+                    "diff": self.lane_diff(*lane, &[]).ok(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "api": crate::rpc::API, "target": crate::lanes::lane_word(target), "lanes": told })
     }
 
     /// Who said this key, among the plugins enabled here.

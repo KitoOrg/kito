@@ -19,8 +19,19 @@ Plugins ([ADR 0005](docs/adr/0005-plugins.md)), under way:
   permission that is missing. Each plugin has a key of its own.
 - The daemon's methods are a numbered API, version 1, written down in
   [docs/api.md](docs/api.md); `ping` answers `api`.
-- Not yet: installing from a release by name, events, gates, tools for
-  agents, assistants.
+- **Gates**: a plugin's `[[gate]]` is asked before a lane is integrated,
+  after the checks, in the same confined copy: it answers pass, fail
+  (the lane's checks failed, naming the gate) or wait (the lane waits,
+  with the gate's reason, and is asked again). No answer in time is a
+  failure.
+- **Events**: a plugin's `[[event]]` lists kinds; it is run for each,
+  one at a time and in order, after the fact. What a plugin last failed
+  at is in `kito status` and `kito plugin list`, and told as
+  `plugin_failed`.
+- An integration that waits says `it waits: …` (for its review, or for a
+  gate). Events name their lane `lane/1` however it was typed.
+- Not yet: installing from a release by name, tools for agents,
+  assistants.
 
 ## [0.19.0]
 

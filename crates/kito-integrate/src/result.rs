@@ -83,6 +83,10 @@ pub struct VerificationReport {
     /// empty when the lane was checked by itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch: Vec<String>,
+    /// A gate of a plugin said to wait, and why (ADR 0005): nothing
+    /// failed, and the lane is not integrated yet. `passed` is then false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<String>,
 }
 
 /// The structured result of an integration.

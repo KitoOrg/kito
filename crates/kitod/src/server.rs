@@ -76,6 +76,11 @@ fn percentile(samples: &VecDeque<f64>, p: f64) -> Option<f64> {
 }
 
 struct Daemon {
+    /// What each plugin last failed at, if it has not run well since.
+    plugin_failures: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Counts the times a plugin was enabled or disabled: who listens to
+    /// events is read again then.
+    plugins_changed: AtomicU64,
     root: PathBuf,
     socket: PathBuf,
     /// What a client says first on the socket. `None` if it could not be
@@ -385,9 +390,14 @@ impl Daemon {
                     json!({ "version": env!("CARGO_PKG_VERSION"), "api": rpc::API, "pid": std::process::id() }),
                 ),
                 // Plugins (ADR 0005).
-                "plugins" => to_json(serde_json::to_value(
-                    self.with_repo(|repo| Ok(repo.plugins())).map_err(internal)?,
-                )),
+                "plugins" => {
+                    let mut plugins = self.with_repo(|repo| Ok(repo.plugins())).map_err(internal)?;
+                    let failures = self.plugin_failures.lock().unwrap_or_else(|e| e.into_inner());
+                    for plugin in &mut plugins {
+                        plugin.last_failure = failures.get(&plugin.name).cloned();
+                    }
+                    to_json(serde_json::to_value(plugins))
+                }
                 "plugin_enable" => {
                     let name = text("name")?;
                     let permissions: Option<Vec<crate::plugins::Permission>> = match params.get("permissions")
@@ -400,13 +410,16 @@ impl Daemon {
                             )
                         })?),
                     };
-                    to_json(serde_json::to_value(
-                        self.with_repo(|repo| repo.enable_plugin(name, permissions)).map_err(internal)?,
-                    ))
+                    let enabled =
+                        self.with_repo(|repo| repo.enable_plugin(name, permissions)).map_err(internal)?;
+                    self.plugins_changed.fetch_add(1, Ordering::Relaxed);
+                    to_json(serde_json::to_value(enabled))
                 }
                 "plugin_disable" => {
                     let name = text("name")?;
                     let changed = self.with_repo(|repo| repo.disable_plugin(name)).map_err(internal)?;
+                    self.plugins_changed.fetch_add(1, Ordering::Relaxed);
+                    self.plugin_failures.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
                     Ok(json!({ "name": name, "changed": changed }))
                 }
                 "plugin_key" => {
@@ -1032,7 +1045,8 @@ impl Daemon {
     fn note(&self, method: &str, params: &Value, value: &Value) {
         let text = |from: &Value, key: &str| from.get(key).and_then(Value::as_str).map(str::to_owned);
         let person = params.get("on_behalf_of").and_then(|person| text(person, "name"));
-        let lane = text(params, "lane").or_else(|| text(value, "lane"));
+        // As the answer names it (`lane/1`), else as it was asked.
+        let lane = text(value, "lane").or_else(|| text(params, "lane"));
         let list = |from: &Value, key: &str| -> String {
             let items: Vec<&str> = from
                 .get(key)
@@ -1767,6 +1781,113 @@ async fn integration_loop(daemon: Arc<Daemon>) {
     }
 }
 
+/// Runs a plugin for one event: `kito-<name> event`, with the event as
+/// JSON on its input. `Err`: why it failed.
+fn run_for_event(run: &crate::plugins::EventRun, event: &rpc::Event) -> std::result::Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(&run.program)
+        .arg("event")
+        .current_dir(&run.root)
+        .env(crate::plugins::ENV_REPO, &run.root)
+        .env(crate::plugins::ENV_API, rpc::API.to_string())
+        .env(crate::plugins::ENV_KEY, &run.key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", run.program.display()))?;
+    if let Some(mut input) = child.stdin.take() {
+        // One that does not read what it is told is its own business.
+        let _ = input.write_all(&serde_json::to_vec(event).unwrap_or_default());
+    }
+    let deadline = Instant::now() + run.timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                let mut said = String::new();
+                if let Some(mut errors) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut errors, &mut said);
+                }
+                let how =
+                    status.code().map_or("killed by a signal".to_owned(), |code| format!("exit code {code}"));
+                let said: String =
+                    said.trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+                return Err(format!("{how}{}{said}", if said.is_empty() { "" } else { ": " }));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {} s: stopped", run.timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Tells the plugins what happens: each is run for the events it listed,
+/// one at a time and in order, after the fact. Nothing waits for them.
+fn plugin_events(daemon: &Arc<Daemon>) {
+    use std::sync::mpsc;
+    type Told = (crate::plugins::EventRun, rpc::Event);
+    let (_, mut seen) = daemon.events.after(None, Duration::ZERO);
+    let mut workers: std::collections::HashMap<String, mpsc::Sender<Told>> = Default::default();
+    // Which plugins listen is read again when it may have changed, not
+    // for every save.
+    let mut runs: Vec<crate::plugins::EventRun> = Vec::new();
+    let mut read_at: Option<(Instant, u64)> = None;
+    loop {
+        let (events, next) = daemon.events.after(Some(seen), Duration::from_secs(5));
+        seen = next;
+        for event in events {
+            let changed = daemon.plugins_changed.load(Ordering::Relaxed);
+            if read_at.is_none_or(|(at, then)| then != changed || at.elapsed() > Duration::from_secs(2)) {
+                runs = match daemon.with_repo(|repo| Ok(repo.event_runs())) {
+                    Ok(runs) => runs,
+                    // The repository is closed: the daemon is going.
+                    Err(_) => return,
+                };
+                read_at = Some((Instant::now(), changed));
+            }
+            for run in runs.iter().filter(|run| run.kinds.contains(&event.kind)) {
+                // Its own failure is not told back to it, over and over.
+                if event.kind == "plugin_failed" && event.by.as_deref() == Some(run.plugin.as_str()) {
+                    continue;
+                }
+                let worker = workers.entry(run.plugin.clone()).or_insert_with(|| {
+                    let (send, receive) = mpsc::channel::<Told>();
+                    let daemon = daemon.clone();
+                    let _ = std::thread::Builder::new().name("plugin-event".into()).spawn(move || {
+                        for (run, event) in receive {
+                            let outcome = run_for_event(&run, &event);
+                            let mut failures =
+                                daemon.plugin_failures.lock().unwrap_or_else(|e| e.into_inner());
+                            match outcome {
+                                Ok(()) => drop(failures.remove(&run.plugin)),
+                                Err(why) => {
+                                    let what = format!("on `{}`: {why}", event.kind);
+                                    failures.insert(run.plugin.clone(), what.clone());
+                                    drop(failures);
+                                    daemon.events.emit(
+                                        "plugin_failed",
+                                        event.lane.clone(),
+                                        Some(run.plugin.clone()),
+                                        what,
+                                    );
+                                }
+                            }
+                        }
+                    });
+                    send
+                });
+                let _ = worker.send((run.clone(), event.clone()));
+            }
+        }
+    }
+}
+
 async fn serve_connection(daemon: Arc<Daemon>, stream: Box<dyn crate::ipc::Connection>) {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
@@ -1922,6 +2043,8 @@ pub async fn serve(root: &Path) -> Result<()> {
         root: root.clone(),
         socket: socket.clone(),
         key: rpc::ensure_socket_key(&root).ok(),
+        plugin_failures: Mutex::default(),
+        plugins_changed: AtomicU64::new(0),
         repo: Mutex::new(Some(repo)),
         stats: Mutex::new(WatchStats::default()),
         signals,
@@ -1955,6 +2078,10 @@ pub async fn serve(root: &Path) -> Result<()> {
     let rescanner = tokio::spawn(rescan_loop(daemon.clone()));
     let integrator = tokio::spawn(integration_loop(daemon.clone()));
     let pusher = tokio::spawn(push_loop(daemon.clone()));
+    // The plugins that are run for events (ADR 0005): on a thread of its
+    // own, which ends with the process.
+    let teller = daemon.clone();
+    let _ = std::thread::Builder::new().name("plugin-events".into()).spawn(move || plugin_events(&teller));
     let mut terminated = terminate_signal()?;
 
     loop {

@@ -39,11 +39,81 @@ pub struct Checks {
     pub timeout: Duration,
     /// How they are confined.
     pub confinement: Confinement,
+    /// The gates of the plugins, asked after the commands (ADR 0005).
+    pub gates: Vec<crate::plugins::GateRun>,
+    /// What the gates are told: the lanes in the copy, and their target.
+    pub told: serde_json::Value,
+}
+
+/// What a gate answered, read from the last line it printed.
+fn gate_answer(ran: &kito_integrate::Ran) -> std::result::Result<(String, String), String> {
+    let printed = String::from_utf8_lossy(&ran.stdout);
+    let last = printed.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    let unreadable = || {
+        let errors = if ran.errors.is_empty() { String::new() } else { format!("\n{}", ran.errors) };
+        format!(
+            "it gave no answer that can be read ({}): a gate prints {{\"result\": \"pass\"}}, \"fail\" or \"wait\", \
+             with a \"message\"{errors}",
+            ran.how
+        )
+    };
+    let answer: serde_json::Value = serde_json::from_str(last).map_err(|_| unreadable())?;
+    let result = answer["result"].as_str().ok_or_else(unreadable)?;
+    let message = answer["message"].as_str().unwrap_or_default().trim().to_owned();
+    match result {
+        "pass" | "fail" | "wait" => Ok((result.to_owned(), message)),
+        _ => Err(unreadable()),
+    }
 }
 
 impl Checks {
+    /// Runs the commands, then asks the gates, and stops at the first of
+    /// either that does not pass.
     pub async fn run(&self) -> VerificationReport {
-        kito_integrate::verify(&self.dir, &self.commands, self.timeout, &self.confinement).await
+        let mut report =
+            kito_integrate::verify(&self.dir, &self.commands, self.timeout, &self.confinement).await;
+        if !report.passed || self.gates.is_empty() {
+            return report;
+        }
+        let started = std::time::Instant::now();
+        let told = serde_json::to_vec(&self.told).unwrap_or_default();
+        let envs = [(crate::plugins::ENV_API.into(), crate::rpc::API.to_string().into())];
+        for gate in &self.gates {
+            let label = format!("plugin {}: gate {}", gate.plugin, gate.name);
+            report.commands.push(label.clone());
+            let args = ["gate".into(), gate.name.clone().into()];
+            let ran = kito_integrate::run_program(
+                &self.dir,
+                gate.program.as_os_str(),
+                &args,
+                &told,
+                &envs,
+                gate.timeout,
+                &self.confinement,
+            )
+            .await;
+            let answer = ran.and_then(|ran| gate_answer(&ran));
+            let (failed, waits) = match answer {
+                Ok((result, _)) if result == "pass" => continue,
+                Ok((result, message)) if result == "wait" => {
+                    let message = if message.is_empty() { "it gave no reason".to_owned() } else { message };
+                    (
+                        message.clone(),
+                        Some(format!("the gate `{}` of the plugin `{}`: {message}", gate.name, gate.plugin)),
+                    )
+                }
+                Ok((_, message)) if message.is_empty() => ("it failed, and gave no reason".to_owned(), None),
+                Ok((_, message)) => (message, None),
+                Err(why) => (why, None),
+            };
+            report.passed = false;
+            report.failed_command = Some(label);
+            report.output = Some(failed);
+            report.waits = waits;
+            break;
+        }
+        report.duration_ms += started.elapsed().as_millis() as u64;
+        report
     }
 }
 
@@ -832,11 +902,14 @@ impl Repo {
         self.store.commit()?;
         let dir = self.root.join(STORE_DIR).join("verify").join("work");
         self.materialize_tree(&tree, &dir)?;
+        let together: Vec<LaneId> = plan.members.iter().map(|member| member.lane).collect();
         plan.checks = Some(Checks {
             dir,
             commands: self.config.verify.commands.clone(),
             timeout: Duration::from_secs(self.config.verify.timeout_secs.max(1)),
             confinement,
+            gates: self.gate_runs(),
+            told: self.gates_told(&together, LaneId::MAIN),
         });
         Ok(plan)
     }
@@ -885,6 +958,7 @@ impl Repo {
                         output: Some(format!("starting the verifier: {e}")),
                         confined: false,
                         batch: Vec::new(),
+                        waits: None,
                     },
                 }
             }
@@ -956,7 +1030,13 @@ impl Repo {
     /// commands will run. `None` if no command is configured.
     pub fn verification_copy(&mut self, prepared: &Prepared) -> Result<Option<Checks>> {
         let commands = self.checks_of(prepared.target);
-        if commands.is_empty() {
+        // The gates of the plugins are asked where the checks run: on what
+        // lands on the main lane or on a permanent one (ADR 0005).
+        let gates = match prepared.target.is_main() || self.is_permanent(prepared.target) {
+            true => self.gate_runs(),
+            false => Vec::new(),
+        };
+        if commands.is_empty() && gates.is_empty() {
             return Ok(None);
         }
         let confinement = self.confinement()?;
@@ -965,7 +1045,8 @@ impl Repo {
         let dir = self.root.join(STORE_DIR).join("verify").join("work");
         self.materialize_tree(&tree, &dir)?;
         let timeout = Duration::from_secs(self.config.verify.timeout_secs.max(1));
-        Ok(Some(Checks { dir, commands, timeout, confinement }))
+        let told = self.gates_told(&[prepared.lane], prepared.target);
+        Ok(Some(Checks { dir, commands, timeout, confinement, gates, told }))
     }
 
     /// Step 3: records the merged result on the main lane, under a new
@@ -1007,7 +1088,8 @@ impl Repo {
         }
         let mut result = IntegrationResult::new(lane.to_string(), Outcome::Integrated);
         if let Some(report) = &verification {
-            if !report.passed {
+            // A gate that said to wait failed nothing: see below.
+            if !report.passed && report.waits.is_none() {
                 result.result = Outcome::VerificationFailed;
                 result.message = Some(format!(
                     "`{}` failed on the merged result: nothing was integrated",
@@ -1020,18 +1102,26 @@ impl Repo {
         // What the lane needs of its review (ADR 0004), then the say of
         // somebody who may integrate (D-095). Approving brought nothing
         // in: this does, now that nothing is missing.
-        let (missing, reviewed_by) = self.review_gate(lane);
-        let waits = match (&missing, &hold) {
-            (Some(missing), _) => Some(format!(
+        let (review, reviewed_by) = self.review_gate(lane);
+        // A gate of a plugin that said to wait comes first: it is asked
+        // before the review is (ADR 0005).
+        let gate = verification.as_ref().and_then(|report| report.waits.clone());
+        let waits = match (&gate, &review, &hold) {
+            (Some(gate), ..) => Some(format!(
+                "the merge composes and the checks pass, but the lane waits ({gate}): `kito integrate \
+                 {lane}` asks again"
+            )),
+            (None, Some(missing), _) => Some(format!(
                 "the merge composes and the checks pass, but the lane lacks its review ({missing}): \
                  `kito lane review {lane}` says where it stands; then `kito integrate {lane}` again"
             )),
-            (None, Some(_)) => Some(format!(
+            (None, None, Some(_)) => Some(format!(
                 "the merge composes and the checks pass, but integrating is not for who asked: the lane \
                  waits for somebody who may (`kito integrate {lane}`)"
             )),
-            (None, None) => None,
+            (None, None, None) => None,
         };
+        let missing = gate.or(review);
         if let Some(message) = waits {
             let by = hold.or_else(|| approved_by.clone()).unwrap_or_else(|| self.identity.author());
             let at_ms = std::time::SystemTime::now()

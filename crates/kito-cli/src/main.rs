@@ -592,6 +592,11 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                     )
                 );
             }
+            for plugin in &here {
+                if let Some(failed) = plugin["last_failure"].as_str() {
+                    println!("{} last failed {failed}", plugin["name"].as_str().unwrap_or_default());
+                }
+            }
             // What the repository relies on and this person does not have.
             for plugin in
                 here.iter().filter(|plugin| plugin["installed"] == false && plugin["enabled"] == true)
@@ -616,6 +621,17 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
             println!("  asks for: {}", if asks.is_empty() { "nothing".to_owned() } else { asks.join(", ") });
             for command in &manifest.commands {
                 println!("  kito {}  {}", command.name, command.about);
+            }
+            for gate in &manifest.gates {
+                println!("  gate {}  {}", gate.name, gate.about);
+            }
+            let kinds: Vec<&str> =
+                manifest.events.iter().flat_map(|event| event.kinds.iter().map(String::as_str)).collect();
+            if !kinds.is_empty() {
+                println!("  run for: {}", kinds.join(", "));
+            }
+            if let Some(failed) = said.and_then(|plugin| plugin["last_failure"].as_str()) {
+                println!("  it last failed {failed}");
             }
             if let Some(why) = manifest.unfit() {
                 println!("  {why}");
@@ -2512,12 +2528,12 @@ fn print_integration(result: &IntegrationResult) {
         Integration::Failed => println!("{}: {}", result.lane, result.message.clone().unwrap_or_default()),
         Integration::AwaitingApproval if result.missing.is_some() => {
             println!(
-                "{}: merged and checked{verified}; it waits for its review: {}",
+                "{}: merged and checked{verified}; it waits: {}",
                 result.lane,
                 result.missing.as_deref().unwrap_or_default()
             );
             println!(
-                "  `kito lane review {}` says where it stands; `kito integrate {}` again once it has it.",
+                "  `kito integrate {}` asks again; for a review, `kito lane review {}` says where it stands.",
                 result.lane, result.lane
             );
         }
@@ -2926,6 +2942,17 @@ fn cmd_status(cli: &Cli, with_daemon: bool) -> Outcome {
         print_json(&status);
     } else {
         print_status(&status, with_daemon);
+        // The plugins this repository enabled, and what each last failed at.
+        let plugins: Value = client.call("plugins", json!({})).unwrap_or_default();
+        for plugin in plugins.as_array().into_iter().flatten().filter(|plugin| plugin["enabled"] == true) {
+            let text = |key: &str| plugin[key].as_str().unwrap_or_default();
+            let state = match (plugin["problem"].as_str(), plugin["last_failure"].as_str()) {
+                (Some(problem), _) => format!(": {problem}"),
+                (None, Some(failed)) => format!(": last failed {failed}"),
+                (None, None) => format!(" ({})", strings(&plugin["permissions"]).join(", ")),
+            };
+            println!("Plugin ............ {} {}{state}", text("name"), text("version"));
+        }
     }
     Ok(())
 }

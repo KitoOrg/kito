@@ -145,8 +145,10 @@ is what its permissions and that person's role both allow, never more.
   client) asks `events` itself instead, as `kito watch` does.
 - **Gates.** After the merge and the checks of an integration, and before
   the review is asked (ADR 0004), the daemon runs each gate: `kito-<name>
-  gate <gate>`, in the copy of the merged result, with the lane, its
-  target and its diff as JSON on its input. It answers:
+  gate <gate>`, in the copy of the merged result, with what is in that
+  copy as JSON on its input: the target, and each lane with its agent,
+  its owner, its intent and its diff (several lanes when their checks run
+  together, phase 13). On the last line it prints, it answers:
 
   ```json
   { "result": "pass" }
@@ -158,7 +160,10 @@ is what its permissions and that person's role both allow, never more.
   `wait` leaves the lane `awaiting_approval` with that message as what is
   missing, and the gate is asked again when integration is. No answer in
   its time, or one that cannot be read, is `fail`, saying so. Gates run
-  confined like the checks (phase 12): they write only in their copy.
+  confined like the checks (phase 12): they write only in their copy, do
+  not read Kito's own data, and are given no key: what a gate needs to
+  know it is told. They are asked where checks run: for what lands on the
+  main lane or on a permanent one.
   On a server the gates are the repository's, like its checks: no client
   adds or removes one.
 - **Tools for agents.** `kito-mcp` offers the tools of the plugins the
@@ -172,10 +177,11 @@ nothing else in `.kito`, and adds no kind of record to the store.
 
 ### 5. What Kito says about plugins
 
-`kito status` lists the plugins enabled, their versions, and what each
-last failed at. Events `plugin_failed` and `gate_failed` for whoever
-watches. A gate's verdict is in the verification of the checkpoint, with
-the checks.
+`kito status` and `kito plugin list` say the plugins enabled, their
+versions, and what each last failed at, until it runs well again. An
+event, `plugin_failed`, for whoever watches; a gate that fails is told as
+any check that does (`verification_failed`, naming it). A gate that
+passed is in the verification of the checkpoint, with the checks.
 
 ### 6. Assistants
 

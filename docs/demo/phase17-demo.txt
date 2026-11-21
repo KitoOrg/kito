@@ -30,8 +30,8 @@ lane/1: changes requested by ada
   1 comment waits (`kito lane comments lane/1`)
 
 $ kito integrate 1
-lane/1: merged and checked; it waits for its review: changes requested by ada
-  `kito lane review lane/1` says where it stands; `kito integrate lane/1` again once it has it.
+lane/1: merged and checked; it waits: changes requested by ada
+  `kito integrate lane/1` asks again; for a review, `kito lane review lane/1` says where it stands.
 
 # The agent goes on. Its next edit is held back once, with what was said:
 Kito: this edit was held back once. Somebody commented on lane/1 and you have not read it:
@@ -54,4 +54,4 @@ $ kito lane withdraw 1
 lane/1: no verdict yet, and none is needed
 
 $ kito integrate 1
-lane/1: integrated as ckpt#2 (git 9b04332cf6)
+lane/1: integrated as ckpt#2 (git 0f05151065)

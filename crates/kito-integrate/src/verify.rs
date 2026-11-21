@@ -166,5 +166,104 @@ async fn verify_with_shell(
         output: failure.map(|(_, output)| output),
         confined,
         batch: Vec::new(),
+        waits: None,
+    }
+}
+
+/// What a program that ran to its end left behind.
+#[derive(Clone, Debug)]
+pub struct Ran {
+    pub success: bool,
+    /// How it ended: `exit code 2`, `killed by a signal`.
+    pub how: String,
+    pub stdout: Vec<u8>,
+    /// The end of what it printed as errors.
+    pub errors: String,
+}
+
+/// Runs one program in `dir`, with `input` on its standard input, confined
+/// like the commands of [`verify`]. `Err`: it could not be started, or
+/// was stopped after `timeout`.
+pub async fn run_program(
+    dir: &Path,
+    program: &std::ffi::OsStr,
+    args: &[OsString],
+    input: &[u8],
+    envs: &[(OsString, OsString)],
+    timeout: Duration,
+    confinement: &Confinement,
+) -> Result<Ran, String> {
+    use tokio::io::AsyncWriteExt;
+    let mut command = match confinement.wrapper.split_first() {
+        Some((wrapper, wrapped)) => {
+            let mut command = Command::new(wrapper);
+            command.args(wrapped).arg(program);
+            command
+        }
+        None => Command::new(program),
+    };
+    command
+        .args(args)
+        .current_dir(dir)
+        .env("KITO_VERIFY", "1")
+        .envs(envs.iter().map(|(name, value)| (name, value)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().map_err(|e| format!("could not be started: {e}"))?;
+    let (mut stdin, mut stdout, mut stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let pid = child.id();
+    let run = async {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let write = async {
+            if let Some(mut pipe) = stdin.take() {
+                // One that does not read what it is told is its own business.
+                let _ = pipe.write_all(input).await;
+                let _ = pipe.shutdown().await;
+            }
+        };
+        let read_out = async {
+            if let Some(pipe) = stdout.as_mut() {
+                let _ = pipe.read_to_end(&mut out).await;
+            }
+        };
+        let read_err = async {
+            if let Some(pipe) = stderr.as_mut() {
+                let _ = pipe.read_to_end(&mut err).await;
+            }
+        };
+        let ((), (), (), status) = tokio::join!(write, read_out, read_err, child.wait());
+        (status, out, err)
+    };
+    match tokio::time::timeout(timeout, run).await {
+        Ok((Ok(status), stdout, errors)) => Ok(Ran {
+            success: status.success(),
+            how: match status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "killed by a signal".to_owned(),
+            },
+            stdout,
+            errors: tail(errors),
+        }),
+        Ok((Err(e), ..)) => Err(format!("could not be waited for: {e}")),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = pid.and_then(|pid| rustix::process::Pid::from_raw(pid as i32)) {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+            #[cfg(windows)]
+            if let Some(pid) = pid {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            let _ = child.kill().await;
+            Err(format!("still running after {} s: stopped", timeout.as_secs()))
+        }
     }
 }
