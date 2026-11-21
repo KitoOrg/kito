@@ -30,6 +30,7 @@ use clap::{Parser, Subcommand};
 use kitod::client::Client;
 use serde_json::{json, Value};
 use state::{Role, Server, User};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -44,7 +45,37 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum PluginCmd {
+    /// Install a plugin for the user this server runs as: the directory
+    /// that holds its `kito-plugin.toml` and its program
+    Add {
+        #[arg(long, value_name = "DIR")]
+        path: PathBuf,
+    },
+    /// Let a plugin run on this server, with what it asks for
+    Enable {
+        name: String,
+        /// Give it these permissions only: sign_in, pages, server_events,
+        /// server_admin, read, write, integrate, admin
+        #[arg(long, value_delimiter = ',', value_name = "PERMISSIONS")]
+        only: Option<Vec<String>>,
+    },
+    /// Stop a plugin from running on this server
+    Disable { name: String },
+    /// The plugins this server enabled, and what each was given
+    List,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Plugins of the server: signing in, pages, events, commands
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCmd,
+    },
+    /// A command of a plugin this server enabled
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
     /// Create the directory of a server
     Init {
         /// Where (default: --dir, then the current directory)
@@ -165,8 +196,154 @@ fn dir_of(cli: &Cli) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// What a plugin adds, in a few words, for the lists.
+fn adds(manifest: &kitod::plugins::Manifest) -> Vec<String> {
+    let mut adds = Vec::new();
+    if let Some(sign_in) = &manifest.sign_in {
+        adds.push(format!("signing in with {}", sign_in.method));
+    }
+    if let Some(pages) = &manifest.pages {
+        adds.push(format!("pages under {}", pages.mount));
+    }
+    let kinds: Vec<&str> =
+        manifest.server_events.iter().flat_map(|event| event.kinds.iter().map(String::as_str)).collect();
+    if !kinds.is_empty() {
+        adds.push(format!("run for {}", kinds.join(", ")));
+    }
+    adds.extend(manifest.server_commands.iter().map(|command| format!("kito-server {}", command.name)));
+    adds
+}
+
+fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
+    use kitod::plugins;
+    match command {
+        PluginCmd::Add { path } => {
+            let added = plugins::install_from(path)?;
+            println!(
+                "{} {} is installed in {}",
+                added.manifest.name,
+                added.manifest.version,
+                added.dir.display()
+            );
+            println!("  `kito-server plugin enable {}` lets it run on this server.", added.manifest.name);
+        }
+        PluginCmd::Enable { name, only } => {
+            let only = match only {
+                None => None,
+                Some(words) => Some(
+                    words
+                        .iter()
+                        .map(|word| {
+                            serde_json::from_value(json!(word))
+                                .map_err(|_| format!("`{word}` is not a permission"))
+                        })
+                        .collect::<Result<Vec<plugins::Permission>, String>>()?,
+                ),
+            };
+            let mut server = Server::open(&dir_of(cli))?;
+            let found = server.enable_plugin(name, only)?;
+            let given: Vec<&str> = server.config.plugins[name].permissions.iter().map(|p| p.word()).collect();
+            let given = if given.is_empty() { "nothing".to_owned() } else { given.join(", ") };
+            println!("{name} is enabled on this server. It may: {given}.");
+            for what in adds(&found.manifest) {
+                println!("  {what}");
+            }
+        }
+        PluginCmd::Disable { name } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            match server.disable_plugin(name)? {
+                true => println!("{name} is disabled on this server."),
+                false => println!("{name} was not enabled on this server."),
+            }
+        }
+        PluginCmd::List => {
+            let server = Server::open(&dir_of(cli))?;
+            if server.config.plugins.is_empty() {
+                println!("No plugins. `kito-server plugin add --path <dir>`, then `plugin enable <name>`.");
+            }
+            for (name, config) in &server.config.plugins {
+                let found = plugins::installed(name);
+                let version =
+                    found.as_ref().map(|found| format!(" {}", found.manifest.version)).unwrap_or_default();
+                let given: Vec<&str> = config.permissions.iter().map(|p| p.word()).collect();
+                let state = match config.enabled {
+                    true => format!("enabled ({})", given.join(", ")),
+                    false => "disabled".to_owned(),
+                };
+                println!("{name}{version}  [{state}]");
+                match &found {
+                    None => println!("  it is not installed for the user this server runs as"),
+                    Some(found) => {
+                        if let Some(why) = found.manifest.unfit() {
+                            println!("  {why}");
+                        }
+                        for what in adds(&found.manifest) {
+                            println!("  {what}");
+                        }
+                    }
+                }
+                if let Some(failed) = server.last_failure(name) {
+                    println!("  it last failed {failed}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs a command a plugin adds to `kito-server`, with the server's
+/// directory in its environment. Returns its exit code.
+fn run_external(cli: &Cli, line: &[OsString]) -> Result<u8, String> {
+    use kitod::plugins::{self, Permission};
+    let asked = line.first().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let server = Server::open(&dir_of(cli)).map_err(|e| {
+        format!("`{asked}` is not a command of kito-server (`kito-server --help` lists them); {e}")
+    })?;
+    let declares =
+        |manifest: &plugins::Manifest| manifest.server_commands.iter().any(|command| command.name == asked);
+    let running = server.running();
+    let Some((found, config)) = running.iter().find(|(found, _)| declares(&found.manifest)) else {
+        let has = plugins::all_installed().into_iter().find(|plugin| declares(&plugin.manifest));
+        return Err(match has {
+            Some(plugin) => format!(
+                "`kito-server {asked}` is a command of the plugin `{}`, which this server did not enable: \
+                 `kito-server plugin enable {}`",
+                plugin.manifest.name, plugin.manifest.name
+            ),
+            None => format!("`{asked}` is not a command of kito-server (`kito-server --help` lists them)"),
+        });
+    };
+    let name = &found.manifest.name;
+    if !config.permissions.contains(&Permission::ServerAdmin) {
+        return Err(format!(
+            "the plugin `{name}` may not add commands to this server: it needs the permission `server_admin` \
+             (`kito-server plugin enable {name}` gives what it asks for)"
+        ));
+    }
+    let program = plugins::program(&found.dir, name);
+    let mut command = std::process::Command::new(&program);
+    command
+        .args(line)
+        .current_dir(&server.dir)
+        .env(state::ENV_SERVER_DIR, &server.dir)
+        .env(plugins::ENV_API, kitod::rpc::API.to_string());
+    // On Unix `kito-server` becomes the plugin: one process to stop.
+    #[cfg(unix)]
+    {
+        let failed = std::os::unix::process::CommandExt::exec(&mut command);
+        Err(format!("{}: {failed}", program.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|e| format!("{}: {e}", program.display()))?;
+        Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
+    }
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     match &cli.command {
+        Cmd::Plugin { command } => run_plugin(cli, command)?,
+        Cmd::External(_) => unreachable!("answered before"),
         Cmd::Init { path } => {
             let dir = path.clone().unwrap_or_else(|| dir_of(cli));
             let server = Server::init(&dir)?;
@@ -179,6 +356,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             let server = Server::open(&dir_of(cli))?;
             let root = server.add_repo(name, from.as_deref(), !unprotected)?;
             println!("Repository `{name}` created in {}", root.display());
+            server.tell("repo_added", json!({ "repo": name, "what": name }));
             match (from, unprotected) {
                 (Some(_), false) => {
                     println!("Its main lane is protected: it changes only when a lane is integrated.")
@@ -244,10 +422,15 @@ fn run(cli: &Cli) -> Result<(), String> {
                 now["push"].as_str(),
             );
             println!("{name}{rules}");
+            server.tell("repo_changed", json!({ "repo": name, "what": format!("{name}{rules}") }));
         }
         Cmd::User { command: UserCmd::Add { name, email, repos, role } } => {
             let mut server = Server::open(&dir_of(cli))?;
             let token = server.add_user(name, email.clone(), repos, *role)?;
+            server.tell(
+                "user_added",
+                json!({ "user": name, "role": role.word(), "what": format!("{name} ({})", role.word()) }),
+            );
             println!("{name} added. Their token, shown this once:");
             println!("{token}");
             // What they connect with: the token, and what says the server
@@ -261,6 +444,11 @@ fn run(cli: &Cli) -> Result<(), String> {
         Cmd::User { command: UserCmd::Role { name, role, repo } } => {
             let mut server = Server::open(&dir_of(cli))?;
             server.set_role(name, *role, repo.as_deref())?;
+            let place = repo.as_ref().map(|repo| format!(" in {repo}")).unwrap_or_default();
+            server.tell(
+                "role_changed",
+                json!({ "user": name, "role": role.word(), "repo": repo, "what": format!("{name}: {}{place}", role.word()) }),
+            );
             match repo {
                 Some(repo) => println!("{name} may {} in `{repo}`.", role.word()),
                 None => println!("{name} may {}.", role.word()),
@@ -285,6 +473,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Cmd::User { command: UserCmd::Remove { name } } => {
             let mut server = Server::open(&dir_of(cli))?;
             server.remove_user(name)?;
+            server.tell("user_removed", json!({ "user": name, "what": name }));
             println!("{name} removed: their token no longer works.");
         }
         Cmd::Fingerprint => {
@@ -338,6 +527,16 @@ fn rules_of(protected: bool, checks: &[String], approvals: u32, push: Option<&st
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A command of a plugin: its exit code is the plugin's.
+    if let Cmd::External(line) = &cli.command {
+        return match run_external(&cli, line) {
+            Ok(code) => ExitCode::from(code),
+            Err(message) => {
+                eprintln!("kito-server: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

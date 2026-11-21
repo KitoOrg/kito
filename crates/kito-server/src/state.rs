@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "server.toml";
+/// In the environment of a plugin run for a server: the server's directory.
+pub const ENV_SERVER_DIR: &str = "KITO_SERVER_DIR";
 const REPOS_DIR: &str = "repos";
 /// The address a new server listens on: this machine only. Clients on
 /// other machines come in through SSH, or the address is changed by whoever
@@ -18,11 +20,14 @@ pub struct Config {
     /// Address `serve` listens on.
     pub listen: String,
     pub users: BTreeMap<String, User>,
+    /// The plugins this server enabled, by name (ADR 0006).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, kitod::plugins::PluginConfig>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { listen: DEFAULT_LISTEN.to_owned(), users: BTreeMap::new() }
+        Config { listen: DEFAULT_LISTEN.to_owned(), users: BTreeMap::new(), plugins: BTreeMap::new() }
     }
 }
 
@@ -270,6 +275,126 @@ impl Server {
             return Err(format!("{name} is not a user of this server"));
         }
         self.save()
+    }
+
+    // ----------------------------------------------------------- plugins
+
+    /// Enables a plugin on this server, with the permissions said or else
+    /// with what it asks for; never with more than it asks for.
+    pub fn enable_plugin(
+        &mut self,
+        name: &str,
+        only: Option<Vec<kitod::plugins::Permission>>,
+    ) -> Result<kitod::plugins::Installed, String> {
+        use kitod::plugins;
+        plugins::check_name("plugin", name)?;
+        let found = plugins::installed(name).ok_or_else(|| {
+            format!(
+                "the plugin `{name}` is not installed for the user this server runs as: `kito-server plugin \
+                 add --path <dir>` first"
+            )
+        })?;
+        if let Some(why) = found.manifest.unfit() {
+            return Err(why);
+        }
+        let mut given = only.unwrap_or_else(|| found.manifest.permissions.clone());
+        if let Some(more) = given.iter().find(|permission| !found.manifest.permissions.contains(permission)) {
+            return Err(format!(
+                "the plugin `{name}` does not ask for `{}`: it is given what it asks for, or less",
+                more.word()
+            ));
+        }
+        given.sort();
+        given.dedup();
+        let config = plugins::PluginConfig { enabled: true, permissions: given };
+        self.config.plugins.insert(name.to_owned(), config);
+        self.save()?;
+        Ok(found)
+    }
+
+    /// Disables a plugin: nothing of it runs on this server. `false`: it
+    /// was not enabled.
+    pub fn disable_plugin(&mut self, name: &str) -> Result<bool, String> {
+        match self.config.plugins.get_mut(name).filter(|plugin| plugin.enabled) {
+            Some(plugin) => {
+                plugin.enabled = false;
+                let _ = std::fs::remove_file(self.failure_file(name));
+                self.save().map(|()| true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// The plugins that run here: enabled, installed, written for an API
+    /// this Kito speaks; each with what it was given.
+    pub fn running(&self) -> Vec<(kitod::plugins::Installed, &kitod::plugins::PluginConfig)> {
+        let enabled = self.config.plugins.iter().filter(|(_, config)| config.enabled);
+        enabled
+            .filter_map(|(name, config)| Some((kitod::plugins::installed(name)?, config)))
+            .filter(|(found, _)| found.manifest.unfit().is_none())
+            .collect()
+    }
+
+    /// What a plugin keeps of its own on this server: `plugins/<name>/`.
+    pub fn plugin_dir(&self, name: &str) -> PathBuf {
+        self.dir.join("plugins").join(name)
+    }
+
+    fn failure_file(&self, name: &str) -> PathBuf {
+        self.plugin_dir(name).join("last-failure")
+    }
+
+    /// What a plugin last failed at, if it has not run well since.
+    pub fn last_failure(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.failure_file(name)).ok().map(|said| said.trim().to_owned())
+    }
+
+    /// Tells the plugins that listen what happened on the server: each is
+    /// run for the kinds it listed, one at a time and in order, after the
+    /// fact. One that fails is said, and held against nothing else.
+    pub fn tell(&self, kind: &str, mut event: serde_json::Value) {
+        use kitod::plugins::Permission;
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        event["kind"] = kind.into();
+        event["at_ms"] = at_ms.into();
+        let told = serde_json::to_vec(&event).unwrap_or_default();
+        let envs = [(ENV_SERVER_DIR, self.dir.as_os_str().to_owned())];
+        for (found, config) in self.running() {
+            let name = &found.manifest.name;
+            if !config.permissions.contains(&Permission::ServerEvents) {
+                continue;
+            }
+            // Its own failure is not told back to it, over and over.
+            if kind == "plugin_failed" && event["plugin"] == name.as_str() {
+                continue;
+            }
+            for listens in
+                found.manifest.server_events.iter().filter(|spec| spec.kinds.iter().any(|k| k == kind))
+            {
+                let program = kitod::plugins::program(&found.dir, name);
+                let timeout = std::time::Duration::from_secs(listens.timeout_secs.unwrap_or(30).max(1));
+                let ran = kitod::plugins::run_program(
+                    &program,
+                    &["server-event"],
+                    &self.dir,
+                    &envs,
+                    &told,
+                    timeout,
+                );
+                match ran {
+                    Ok(_) => drop(std::fs::remove_file(self.failure_file(name))),
+                    Err(why) => {
+                        let what = format!("on `{kind}`: {why}");
+                        eprintln!("kito-server: the plugin `{name}` failed {what}");
+                        let _ = std::fs::create_dir_all(self.plugin_dir(name));
+                        let _ = std::fs::write(self.failure_file(name), &what);
+                        self.tell("plugin_failed", serde_json::json!({ "plugin": name, "what": what }));
+                    }
+                }
+            }
+        }
     }
 
     /// The person a token belongs to.

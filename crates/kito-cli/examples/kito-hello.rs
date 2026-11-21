@@ -16,6 +16,11 @@
 //! `broken` fails. As an assistant (`kito-hello assistant setup |
 //! remove`) it writes and removes `HELLO.md`, the rules of an assistant
 //! that does not exist.
+//!
+//! For a server (ADR 0006): `kito-hello server-event` writes a line for
+//! the event in a file of its own under the server's directory, and
+//! fails for one that says `explode`; `kito-hello greet [...]`, a command
+//! it adds to `kito-server`, says where it runs and what it was told.
 
 use kitod::client::Client;
 use std::path::PathBuf;
@@ -129,6 +134,35 @@ fn main() -> ExitCode {
                 }
                 _ => ExitCode::from(2),
             }
+        }
+        Some("server-event") => {
+            use std::io::Write;
+            let event: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap_or_default();
+            let text = |key: &str| event[key].as_str().unwrap_or("-").to_owned();
+            if text("what").contains("explode") {
+                eprintln!("hello: it exploded");
+                return ExitCode::from(1);
+            }
+            let dir = PathBuf::from(said("KITO_SERVER_DIR")).join("plugins/hello");
+            let _ = std::fs::create_dir_all(&dir);
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("events.log"));
+            match log.and_then(|mut log| writeln!(log, "{} {}", text("kind"), text("what"))) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("hello: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("greet") => {
+            let dir = PathBuf::from(said("KITO_SERVER_DIR"));
+            let has = dir.join("server.toml").is_file();
+            println!(
+                "hello from a server{}: {}",
+                if has { "" } else { " that is not there" },
+                args[1..].join(" ")
+            );
+            ExitCode::from(if args.get(1).is_some_and(|arg| arg == "fail") { 5 } else { 0 })
         }
         Some("event") => {
             use std::io::Write;

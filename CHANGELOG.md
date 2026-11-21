@@ -6,6 +6,32 @@ of a version are its section here.
 
 ## [Unreleased]
 
+Plugins for the server ([ADR 0006](docs/adr/0006-server-plugins.md)),
+under way:
+
+- `kito-server plugin add --path <dir>`, `enable <name>` (`--only …`),
+  `disable`, `list`: the same plugins, enabled by a server in
+  `server.toml`. What a server gives: `sign_in`, `pages`,
+  `server_events`, `server_admin`.
+- **Commands**: a plugin's `[[server_command]]` is a command of
+  `kito-server` on the servers that enabled it, with the server's
+  directory in `KITO_SERVER_DIR`.
+- **The server's events**: a plugin's `[[server_event]]` lists kinds
+  (`repo_added`, `repo_changed`, `user_added`, `user_removed`,
+  `role_changed`, `plugin_failed`); it is run for each, after the fact.
+  One that fails is said where the administrator is and in `plugin
+  list`, and undoes nothing.
+- A repository gives a plugin only what is a repository's to give
+  (`read`, `write`, `integrate`, `admin`).
+- A command of a plugin replaces `kito` on Unix: stopping `kito web`
+  stops the web client. Plugins are told where the daemon listens
+  (`KITO_SOCKET`).
+- Fixed: after a shell command, an agent could be told that the
+  command changed files of the main directory that were written before
+  it and only recorded while it ran (a busy machine). An edit by hand is
+  now dated by its files as well as by when it was recorded.
+- Not yet: the HTTP address and pages, signing in.
+
 ## [0.20.0]
 
 Plugins (phase 19, [ADR 0005](docs/adr/0005-plugins.md)): what does not

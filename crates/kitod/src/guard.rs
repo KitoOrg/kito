@@ -116,7 +116,13 @@ pub struct Behind {
 /// Files of the main directory changed by hand.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Direct {
+    /// When it was recorded.
     pub at_ms: u64,
+    /// When the files were written, as they say, if they are still there
+    /// to say it: what was recorded late is not the doing of whatever
+    /// ran when it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_ms: Option<u64>,
     pub paths: Vec<String>,
     /// The main lane is protected: the files were put back.
     pub put_back: bool,
@@ -612,8 +618,15 @@ impl Repo {
                 self.scan_lane(*lane)?;
             }
         }
-        let main: Vec<Direct> =
-            self.direct.iter().filter(|direct| main && direct.at_ms >= since_ms).cloned().collect();
+        // Recorded since then, and not written clearly before: a file is
+        // dated by a coarser clock than the one that says when a command
+        // started, so one written right after may be dated a little before.
+        const COARSE_MS: u64 = 50;
+        let since_then = |direct: &&Direct| {
+            direct.at_ms >= since_ms
+                && direct.written_ms.is_none_or(|written| written + COARSE_MS >= since_ms)
+        };
+        let main: Vec<Direct> = self.direct.iter().filter(|_| main).filter(since_then).cloned().collect();
         let mut outside = Vec::new();
         let ids: Vec<LaneId> = self.lanes.keys().copied().collect();
         for id in ids {

@@ -66,6 +66,8 @@ fn every_method_is_written_down_under_the_permission_it_needs() {
             Some(Permission::Write) => "write",
             Some(Permission::Integrate) => "integrate",
             Some(Permission::Admin) => "admin",
+            // What a server gives a plugin is no method of a daemon.
+            Some(other) => panic!("{method} needs `{}`, which no method of a daemon does", other.word()),
         };
         assert_eq!(heading, needs, "{method} is under `{heading}` in docs/api.md and needs `{needs}`");
     }

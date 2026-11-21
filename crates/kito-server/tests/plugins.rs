@@ -1,0 +1,202 @@
+//! Plugins enabled by a server (ADR 0006): their commands, and the
+//! server's events. The plugin is `kito-hello`, an example of `kito-cli`.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// The daemon binary sits next to the server's. If the tests run for this
+/// package alone it may not have been built.
+fn kitod() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    let path = Path::new(env!("CARGO_BIN_EXE_kito-server"))
+        .with_file_name(format!("kitod{}", std::env::consts::EXE_SUFFIX));
+    BUILD.call_once(|| {
+        if !path.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kitod", "--bin", "kitod"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kitod");
+        }
+    });
+    path
+}
+
+fn server(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_kito-server"))
+        .arg("--dir")
+        .arg(dir)
+        .args(args)
+        .env("KITOD_BIN", kitod())
+        .env("KITO_AUTHOR", "the server")
+        .env_remove("KITO_EMAIL")
+        // Where the user the server runs as has their plugins, for the tests.
+        .env("KITO_CONFIG_DIR", dir.join(".personal-config"))
+        .output()
+        .unwrap()
+}
+
+fn ok(dir: &Path, args: &[&str]) -> String {
+    let out = server(dir, args);
+    let (said, errors) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "kito-server {args:?}: {said}{errors}");
+    said.into_owned()
+}
+
+/// What a command that must fail said.
+fn refused(dir: &Path, args: &[&str]) -> String {
+    let out = server(dir, args);
+    assert!(!out.status.success(), "kito-server {args:?} was not refused");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// A directory with the plugin of the tests in it, as a download would
+/// leave it: its manifest and its program.
+fn hello_plugin(base: &Path, manifest: &str) -> PathBuf {
+    let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
+    let built = Path::new(env!("CARGO_BIN_EXE_kito-server")).with_file_name("examples").join(&name);
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    BUILD.call_once(|| {
+        if !built.is_file() {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "kito-cli", "--example", "kito-hello"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "building kito-hello");
+        }
+    });
+    let dir = base.join("hello-src");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(built, dir.join(&name)).unwrap();
+    fs::write(dir.join("kito-plugin.toml"), manifest).unwrap();
+    dir
+}
+
+const HELLO: &str = r#"name = "hello"
+version = "0.4.0"
+api = 1
+permissions = ["server_events", "server_admin"]
+
+[[server_event]]
+kinds = ["user_added", "user_removed", "role_changed", "repo_added", "repo_changed"]
+
+[[server_command]]
+name = "greet"
+about = "Says where it runs"
+"#;
+
+fn new_server() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap().join("server");
+    ok(tmp.path(), &["init", dir.to_str().unwrap()]);
+    (tmp, dir)
+}
+
+#[test]
+fn a_plugin_runs_on_a_server_that_enabled_it_and_adds_its_commands() {
+    let (tmp, dir) = new_server();
+    assert!(ok(&dir, &["plugin", "list"]).contains("No plugins."));
+    assert!(refused(&dir, &["greet"]).contains("`greet` is not a command of kito-server"));
+    assert!(refused(&dir, &["plugin", "enable", "hello"]).contains("is not installed"));
+
+    // Installed for the user the server runs as: it runs nowhere yet.
+    let source = hello_plugin(tmp.path(), HELLO);
+    let added = ok(&dir, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    assert!(added.starts_with("hello 0.4.0 is installed in "), "{added}");
+    let not_here = refused(&dir, &["greet"]);
+    assert!(
+        not_here.contains("which this server did not enable: `kito-server plugin enable hello`"),
+        "{not_here}"
+    );
+
+    // Enabled, with what it asks for: its command is the server's.
+    let enabled = ok(&dir, &["plugin", "enable", "hello"]);
+    assert!(
+        enabled.starts_with("hello is enabled on this server. It may: server_events, server_admin.\n"),
+        "{enabled}"
+    );
+    assert!(
+        enabled.contains("  kito-server greet\n") && enabled.contains("  run for user_added,"),
+        "{enabled}"
+    );
+    let config = fs::read_to_string(dir.join("server.toml")).unwrap();
+    assert!(
+        config
+            .contains("[plugins.hello]\nenabled = true\npermissions = [\"server_events\", \"server_admin\"]"),
+        "{config}"
+    );
+    assert_eq!(ok(&dir, &["greet", "to", "all"]), "hello from a server: to all\n");
+    assert_eq!(server(&dir, &["greet", "fail"]).status.code(), Some(5), "its exit code is the server's");
+    let listed = ok(&dir, &["plugin", "list"]);
+    assert!(listed.starts_with("hello 0.4.0  [enabled (server_events, server_admin)]\n"), "{listed}");
+
+    // Given less than it asks for, and never more.
+    ok(&dir, &["plugin", "enable", "hello", "--only", "server_events"]);
+    assert!(refused(&dir, &["greet"]).contains("it needs the permission `server_admin`"));
+    assert!(refused(&dir, &["plugin", "enable", "hello", "--only", "sign_in"])
+        .contains("does not ask for `sign_in`"));
+    assert!(
+        refused(&dir, &["plugin", "enable", "hello", "--only", "everything"]).contains("is not a permission")
+    );
+
+    // Disabled, nothing of it runs here.
+    assert_eq!(ok(&dir, &["plugin", "disable", "hello"]), "hello is disabled on this server.\n");
+    assert!(refused(&dir, &["greet"]).contains("did not enable"));
+    assert!(ok(&dir, &["plugin", "list"]).contains("[disabled]"));
+}
+
+#[test]
+fn a_plugin_is_told_what_happens_on_the_server() {
+    let (tmp, dir) = new_server();
+    let source = hello_plugin(tmp.path(), HELLO);
+    ok(&dir, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    let log = dir.join("plugins/hello/events.log");
+    let told = || fs::read_to_string(&log).unwrap_or_default();
+
+    // Not enabled: told nothing.
+    ok(&dir, &["user", "add", "ada"]);
+    assert_eq!(told(), "");
+    ok(&dir, &["plugin", "enable", "hello"]);
+
+    // After the fact, in order, and only the kinds it listed.
+    ok(&dir, &["repo", "add", "shop"]);
+    ok(&dir, &["user", "add", "bob", "--role", "write"]);
+    ok(&dir, &["user", "role", "bob", "read", "--repo", "shop"]);
+    ok(&dir, &["repo", "set", "shop", "--approvals", "1"]);
+    ok(&dir, &["user", "remove", "bob"]);
+    assert_eq!(
+        told().lines().collect::<Vec<_>>(),
+        [
+            "repo_added shop",
+            "user_added bob (write)",
+            "role_changed bob: read in shop",
+            "repo_changed shop  [main open to direct edits, no checks, 1 approval]",
+            "user_removed bob",
+        ]
+    );
+
+    // One that fails is said where the administrator is, and kept until
+    // it runs well again; what was asked is done all the same.
+    let out = server(&dir, &["user", "add", "explode"]);
+    assert!(out.status.success(), "adding the person is not undone by a plugin");
+    let warned = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        warned.contains("the plugin `hello` failed on `user_added`: exit code 1: hello: it exploded"),
+        "{warned}"
+    );
+    assert!(ok(&dir, &["user", "list"]).contains("explode"));
+    assert!(ok(&dir, &["plugin", "list"]).contains("it last failed on `user_added`"));
+    // The next event it handles well clears it.
+    ok(&dir, &["user", "add", "dave"]);
+    assert!(!ok(&dir, &["plugin", "list"]).contains("last failed"));
+
+    // Without the permission it is told nothing more.
+    ok(&dir, &["plugin", "enable", "hello", "--only", "server_admin"]);
+    ok(&dir, &["user", "add", "carol"]);
+    assert!(!told().contains("carol"), "{}", told());
+    let daemon = kitod::client::Client::connect(&dir.join("repos/shop"));
+    if let Ok(mut daemon) = daemon {
+        let _ = daemon.call_value("shutdown", serde_json::json!({}));
+    }
+}

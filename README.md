@@ -504,6 +504,13 @@ name = "codex"
 - **An assistant** is set up by `kito assistant add <name>`, which runs
   the plugin's `assistant setup` in the repository.
 
+A server has plugins too ([ADR 0006](docs/adr/0006-server-plugins.md)):
+`kito-server plugin add --path <dir>`, then `plugin enable <name>`. On a
+server a plugin adds commands to `kito-server` (`[[server_command]]`)
+and is told what happens there (`[[server_event]]`: a repository added,
+a person added or removed, a role changed). Signing in and pages
+through the server's address are being built.
+
 What a program may ask the daemon, and under which permission, is in
 [docs/api.md](docs/api.md): the daemon's API, version 1.
 `crates/kito-cli/examples/kito-hello.rs` is the smallest plugin there is,

@@ -33,7 +33,8 @@ by it, which the ADR rules ask to write down first.
 
 A server plugin is a plugin as ADR 0005 has it: a program `kito-<name>`
 with a `kito-plugin.toml`, installed for the user the server runs as
-(`kito plugin add`). What it does for a server is in sections of its
+(`kito-server plugin add --path <dir>`, or `kito plugin add`: the same
+place). What it does for a server is in sections of its
 own, and one plugin may have both kinds (the web client has a command
 for a repository and pages for a server):
 
@@ -146,11 +147,13 @@ phase 12; in the clear only on the machine itself).
   `user_added`, `user_removed`, `role_changed`, `signed_in`,
   `sign_in_refused`, `session_ended`, `plugin_failed`. A plugin is run
   for the kinds it lists (`kito-<name> server-event`, the event on its
-  input), one at a time and in order, after the fact, as a repository's
-  events are (D-152).
+  input), one at a time and in order, after the fact. What an
+  administrator's command did is told by that command before it leaves;
+  what happens while serving, by the server (D-154).
 - **Commands**: `kito-server <name> […]` for a name the server does not
-  have runs the enabled plugin that declares it, with the server's
-  directory in its environment (`KITO_SERVER_DIR`).
+  have runs the enabled plugin that declares it (`kito-<plugin> <name>
+  […]`), with the server's directory in its environment
+  (`KITO_SERVER_DIR`).
 
 ## Consequences
 

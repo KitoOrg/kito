@@ -1309,6 +1309,33 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-155 · An edit by hand is dated by its files too
+After a shell command an agent is told what the command changed in the
+main directory. "Since the command started" was judged by when an edit
+was recorded, and a save can be recorded well after it was made (a busy
+machine, a directory that is scanned): a test failed that way under
+load, and so would an agent have been blamed. An edit by hand now keeps
+when its files say they were written, and counts for a command only if
+it was recorded since the command started and its files are not clearly
+older. Files are dated by a coarser clock than the one a command's start
+is read from, so "clearly" is 50 ms. Files put back (a protected main
+lane) or removed say nothing, and are judged by the record alone.
+
+### D-154 · A server's plugins are told by whoever did the thing
+What an administrator does to a server is done by a `kito-server`
+command, not by the server that is serving: the command that added a
+person or a repository tells the plugins itself, after it is done and
+before it leaves, one plugin at a time. So an event is told once, by the
+process that knows it happened, with no queue to keep between processes;
+and a plugin that fails is said on the administrator's terminal, where
+somebody reads it, and written under the server's directory
+(`plugins/<name>/last-failure`) until it runs well again. What was asked
+is not undone by a plugin that fails. Events of the server that serves
+(somebody signing in) will be told by it, in order, as a repository's
+are (D-152). A command a plugin adds is given its own name first, so
+that a plugin with several knows which was asked. Permissions are one
+list for both: a repository gives only what is a repository's.
+
 ### D-153 · A plugin's tools are listed when asked, under its name
 `kito-mcp` asks the daemon which plugins are enabled each time an agent
 lists the tools or calls one that is not Kito's: a plugin enabled or

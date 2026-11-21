@@ -37,7 +37,7 @@ pub fn socket_name(root: &Path) -> String {
 
 /// A group of methods a plugin may be given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Permission {
     /// See: status, lanes, the board, the log, why, diffs, comments,
     /// reviews, notes, events, contents.
@@ -49,15 +49,32 @@ pub enum Permission {
     Integrate,
     /// Protect, configure, checkpoint, roll back, plugins.
     Admin,
+    /// On a server (ADR 0006): say who somebody is. Not what they may do.
+    SignIn,
+    /// On a server: be reached through its HTTP address.
+    Pages,
+    /// On a server: be told what happens on it.
+    ServerEvents,
+    /// On a server: add commands to `kito-server`.
+    ServerAdmin,
 }
 
 impl Permission {
+    /// `true` for what a repository gives; the rest is a server's to give.
+    pub fn of_a_repository(self) -> bool {
+        matches!(self, Permission::Read | Permission::Write | Permission::Integrate | Permission::Admin)
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             Permission::Read => "read",
             Permission::Write => "write",
             Permission::Integrate => "integrate",
             Permission::Admin => "admin",
+            Permission::SignIn => "sign_in",
+            Permission::Pages => "pages",
+            Permission::ServerEvents => "server_events",
+            Permission::ServerAdmin => "server_admin",
         }
     }
 }
@@ -225,6 +242,24 @@ pub struct AssistantSpec {
     pub name: String,
 }
 
+/// How a plugin signs people in on a server (ADR 0006): it says who
+/// somebody is, and the server says what they may do.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignInSpec {
+    /// `github`: what `kito connect --sign-in` is asked for.
+    pub method: String,
+    pub about: String,
+}
+
+/// The pages a plugin serves through a server's HTTP address.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PagesSpec {
+    /// The path its pages are under: `/`, `/metrics`.
+    pub mount: String,
+}
+
 /// What a plugin is, as its `kito-plugin.toml` says.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -246,6 +281,15 @@ pub struct Manifest {
     pub tools: Vec<ToolSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant: Option<AssistantSpec>,
+    // What it does for a server (ADR 0006).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignInSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<PagesSpec>,
+    #[serde(rename = "server_event", skip_serializing_if = "Vec::is_empty")]
+    pub server_events: Vec<EventSpec>,
+    #[serde(rename = "server_command", skip_serializing_if = "Vec::is_empty")]
+    pub server_commands: Vec<Command>,
 }
 
 /// Runs a program of a plugin for a repository, with `input` on its
@@ -260,15 +304,32 @@ pub fn run_plugin(
     input: &[u8],
     timeout: std::time::Duration,
 ) -> Result<Vec<u8>, String> {
+    let envs = [
+        (ENV_REPO, root.as_os_str().to_owned()),
+        (ENV_KEY, key.into()),
+        (ENV_SOCKET, socket_name(root).into()),
+    ];
+    run_program(program, args, root, &envs, input, timeout)
+}
+
+/// Runs a program of a plugin in `dir`, with `envs` and the version of
+/// the API in its environment and `input` on its standard input, and
+/// returns what it printed. `Err`: why it failed.
+pub fn run_program(
+    program: &Path,
+    args: &[&str],
+    dir: &Path,
+    envs: &[(&str, std::ffi::OsString)],
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
     use std::process::{Command as Process, Stdio};
     let mut child = Process::new(program)
         .args(args)
-        .current_dir(root)
-        .env(ENV_REPO, root)
+        .current_dir(dir)
         .env(ENV_API, crate::rpc::API.to_string())
-        .env(ENV_KEY, key)
-        .env(ENV_SOCKET, socket_name(root))
+        .envs(envs.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -370,6 +431,12 @@ impl Manifest {
         }
         if let Some(assistant) = &manifest.assistant {
             check_name("assistant", &assistant.name).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        for command in &manifest.server_commands {
+            check_name("command", &command.name).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(sign_in) = &manifest.sign_in {
+            check_name("way to sign in", &sign_in.method).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         if manifest.api == 0 {
             return Err(format!(
@@ -581,8 +648,16 @@ impl crate::Repo {
         if let Some(why) = found.manifest.unfit() {
             return Err(Error::Other(why));
         }
-        let mut given = permissions.unwrap_or_else(|| found.manifest.permissions.clone());
-        if let Some(more) = given.iter().find(|permission| !found.manifest.permissions.contains(permission)) {
+        // What a repository gives: of what it asks for, what is a repository's.
+        let asked: Vec<Permission> = found
+            .manifest
+            .permissions
+            .iter()
+            .copied()
+            .filter(|permission| permission.of_a_repository())
+            .collect();
+        let mut given = permissions.unwrap_or_else(|| asked.clone());
+        if let Some(more) = given.iter().find(|permission| !asked.contains(permission)) {
             return Err(Error::Other(format!(
                 "the plugin `{name}` does not ask for `{}`: it is given what it asks for, or less",
                 more.word()
@@ -779,6 +854,16 @@ pub fn write_config(store_dir: &Path, name: &str, plugin: Option<&PluginConfig>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permissions_are_written_as_they_are_said() {
+        let all = "[\"read\",\"write\",\"integrate\",\"admin\",\"sign_in\",\"pages\",\"server_events\",\"server_admin\"]";
+        let read: Vec<Permission> = serde_json::from_str(all).unwrap();
+        assert_eq!(read.len(), 8);
+        assert_eq!(serde_json::to_string(&read).unwrap(), all);
+        let words: Vec<String> = read.iter().map(|permission| format!("\"{}\"", permission.word())).collect();
+        assert_eq!(format!("[{}]", words.join(",")), all);
+    }
 
     #[test]
     fn each_method_needs_one_permission_and_unknown_ones_need_admin() {

@@ -1183,11 +1183,26 @@ impl Repo {
             }
             false => Vec::new(),
         };
+        // When they were written, as the files say: a save recorded late
+        // (a busy machine, a scan) is not the doing of whatever ran when
+        // it was recorded. A file that is gone says nothing.
+        let written_ms = by_hand
+            .iter()
+            .filter_map(|path| std::fs::metadata(work.root.join(path)).ok()?.modified().ok())
+            .filter_map(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map(|since| since.as_millis() as u64)
+            .max();
         let ops = self.record_work(work, file_ops.into_iter().chain(symbolic.ops), intent)?;
         if !by_hand.is_empty() && !ops.is_empty() {
             let at_ms =
                 SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-            self.note_direct(crate::guard::Direct { at_ms, paths: by_hand, put_back: false, kept: None });
+            self.note_direct(crate::guard::Direct {
+                at_ms,
+                written_ms,
+                paths: by_hand,
+                put_back: false,
+                kept: None,
+            });
         }
         if !ops.is_empty() {
             self.store.commit()?;
@@ -1231,6 +1246,8 @@ impl Repo {
         let refusal = Refusal { at_ms, paths, kept: kept.then_some(aside) };
         self.note_direct(crate::guard::Direct {
             at_ms,
+            // Put back: the files no longer say when they were written.
+            written_ms: None,
             paths: refusal.paths.clone(),
             put_back: true,
             kept: refusal.kept.clone(),
