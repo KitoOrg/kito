@@ -36,3 +36,4 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0002 · Kito on Windows](0002-windows.md) (accepted)
 - [0003 · Notes on code](0003-notes-on-code.md) (accepted)
+- [0004 · Review of a lane](0004-review-of-a-lane.md) (accepted)
