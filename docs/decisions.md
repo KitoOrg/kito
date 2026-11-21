@@ -1309,6 +1309,31 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-165 · One command for every assistant, and asking only where somebody answers
+`kito assistant add <name>` does all of it for every assistant
+([ADR 0011](adr/0011-one-way-to-add-an-assistant.md)), because the
+person asked that the commands be the same. Installing and enabling the
+plugin on the way is what made the commands differ; each step is still
+said, so nothing happens unseen, and enabling gives the plugin what its
+manifest asks for, as `kito plugin enable` would.
+
+Claude Code stays Kito's own, not a plugin: it is the one most projects
+use, `kito init` has set it up since 0.5, and a plugin to download first
+would make the first step longer. A plugin that sets it up and is
+enabled is used instead, as for any other assistant.
+
+Finding the assistants on a machine is done by looking, not by asking
+them: a program on the `PATH`, or a settings directory in the home
+directory. That is cheap, runs nothing, and is wrong only by saying an
+assistant is there that was removed and left its settings, which a
+question then makes harmless.
+
+Asking happens only at a terminal. `kito init` is run by scripts and by
+agents, and a question there would hang them; with nobody to ask it does
+what it always did. The answer can be given once (`kito assistant
+default`), and the install script asks for it, so most people are asked
+once in all.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

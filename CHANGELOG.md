@@ -4,6 +4,24 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.26.0]
+
+One way to add any assistant, and the ones a machine has (phase 25,
+[ADR 0011](docs/adr/0011-one-way-to-add-an-assistant.md)).
+
+- **`kito assistant add <name>…`** sets up any assistant with the same
+  command: `claude` by Kito itself, the others by their plugin, which is
+  installed from the registry and enabled here when needed. Each step is
+  said. `kito assistant remove claude` now takes Claude Code's files out.
+- **`kito assistant list`** says which assistants this machine has and
+  how each is set up; **`kito assistant default`** says once which ones
+  every new project gets.
+- **`kito init`, `import` and `connect`** set those up. With nothing said
+  they ask at a terminal for each assistant found; with nobody to ask
+  they set up Claude Code, as before, and name the others.
+  `--assistant <name>` and `--no-assistants` say it for one project.
+- The install script asks the same question once.
+
 ## [0.25.0]
 
 A lane says which assistant works in it, and on what model (phase 24,

@@ -41,3 +41,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0006 · Plugins for the server](0006-server-plugins.md) (accepted)
 - [0010 · A lane says which assistant works in it](0010-assistant-in-a-lane.md)
   (accepted)
+- [0011 · One way to add an assistant, and the ones a machine has](0011-one-way-to-add-an-assistant.md)
+  (accepted)

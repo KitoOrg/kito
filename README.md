@@ -68,8 +68,10 @@ In a new directory (in an existing git repository use `kito import`):
 kito init
 ```
 
-It also sets the project up for Claude Code (see [Claude Code](#claude-code);
-`--no-claude` leaves that out).
+It also sets up the coding assistants you use (see
+[Coding assistants](#coding-assistants)): the ones you said once with
+`kito assistant default`, or, asked at the terminal, the ones found on
+this machine; with nobody to ask, Claude Code.
 
 From here on every save is recorded, with no commits. To see what happened
 and mark a point, which also becomes a git commit:
@@ -251,14 +253,45 @@ Started inside the repository it finds it by itself, and `--repo` can be
 left out. If the client does not accept a dot in tool names, add
 `"--tool-prefix", "kito_"`.
 
-### Claude Code
+### Coding assistants
 
-`kito init` and `kito import` set the project up for Claude Code, and
-`kito claude` does it in a repository that is already there:
+Every assistant is set up the same way, in a repository:
 
 ```bash
-kito claude
+kito assistant add claude        # Claude Code, by Kito itself
+kito assistant add codex zcode   # by their plugins: installed and enabled here when needed
+kito assistant remove codex      # what `add` wrote in the project comes out
+kito assistant list              # what Kito knows, what this machine has, how each is set up
 ```
+
+For an assistant a plugin knows, `add` uses the plugin enabled here; or
+the one installed that knows it, which it enables here; or the plugin of
+that name in the registry, which it installs and enables. Each step is
+said. ZCode runs no hooks of a project, so `add zcode` also writes Kito's
+hooks in your own ZCode settings (`kito zcode hooks remove` takes them
+out).
+
+Kito finds Claude Code, Codex and ZCode on a machine by their program on
+the `PATH` or their settings directory (`~/.claude`, `~/.codex`,
+`~/.zcode`). Which ones every new project gets is said once:
+
+```bash
+kito assistant default claude codex   # kito init, import and connect set these up
+kito assistant default --none         # none
+kito assistant default                # says it
+```
+
+With nothing said, `kito init` asks at the terminal, one question for each
+assistant found; with nobody at the terminal (a script, an agent) it sets
+up Claude Code, as it always did, and names the others found.
+`--assistant <name>` (again for more) says it for one project,
+`--no-assistants` sets none up, `--no-claude` leaves Claude Code out. The
+install script asks the same question once, and writes the answer with
+`kito assistant default`.
+
+### Claude Code
+
+`kito assistant add claude` (or `kito claude`, the same) writes:
 
 | File | What goes in it |
 | --- | --- |
@@ -272,8 +305,8 @@ stays as it is written, and a second run changes nothing. A file that is not
 what was expected (JSON that does not parse, say) is left alone and named.
 They are files of the project: Kito records them, and they reach git with
 the next checkpoint, so that whoever clones the project has them. To leave a
-project as it is, `kito init --no-claude` (or `KITO_NO_CLAUDE=1` in the
-environment).
+project as it is, `kito init --no-assistants` (or `KITO_NO_CLAUDE=1` in
+the environment); `kito assistant remove claude` takes them out.
 
 Then start Claude Code in the project directory. The first time it asks to
 trust the folder and to approve the `kito` server; `/mcp` shows it connected
@@ -501,8 +534,10 @@ name = "codex"
   at is in `kito status`.
 - **A tool** (`kito-web tool open`, the arguments as JSON on its input)
   is offered to agents after Kito's own, and says whose it is.
-- **An assistant** is set up by `kito assistant add <name>`, which runs
-  the plugin's `assistant setup` in the repository.
+- **An assistant** is set up by `kito assistant add <name>`, which
+  enables the plugin here if needed and runs its `assistant setup` in the
+  repository (installing it from the registry first when it is not
+  installed).
 
 A server has plugins too ([ADR 0006](docs/adr/0006-server-plugins.md)):
 `kito-server plugin add --path <dir>`, then `plugin enable <name>`. On a

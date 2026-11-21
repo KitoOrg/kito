@@ -2605,6 +2605,53 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 25 · one way to add an assistant — done
+
+Setting up an assistant took a different set of commands for each, and
+the assistants already on a machine were not looked for. Released as
+0.26.0 ([ADR 0011](adr/0011-one-way-to-add-an-assistant.md), D-165).
+
+### What is there
+
+- **`kito assistant add <name>…`** for every assistant: Claude Code by
+  Kito, the others by their plugin, installed from the registry and
+  enabled here when needed, each step said. `remove` takes out what
+  `add` wrote, Claude Code's included.
+- **`kito assistant list`**: the assistants Kito knows, whether this
+  machine has each (its program on the `PATH`, or its settings
+  directory), and how each is set up.
+- **`kito assistant default <name>… | --none`**: which assistants every
+  new project gets, in the personal configuration.
+- **`kito init`, `import`, `connect`** set those up; with nothing said
+  they ask at a terminal, and elsewhere set up Claude Code and name the
+  others found. `--assistant <name>`, `--no-assistants`.
+- **kito-zcode 0.2.0**: `add zcode` also writes Kito's hooks in the
+  person's own ZCode settings.
+- **install.sh** asks, for each assistant found, whether new projects
+  should get it.
+
+### How it was tested
+
+- `kito-cli/tests/cli.rs`: an assistant set up by an installed plugin
+  that was not enabled; one the registry cannot give; a machine with
+  Codex's program on the `PATH` and ZCode's settings in its home
+  directory, listed; `init` with nobody at the terminal, with defaults,
+  with `--assistant`, `--no-assistants`, `--no-claude`; Claude Code
+  removed and added again.
+- kito-zcode, kito-codex and kito-claude: their tests under this Kito.
+- `scripts/demo-phase25.sh`, kept in `docs/demo/phase25-demo.txt`.
+
+### Known limitations
+
+- **The question at a terminal is not tested** by the suite: it needs a
+  terminal. The paths around it are.
+- **Detection knows three assistants**, by three directories and three
+  programs. Any other is added by name.
+- **Installing a plugin from the registry during `init`** needs the
+  registry to be reachable and to have it; otherwise `init` goes on and
+  says so.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 24 · which assistant works in a lane — done
 
 A lane said who works in it by a name and a person, and not what that

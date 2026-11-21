@@ -2318,9 +2318,15 @@ fn an_assistant_is_set_up_by_the_plugin_that_knows_it() {
     ok(root, &["init"]);
     fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
     ok(root, &["checkpoint", "-m", "first version"]);
-    assert!(ok(root, &["assistant", "list"]).contains("No plugin enabled here sets an assistant up."));
-    let none = kito(root, &["assistant", "add", "hello"]);
-    assert!(String::from_utf8_lossy(&none.stderr).contains("no plugin enabled here sets `hello` up"));
+    assert!(ok(root, &["assistant", "list"]).contains("claude   Claude Code"));
+    // Nothing installed knows it, and the registry does not have it.
+    let none = command(root, &["assistant", "add", "hello"])
+        .env("KITO_NO_CLAUDE", "1")
+        .env("KITO_REGISTRY", "file:///nonexistent-kito-registry")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&none.stderr).into_owned();
+    assert!(!none.status.success() && said.contains("its plugin `hello` could not be installed"), "{said}");
 
     let manifest = "name = \"hello\"\nversion = \"0.3.0\"\napi = 1\npermissions = [\"read\"]\n\n[assistant]\nname = \"hello\"\n\n[[tool]]\nname = \"shout\"\ndescription = \"Says it louder.\"\n";
     let source = hello_plugin(root, manifest);
@@ -2328,16 +2334,16 @@ fn an_assistant_is_set_up_by_the_plugin_that_knows_it() {
     let info = ok(root, &["plugin", "info", "hello"]);
     assert!(info.contains("sets up the assistant hello: `kito assistant add hello`"), "{info}");
     assert!(info.contains("tool kito.hello.shout  Says it louder."), "{info}");
-    let not_here = kito(root, &["assistant", "add", "hello"]);
-    let said = String::from_utf8_lossy(&not_here.stderr).into_owned();
-    assert!(said.contains("which this repository did not enable: `kito plugin enable hello`"), "{said}");
-
-    // Enabled, the plugin writes that assistant's files, and says what
-    // the assistant cannot be held to.
-    ok(root, &["plugin", "enable", "hello"]);
-    assert_eq!(ok(root, &["assistant", "list"]), "hello  (plugin hello 0.3.0)\n");
+    // Installed and not enabled here: `add` enables it, and says so; the
+    // plugin writes that assistant's files, and says what the assistant
+    // cannot be held to.
     let set = ok(root, &["assistant", "add", "hello"]);
+    assert!(set.contains("enabled the plugin hello here: it may read"), "{set}");
     assert!(set.contains("hello is set up for Kito") && set.contains("no hook before an edit"), "{set}");
+    let listed = ok(root, &["assistant", "list"]);
+    assert!(listed.contains("plugin hello, enabled here"), "{listed}");
+    let set = ok(root, &["assistant", "add", "hello"]);
+    assert!(!set.contains("enabled the plugin"), "{set}");
     assert!(fs::read_to_string(root.join("HELLO.md")).unwrap().contains("Work in a Kito lane"));
     assert!(ok(root, &["assistant", "remove", "hello"]).contains("no longer set up"));
     assert!(!root.join("HELLO.md").exists());
@@ -3075,4 +3081,120 @@ fn a_lane_says_which_assistant_works_in_it_and_on_what_model() {
     ok(root, &["daemon", "stop"]);
     assert_eq!(assistant(0), serde_json::json!({ "name": "zcode", "model": "glm-5" }));
     ok(root, &["daemon", "stop"]);
+}
+
+#[test]
+fn every_assistant_is_added_the_same_way_and_new_projects_get_the_ones_said() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (home, bin, config) = (base.join("home"), base.join("bin"), base.join("config"));
+    fs::create_dir_all(home.join(".zcode")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    // What Kito looks for: Codex's program on the PATH, ZCode's settings
+    // in the home directory. Claude Code is nowhere.
+    let codex = bin.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&codex, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths([bin.clone(), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]).unwrap();
+    let run = |cwd: &Path, args: &[&str]| -> Output {
+        command(cwd, args)
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("KITO_CONFIG_DIR", &config)
+            .env("KITO_REGISTRY", "file:///nonexistent-kito-registry")
+            .env_remove("KITO_NO_CLAUDE")
+            .env_remove("USERPROFILE")
+            .output()
+            .unwrap()
+    };
+    let good = |cwd: &Path, args: &[&str]| -> String {
+        let out = run(cwd, args);
+        let (said, errors) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "kito {args:?}: {said}{errors}");
+        said.into_owned()
+    };
+    let project = |name: &str| -> PathBuf {
+        let dir = base.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+
+    // What this machine has, and how each would be set up.
+    let listed = good(&base, &["assistant", "list"]);
+    assert!(listed.contains("codex    Codex        on this machine (`codex` on the PATH)"), "{listed}");
+    assert!(listed.contains("zcode    ZCode        on this machine (~/.zcode)"), "{listed}");
+    assert!(listed.contains("claude   Claude Code  not found here"), "{listed}");
+    assert!(listed.contains("plugin codex, from the registry"), "{listed}");
+    assert!(listed.contains("`kito init` asks"), "{listed}");
+
+    // Nobody at the terminal and nothing said: Claude Code, as always, and
+    // the others found are named with the command that adds them.
+    let a = project("a");
+    let made = good(&a, &["init"]);
+    assert!(made.contains("Set up for Claude Code"), "{made}");
+    assert!(
+        made.contains(
+            "Also on this machine: Codex, ZCode. `kito assistant add codex zcode` sets them up here."
+        ),
+        "{made}"
+    );
+    assert!(a.join(".mcp.json").is_file());
+    // The same command for every assistant; one the registry cannot give is said.
+    let out = run(&a, &["assistant", "add", "codex"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success()
+            && said.contains("Codex is not set up: its plugin `codex` could not be installed"),
+        "{said}"
+    );
+    // Claude Code comes out the same way it went in.
+    let out = good(&a, &["assistant", "remove", "claude"]);
+    assert!(out.contains("Claude Code is no longer set up for Kito here"), "{out}");
+    assert!(!a.join(".mcp.json").exists() && !a.join("CLAUDE.md").exists());
+    let out = good(&a, &["assistant", "add", "claude"]);
+    assert!(out.contains("Set up for Claude Code") && a.join("CLAUDE.md").is_file(), "{out}");
+
+    // Said once, for every new project: a plugin installed and not enabled
+    // anywhere is enabled where it is wanted.
+    let manifest = "name = \"hello\"\nversion = \"0.3.0\"\napi = 1\npermissions = [\"read\"]\n\n[assistant]\nname = \"hello\"\n";
+    let source = hello_plugin(&base, manifest);
+    good(&base, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    let said = good(&base, &["assistant", "default", "hello", "claude"]);
+    assert!(said.contains("New projects get: hello, Claude Code"), "{said}");
+    assert!(fs::read_to_string(config.join("config.toml"))
+        .unwrap()
+        .contains("default = [\"hello\", \"claude\"]"));
+    assert!(good(&base, &["assistant", "default"]).contains("New projects get: hello, claude."));
+    let b = project("b");
+    let made = good(&b, &["init"]);
+    assert!(made.contains("Set up for hello:") && made.contains("enabled the plugin hello here"), "{made}");
+    assert!(!made.contains("Also on this machine"), "{made}");
+    assert!(b.join("HELLO.md").is_file() && b.join(".mcp.json").is_file());
+
+    // For one project: what it is told, or nothing.
+    let c = project("c");
+    good(&c, &["init", "--assistant", "hello"]);
+    assert!(c.join("HELLO.md").is_file() && !c.join(".mcp.json").exists());
+    let d = project("d");
+    good(&d, &["init", "--no-assistants"]);
+    assert!(!d.join("HELLO.md").exists() && !d.join(".mcp.json").exists());
+    let e = project("e");
+    good(&e, &["init", "--no-claude"]);
+    assert!(e.join("HELLO.md").is_file() && !e.join(".mcp.json").exists());
+
+    // No assistant for new projects, said once.
+    assert!(good(&base, &["assistant", "default", "--none"]).contains("New projects get no assistant"));
+    let f = project("f");
+    let made = good(&f, &["--json", "init"]);
+    let made: Value = serde_json::from_str(&made).unwrap();
+    assert_eq!(made["assistants"]["set_up"], serde_json::json!([]));
+    assert!(!f.join(".mcp.json").exists());
+
+    for dir in [&a, &b, &c, &d, &e, &f] {
+        run(dir, &["daemon", "stop"]);
+    }
 }

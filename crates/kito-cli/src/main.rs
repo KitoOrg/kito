@@ -20,7 +20,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod assistants;
 mod claude;
+mod claude_out;
 mod hook;
 mod log;
 
@@ -109,18 +111,31 @@ enum RegistryCmd {
 
 #[derive(Subcommand)]
 enum AssistantCmd {
-    /// Set a coding assistant up for Kito in this repository: its tools,
-    /// its rules, its hooks, written by the plugin that knows it
-    Add { name: String },
-    /// Take out what `add` wrote
+    /// Set coding assistants up for Kito in this repository, the same way
+    /// for each: claude, codex, zcode, or any a plugin knows. The plugin
+    /// that knows one is installed and enabled here when needed
+    Add {
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+    },
+    /// Take out what `add` wrote in this repository
     Remove { name: String },
-    /// The assistants the plugins enabled here can set up
+    /// The assistants Kito knows, which this machine has, and how each is set up
     List,
+    /// Which assistants every new project gets (`kito init`, `import`,
+    /// `connect`); without a name, says it
+    Default {
+        #[arg(value_name = "NAME", conflicts_with = "none")]
+        names: Vec<String>,
+        /// New projects get none
+        #[arg(long)]
+        none: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Coding assistants other than Claude Code, set up by plugins
+    /// Coding assistants (Claude Code, Codex, ZCode, …): `kito assistant add <name>`
     Assistant {
         #[command(subcommand)]
         command: AssistantCmd,
@@ -143,6 +158,13 @@ enum Cmd {
         /// Do not set the project up for Claude Code (see `kito claude`)
         #[arg(long)]
         no_claude: bool,
+        /// Set this assistant up here (again for more), instead of the
+        /// ones `kito assistant default` says or the question
+        #[arg(long = "assistant", value_name = "NAME", conflicts_with = "no_assistants")]
+        assistants: Vec<String>,
+        /// Set no assistant up here
+        #[arg(long)]
+        no_assistants: bool,
     },
     /// Import the current state and the history of a git repository
     Import {
@@ -151,9 +173,15 @@ enum Cmd {
         /// Do not set the project up for Claude Code (see `kito claude`)
         #[arg(long)]
         no_claude: bool,
+        /// Set this assistant up here (again for more)
+        #[arg(long = "assistant", value_name = "NAME", conflicts_with = "no_assistants")]
+        assistants: Vec<String>,
+        /// Set no assistant up here
+        #[arg(long)]
+        no_assistants: bool,
     },
     /// Set the project up for Claude Code: the MCP server, the permission to
-    /// call it, the rules in CLAUDE.md (`init` and `import` do it too)
+    /// call it, the rules in CLAUDE.md (the same as `kito assistant add claude`)
     Claude,
     /// Show the operation log, most recent first
     Log {
@@ -306,6 +334,12 @@ enum Cmd {
         /// Do not set the directory up for Claude Code
         #[arg(long)]
         no_claude: bool,
+        /// Set this assistant up here (again for more)
+        #[arg(long = "assistant", value_name = "NAME", conflicts_with = "no_assistants")]
+        assistants: Vec<String>,
+        /// Set no assistant up here
+        #[arg(long)]
+        no_assistants: bool,
     },
     /// Sign in again to the server this directory is connected to: when
     /// the session ended, or to be somebody else
@@ -1020,9 +1054,16 @@ fn run_plugin_here(
     }
 }
 
-/// `kito assistant`: a coding assistant is set up by the plugin that
-/// knows it (ADR 0005).
+/// `kito assistant`: every assistant is set up the same way (ADR 0011):
+/// Claude Code by Kito itself, the others by the plugin that knows them.
 fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
+    match command {
+        AssistantCmd::Default { names, none } => return assistant_default(cli, names, *none),
+        AssistantCmd::List => return assistant_list(cli),
+        AssistantCmd::Add { names } => return assistant_add(cli, names),
+        AssistantCmd::Remove { name } if name == "claude" => return assistant_remove_claude(cli),
+        AssistantCmd::Remove { .. } => {}
+    }
     let root = root_of(cli)?;
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
     let listed: Value = client.call("plugins", json!({})).map_err(fail)?;
@@ -1048,8 +1089,8 @@ fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
             }
             return Ok(0);
         }
-        AssistantCmd::Add { name } => (name, "setup"),
         AssistantCmd::Remove { name } => (name, "remove"),
+        AssistantCmd::Add { .. } | AssistantCmd::Default { .. } => unreachable!("answered above"),
     };
     let Some(plugin) = sets_up(name) else {
         // Installed, and not let in here: say how.
@@ -1069,6 +1110,180 @@ fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
         });
     };
     run_plugin_here(&root, &mut client, plugin, &["assistant".into(), what.into()])
+}
+
+/// `kito assistant add <name>…`: each the same way, said as it goes.
+fn assistant_add(cli: &Cli, names: &[String]) -> Result<u8, String> {
+    let root = root_of(cli)?;
+    let mut said = Vec::new();
+    let mut failed = 0;
+    // A plugin enabled here that sets Claude Code up is asked, as for any
+    // other assistant; otherwise Kito does it itself.
+    let claude_by_plugin = Client::connect_or_start(&root)
+        .ok()
+        .and_then(|mut client| client.call::<Value>("plugins", json!({})).ok())
+        .and_then(|listed| listed.as_array().cloned())
+        .is_some_and(|listed| {
+            listed.iter().any(|plugin| plugin["enabled"] == true && plugin["assistant"] == "claude")
+        });
+    for name in names {
+        let done: Result<Value, String> = match name.as_str() {
+            "claude" if !claude_by_plugin => claude_here(cli, &root).map(|setup| {
+                if !cli.json {
+                    setup.print();
+                }
+                setup.json()
+            }),
+            _ => Client::connect_or_start(&root)
+                .map_err(fail)
+                .and_then(|mut client| add_by_plugin(&root, &mut client, name))
+                .map(|lines| {
+                    if !cli.json {
+                        println!("Set up for {}:", assistants::title(name));
+                        lines.iter().for_each(|line| println!("  {line}"));
+                    }
+                    json!(lines)
+                }),
+        };
+        match done {
+            Ok(value) => said.push(json!({ "name": name, "set_up": true, "said": value })),
+            Err(why) => {
+                failed += 1;
+                if !cli.json {
+                    eprintln!("kito: {} is not set up: {why}", assistants::title(name));
+                }
+                said.push(json!({ "name": name, "set_up": false, "error": why }));
+            }
+        }
+    }
+    if cli.json {
+        print_json(&said);
+    }
+    Ok(u8::from(failed > 0))
+}
+
+/// `kito assistant remove claude`: by the plugin when one is enabled here,
+/// by Kito itself otherwise.
+fn assistant_remove_claude(cli: &Cli) -> Result<u8, String> {
+    let root = root_of(cli)?;
+    let mut client = Client::connect_or_start(&root).map_err(fail)?;
+    let listed: Value = client.call("plugins", json!({})).map_err(fail)?;
+    let plugin = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|plugin| plugin["enabled"] == true && plugin["assistant"] == "claude")
+        .cloned();
+    if let Some(plugin) = plugin {
+        return run_plugin_here(&root, &mut client, &plugin, &["assistant".into(), "remove".into()]);
+    }
+    let done = claude_out::remove(&root)?;
+    if cli.json {
+        let files: Vec<Value> =
+            done.iter().map(|one| json!({ "file": one.path, "change": one.what })).collect();
+        print_json(&json!({ "files": files }));
+        return Ok(0);
+    }
+    if done.is_empty() {
+        println!("Claude Code was not set up for Kito here: nothing to take out.");
+    } else {
+        println!("Claude Code is no longer set up for Kito here:");
+        for one in &done {
+            println!("  {:<8}  {}", one.what, one.path.strip_prefix(&root).unwrap_or(&one.path).display());
+        }
+    }
+    Ok(0)
+}
+
+/// `kito assistant list`: what Kito knows, what this machine has, and how
+/// each is set up.
+fn assistant_list(cli: &Cli) -> Result<u8, String> {
+    let listed: Vec<Value> = root_of(cli)
+        .ok()
+        .and_then(|root| Client::connect_or_start(&root).ok())
+        .and_then(|mut client| client.call::<Value>("plugins", json!({})).ok())
+        .and_then(|listed| listed.as_array().cloned())
+        .unwrap_or_default();
+    let installed = kitod::plugins::all_installed();
+    let defaults = assistants::defaults();
+    let mut rows = Vec::new();
+    let mut names: Vec<String> = assistants::KNOWN.iter().map(|one| one.name.to_owned()).collect();
+    for plugin in &listed {
+        if let Some(name) =
+            plugin["assistant"].as_str().filter(|name| !names.iter().any(|known| known == name))
+        {
+            names.push(name.to_owned());
+        }
+    }
+    for name in &names {
+        let known = assistants::known(name);
+        let found = known.and_then(assistants::found);
+        let enabled =
+            listed.iter().find(|plugin| plugin["enabled"] == true && plugin["assistant"] == name.as_str());
+        let has = installed.iter().find(|plugin| {
+            plugin.manifest.assistant.as_ref().is_some_and(|assistant| assistant.name == *name)
+        });
+        let how = match (known.map(|one| one.plugin), enabled, has) {
+            (_, Some(plugin), _) => {
+                format!("plugin {}, enabled here", plugin["name"].as_str().unwrap_or_default())
+            }
+            (Some(None), _, _) => "Kito itself".to_owned(),
+            (_, None, Some(plugin)) => format!("plugin {}, installed", plugin.manifest.name),
+            (Some(Some(plugin)), None, None) => format!("plugin {plugin}, from the registry"),
+            (None, None, None) => "a plugin".to_owned(),
+        };
+        let by_default = defaults.as_ref().is_some_and(|list| list.iter().any(|one| one == name));
+        rows.push(json!({
+            "name": name, "title": assistants::title(name), "found": found, "how": how, "default": by_default,
+        }));
+    }
+    if cli.json {
+        print_json(&rows);
+        return Ok(0);
+    }
+    for row in &rows {
+        let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
+        let found = match row["found"].as_str() {
+            Some(found) => format!("on this machine ({found})"),
+            None => "not found here".to_owned(),
+        };
+        println!("{:<8} {:<12} {:<38} {}", text("name"), text("title"), found, text("how"));
+    }
+    match defaults {
+        Some(list) if list.is_empty() => println!("New projects get no assistant (`kito assistant default`)."),
+        Some(list) => println!("New projects get: {} (`kito assistant default`).", list.join(", ")),
+        None => println!("New projects: `kito init` asks, for the ones on this machine (`kito assistant default` says it once)."),
+    }
+    println!("`kito assistant add <name>` sets one up in this repository.");
+    Ok(0)
+}
+
+/// `kito assistant default`: says, or changes, which assistants every new
+/// project gets.
+fn assistant_default(cli: &Cli, names: &[String], none: bool) -> Result<u8, String> {
+    if names.is_empty() && !none {
+        let said = assistants::defaults();
+        if cli.json {
+            print_json(&json!({ "default": said }));
+        } else {
+            match said {
+                Some(list) if list.is_empty() => println!("New projects get no assistant."),
+                Some(list) => println!("New projects get: {}.", list.join(", ")),
+                None => println!("Not said: `kito init` asks, for the assistants on this machine."),
+            }
+        }
+        return Ok(0);
+    }
+    let path = assistants::set_defaults(names)?;
+    if cli.json {
+        print_json(&json!({ "default": names, "file": path }));
+    } else if names.is_empty() {
+        println!("New projects get no assistant ({}).", path.display());
+    } else {
+        let titles: Vec<String> = names.iter().map(|name| assistants::title(name)).collect();
+        println!("New projects get: {} ({}).", titles.join(", "), path.display());
+    }
+    Ok(0)
 }
 
 /// Runs a command of a plugin this repository enabled, with what it needs
@@ -1285,26 +1500,149 @@ fn stop_daemon(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Sets the project up for Claude Code, unless that was not wanted. The
-/// files are written before the first scan, which records them.
-fn claude_setup(root: &Path, no_claude: bool) -> Option<claude::Setup> {
-    (!no_claude && !claude::disabled()).then(|| claude::setup(root))
+/// What was said of the assistants a new project gets (ADR 0011).
+struct Chosen {
+    no_claude: bool,
+    names: Vec<String>,
+    none: bool,
+}
+
+/// The assistants a new project gets, and the ones found and left out.
+/// Claude Code's files are written now, before the first scan records
+/// them; the others are set up by their plugins once the daemon runs.
+struct NewAssistants {
+    wanted: Vec<String>,
+    others: Vec<&'static assistants::Known>,
+    claude: Option<claude::Setup>,
+}
+
+fn assistants_before(cli: &Cli, root: &Path, chosen: &Chosen) -> NewAssistants {
+    let (wanted, others) =
+        assistants::for_new_project(&chosen.names, chosen.none, chosen.no_claude, !cli.json);
+    let claude = wanted.iter().any(|name| name == "claude").then(|| claude::setup(root));
+    NewAssistants { wanted, others, claude }
+}
+
+/// Sets up the assistants other than Claude Code, says how each went, and
+/// what else was found. A plugin that fails does not undo the project.
+fn assistants_after(cli: &Cli, root: &Path, client: &mut Client, new: &NewAssistants) -> Value {
+    let mut said = Vec::new();
+    for name in new.wanted.iter().filter(|name| *name != "claude") {
+        let done = add_by_plugin(root, client, name);
+        if !cli.json {
+            match &done {
+                Ok(lines) => {
+                    println!("Set up for {}:", assistants::title(name));
+                    lines.iter().for_each(|line| println!("  {line}"));
+                }
+                Err(why) => println!(
+                    "{} is not set up: {why} (`kito assistant add {name}` tries again)",
+                    assistants::title(name)
+                ),
+            }
+        }
+        said.push(match done {
+            Ok(lines) => json!({ "name": name, "set_up": true, "said": lines }),
+            Err(why) => json!({ "name": name, "set_up": false, "error": why }),
+        });
+    }
+    if !cli.json && !new.others.is_empty() {
+        let titles: Vec<&str> = new.others.iter().map(|one| one.title).collect();
+        let names: Vec<&str> = new.others.iter().map(|one| one.name).collect();
+        println!(
+            "Also on this machine: {}. `kito assistant add {}` sets {} up here.",
+            titles.join(", "),
+            names.join(" "),
+            if names.len() == 1 { "it" } else { "them" }
+        );
+    }
+    json!({
+        "set_up": new.wanted,
+        "plugins": said,
+        "also_found": new.others.iter().map(|one| one.name).collect::<Vec<_>>(),
+    })
+}
+
+/// Sets up an assistant that a plugin knows: the plugin enabled here, or
+/// the one installed that knows it, enabled now, or the one of that name
+/// in the registry, installed and enabled now. Answers what was done.
+fn add_by_plugin(root: &Path, client: &mut Client, name: &str) -> Result<Vec<String>, String> {
+    use kitod::plugins;
+    let mut said = Vec::new();
+    let enabled_here = |client: &mut Client| -> Result<Option<Value>, String> {
+        let listed: Value = client.call("plugins", json!({})).map_err(fail)?;
+        Ok(listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|plugin| plugin["enabled"] == true && plugin["assistant"] == name)
+            .cloned())
+    };
+    let plugin = match enabled_here(client)? {
+        Some(plugin) => plugin,
+        None => {
+            let installed = plugins::all_installed().into_iter().find(|plugin| {
+                plugin.manifest.assistant.as_ref().is_some_and(|assistant| assistant.name == name)
+            });
+            let plugin_name = match installed {
+                Some(plugin) => plugin.manifest.name,
+                None => {
+                    let wanted = assistants::known(name).and_then(|one| one.plugin).unwrap_or(name);
+                    let (added, source) = kitod::registry::install(wanted, None)
+                        .map_err(|why| format!("its plugin `{wanted}` could not be installed: {why}"))?;
+                    said.push(format!(
+                        "installed the plugin {} {} from {}",
+                        added.manifest.name, added.manifest.version, source.registry
+                    ));
+                    added.manifest.name
+                }
+            };
+            let enabled: Value = client
+                .call("plugin_enable", json!({ "name": plugin_name, "permissions": Value::Null }))
+                .map_err(fail)?;
+            let given = strings(&enabled["permissions"]);
+            let given = if given.is_empty() { "nothing".to_owned() } else { given.join(", ") };
+            said.push(format!("enabled the plugin {plugin_name} here: it may {given}"));
+            enabled_here(client)?
+                .ok_or_else(|| format!("the plugin {plugin_name} does not set `{name}` up"))?
+        }
+    };
+    let plugin_name = plugin["name"].as_str().unwrap_or_default().to_owned();
+    let program = plugin["program"].as_str().map(PathBuf::from).ok_or("the plugin's program is not there")?;
+    let key: Value = client.call("plugin_key", json!({ "name": plugin_name })).map_err(fail)?;
+    let printed = plugins::run_plugin(
+        &program,
+        &["assistant", "setup"],
+        root,
+        key["key"].as_str().unwrap_or_default(),
+        &[],
+        std::time::Duration::from_secs(120),
+    )?;
+    said.extend(
+        String::from_utf8_lossy(&printed).lines().map(str::to_owned).filter(|line| !line.trim().is_empty()),
+    );
+    Ok(said)
+}
+
+/// Claude Code set up in this repository, by Kito itself.
+fn claude_here(cli: &Cli, root: &Path) -> Result<claude::Setup, String> {
+    // On a protected main lane the files would be put back as soon as
+    // they are written: said before, not found out after.
+    if Remote::load(root).is_none() {
+        let status: DaemonStatus = daemon(cli)?.call("status", json!({})).map_err(fail)?;
+        if status.repo.protected {
+            return Err("the main lane is protected, and the set-up writes files in the main directory: \
+                        `kito protect --off`, `kito assistant add claude`, `kito checkpoint -m \"set up for Claude \
+                        Code\"`, then `kito protect`"
+                .into());
+        }
+    }
+    Ok(claude::setup(root))
 }
 
 fn cmd_claude(cli: &Cli) -> Outcome {
     let root = root_of(cli)?;
-    // On a protected main lane the files would be put back as soon as
-    // they are written: said before, not found out after.
-    if Remote::load(&root).is_none() {
-        let status: DaemonStatus = daemon(cli)?.call("status", json!({})).map_err(fail)?;
-        if status.repo.protected {
-            return Err("the main lane is protected, and the set-up writes files in the main directory: \
-                        `kito protect --off`, `kito claude`, `kito checkpoint -m \"set up for Claude Code\"`, \
-                        then `kito protect`"
-                .into());
-        }
-    }
-    let setup = claude::setup(&root);
+    let setup = claude_here(cli, &root)?;
     if cli.json {
         print_json(&setup.json());
     } else {
@@ -1325,7 +1663,7 @@ fn not_connected(root: &Path) -> Outcome {
     }
 }
 
-fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> Outcome {
+fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, chosen: &Chosen) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     not_connected(&root)?;
     std::fs::create_dir_all(&root).map_err(fail)?;
@@ -1337,23 +1675,28 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, no_claude: bool) -> 
     let repo = Repo::init(&root).map_err(fail)?;
     let root = repo.root().to_owned();
     repo.close().map_err(fail)?;
-    let setup = claude_setup(&root, no_claude);
+    let new = assistants_before(cli, &root, chosen);
     // Capture is continuous from the very start: the daemon starts with the repository.
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
-    if cli.json {
-        print_json(&json!({ "root": root, "claude": setup.as_ref().map(claude::Setup::json) }));
-    } else {
+    if !cli.json {
         println!("Kito repository created in {}", root.join(".kito").display());
-        if let Some(setup) = &setup {
+        if let Some(setup) = &new.claude {
             setup.print();
         }
+    }
+    let assistants = assistants_after(cli, &root, &mut client, &new);
+    if cli.json {
+        print_json(&json!({
+            "root": root, "claude": new.claude.as_ref().map(claude::Setup::json), "assistants": assistants,
+        }));
+    } else {
         println!("The daemon is running: every save is recorded from now on.");
         warn_if_events_unreliable(&mut client);
     }
     Ok(())
 }
 
-fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
+fn cmd_import(cli: &Cli, path: &Option<PathBuf>, chosen: &Chosen) -> Outcome {
     let root = path.clone().or_else(|| cli.repo.clone()).unwrap_or_else(|| PathBuf::from("."));
     let root = root.canonical().map_err(|e| format!("{}: {e}", root.display()))?;
     not_connected(&root)?;
@@ -1363,10 +1706,15 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
         if root.join(".kito").join("format").is_file() { Repo::open(&root) } else { Repo::init(&root) }
             .map_err(fail)?;
     let report = repo.import_git().map_err(fail)?;
-    let setup = claude_setup(&root, no_claude);
+    let new = assistants_before(cli, &root, chosen);
+    let setup = &new.claude;
     let captured = repo.scan().map_err(fail)?;
     repo.close().map_err(fail)?;
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
+    let assistants = match cli.json {
+        true => assistants_after(cli, &root, &mut client, &new),
+        false => Value::Null,
+    };
     if cli.json {
         print_json(&json!({
             "commits": report.commits,
@@ -1375,6 +1723,7 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
             "skipped": report.skipped,
             "uncommitted_ops": captured.len(),
             "claude": setup.as_ref().map(claude::Setup::json),
+            "assistants": assistants,
         }));
     } else {
         println!(
@@ -1386,9 +1735,10 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>, no_claude: bool) -> Outcome {
         for line in &report.skipped {
             println!("  skipped {line}");
         }
-        if let Some(setup) = &setup {
+        if let Some(setup) = setup {
             setup.print();
         }
+        assistants_after(cli, &root, &mut client, &new);
         if !captured.is_empty() {
             println!("Captured {} not yet in git.", count(captured.len() as u64, "change", "changes"));
         }
@@ -2411,7 +2761,7 @@ fn cmd_sign_in(cli: &Cli, method: &Option<String>) -> Outcome {
     Ok(())
 }
 
-fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_claude: bool) -> Outcome {
+fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, chosen: &Chosen) -> Outcome {
     let dir = dir.clone().unwrap_or_else(|| PathBuf::from(repo));
     if dir.join(".kito").join("format").is_file() {
         return Err(format!("{} is a repository of its own: connect another directory", dir.display()));
@@ -2427,9 +2777,15 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_
     let main: Result<Value, String> = Client::connect_or_start(&dir)
         .and_then(|mut client| client.call("attach", json!({ "lane": "main" })))
         .map_err(fail);
-    let setup = claude_setup(&dir, no_claude);
+    let new = assistants_before(cli, &dir, chosen);
+    let setup = &new.claude;
+    let assistants = match Client::connect_or_start(&dir) {
+        Ok(mut client) if cli.json => assistants_after(cli, &dir, &mut client, &new),
+        _ => Value::Null,
+    };
     if cli.json {
         print_json(&json!({
+            "assistants": assistants,
             "dir": dir,
             "repo": repo,
             "server": remote.place(),
@@ -2466,6 +2822,9 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_
         println!("`kito lane attach <lane>` brings the files of another's lane here, kept in step.");
         if let Some(setup) = &setup {
             setup.print();
+        }
+        if let Ok(mut client) = Client::connect_or_start(&dir) {
+            assistants_after(cli, &dir, &mut client, &new);
         }
     }
     Ok(())
@@ -3519,8 +3878,17 @@ fn run() -> ExitCode {
         };
     }
     let outcome = match &cli.command {
-        Cmd::Init { path, fresh, no_claude } => cmd_init(&cli, path, *fresh, *no_claude),
-        Cmd::Import { path, no_claude } => cmd_import(&cli, path, *no_claude),
+        Cmd::Init { path, fresh, no_claude, assistants, no_assistants } => cmd_init(
+            &cli,
+            path,
+            *fresh,
+            &Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants },
+        ),
+        Cmd::Import { path, no_claude, assistants, no_assistants } => cmd_import(
+            &cli,
+            path,
+            &Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants },
+        ),
         Cmd::Claude => cmd_claude(&cli),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
@@ -3545,7 +3913,20 @@ fn run() -> ExitCode {
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Board => cmd_board(&cli),
-        Cmd::Connect { server, name, dir, token, sign_in, fingerprint, authority, plain, no_claude } => {
+        Cmd::Connect {
+            server,
+            name,
+            dir,
+            token,
+            sign_in,
+            fingerprint,
+            authority,
+            plain,
+            no_claude,
+            assistants,
+            no_assistants,
+        } => {
+            let chosen = Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants };
             // Who the server is comes first: nobody signs in to another.
             let how = remote_for(server, name, token, sign_in)
                 .and_then(|remote| trusted(remote, fingerprint, *authority, *plain))
@@ -3554,7 +3935,7 @@ fn run() -> ExitCode {
                     None => Ok(remote),
                 });
             match how {
-                Ok(remote) => cmd_connect(&cli, remote, name, dir, *no_claude),
+                Ok(remote) => cmd_connect(&cli, remote, name, dir, &chosen),
                 Err(e) => Err(e),
             }
         }

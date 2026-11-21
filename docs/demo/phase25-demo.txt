@@ -1,0 +1,49 @@
+== 1. What this machine has
+
+$ kito assistant list
+claude   Claude Code  not found here                         Kito itself
+codex    Codex        on this machine (`codex` on the PATH)  plugin codex, from the registry
+zcode    ZCode        on this machine (~/.zcode)             plugin zcode, from the registry
+New projects: `kito init` asks, for the ones on this machine (`kito assistant default` says it once).
+`kito assistant add <name>` sets one up in this repository.
+
+== 2. A new project, with nobody at the terminal
+
+$ kito init
+Kito repository created in /demo/shop/.kito
+Set up for Claude Code:
+  created     .gitignore             `.kito/` stays out of git
+  created     .mcp.json              the `kito` MCP server
+  created     .claude/settings.json  its tools need no asking; hooks check every edit
+  created     CLAUDE.md              the rules: one lane per task
+Start Claude Code in this directory: the first time it asks to trust the folder and to approve the `kito` server.
+Also on this machine: Codex, ZCode. `kito assistant add codex zcode` sets them up here.
+The daemon is running: every save is recorded from now on.
+
+== 3. Said once, for every new project
+
+$ kito assistant default claude
+New projects get: Claude Code (/demo/config/config.toml).
+
+$ kito init --no-claude
+Kito repository created in /demo/books/.kito
+The daemon is running: every save is recorded from now on.
+
+== 4. The same command for every assistant
+
+$ kito assistant remove claude
+Claude Code is no longer set up for Kito here:
+  removed   CLAUDE.md
+  removed   .mcp.json
+  removed   .claude/settings.json
+
+$ kito assistant add claude
+Set up for Claude Code:
+  unchanged   .gitignore             `.kito/` stays out of git
+  created     .mcp.json              the `kito` MCP server
+  created     .claude/settings.json  its tools need no asking; hooks check every edit
+  created     CLAUDE.md              the rules: one lane per task
+Start Claude Code in this directory: the first time it asks to trust the folder and to approve the `kito` server.
+
+$ kito assistant add codex
+kito: Codex is not set up: its plugin `codex` could not be installed: the registry (file:///demo/no-registry) has no plugin `codex`: `kito plugin search` lists what it has
