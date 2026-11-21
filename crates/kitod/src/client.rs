@@ -186,7 +186,10 @@ impl Client {
         // The key of the socket first: it says this client can read the
         // repository's own data. A daemon that has none ignores nothing:
         // none is sent.
-        if let Some(key) = rpc::socket_key(root) {
+        // A plugin says its own, which Kito gave it when it started it
+        // (ADR 0005): the daemon answers it what the repository gave it.
+        let own = std::env::var(crate::plugins::ENV_KEY).ok().filter(|key| !key.is_empty());
+        if let Some(key) = own.or_else(|| rpc::socket_key(root)) {
             let mut line = serde_json::to_vec(&json!({ "key": key }))
                 .map_err(|e| ClientError::Protocol(e.to_string()))?;
             line.push(b'\n');

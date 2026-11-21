@@ -16,6 +16,7 @@ use kitod::rpc::DaemonStatus;
 use kitod::semantic::Why;
 use kitod::Repo;
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -37,7 +38,41 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum PluginCmd {
+    /// Install a plugin for you: the directory that holds its
+    /// `kito-plugin.toml` and its program
+    Add {
+        /// A directory with a plugin built or unpacked here
+        #[arg(long, value_name = "DIR")]
+        path: PathBuf,
+    },
+    /// Remove a plugin you installed
+    Remove { name: String },
+    /// The plugins you installed, and what this repository says of each
+    List,
+    /// What a plugin is, asks for and adds
+    Info { name: String },
+    /// Let a plugin run in this repository, with what it asks for
+    Enable {
+        name: String,
+        /// Give it these permissions only: read, write, integrate, admin
+        #[arg(long, value_delimiter = ',', value_name = "PERMISSIONS")]
+        only: Option<Vec<String>>,
+    },
+    /// Stop a plugin from running in this repository
+    Disable { name: String },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Plugins: programs that add to Kito (a web client, an assistant)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCmd,
+    },
+    /// A command of a plugin this repository enabled: `kito web`
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
     /// Create `.kito/` in a directory and start recording saves
     Init {
         /// Directory to initialize (default: the current one)
@@ -490,6 +525,183 @@ fn root_of(cli: &Cli) -> Result<PathBuf, String> {
 
 fn daemon(cli: &Cli) -> Result<Client, String> {
     Client::connect_or_start(&root_of(cli)?).map_err(fail)
+}
+
+/// One line about a plugin: what it is, and what this repository says.
+fn plugin_line(name: &str, version: &str, description: &str, here: Option<&Value>) -> String {
+    let state = match here {
+        Some(here) if here["enabled"] == true => {
+            format!("enabled here ({})", strings(&here["permissions"]).join(", "))
+        }
+        Some(_) => "disabled here".to_owned(),
+        None => "not enabled here".to_owned(),
+    };
+    let version = if version.is_empty() { String::new() } else { format!(" {version}") };
+    let about = if description.is_empty() { String::new() } else { format!("  {description}") };
+    format!("{name}{version}  [{state}]{about}")
+}
+
+fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
+    use kitod::plugins;
+    // What the repository says, if this is one.
+    let here = || -> Vec<Value> {
+        let listed: Option<Value> =
+            daemon(cli).ok().and_then(|mut client| client.call("plugins", json!({})).ok());
+        listed.and_then(|listed| listed.as_array().cloned()).unwrap_or_default()
+    };
+    match command {
+        PluginCmd::Add { path } => {
+            let added = plugins::install_from(path)?;
+            let manifest = &added.manifest;
+            if cli.json {
+                print_json(&json!({ "name": manifest.name, "version": manifest.version, "dir": added.dir }));
+                return Ok(());
+            }
+            println!("{} {} is installed in {}", manifest.name, manifest.version, added.dir.display());
+            println!("  `kito plugin enable {}` lets it run in a repository.", manifest.name);
+        }
+        PluginCmd::Remove { name } => match plugins::uninstall(name)? {
+            true => println!("{name} is removed. Repositories that enabled it say that it is missing."),
+            false => return Err(format!("the plugin `{name}` is not installed")),
+        },
+        PluginCmd::List => {
+            let (installed, here) = (plugins::all_installed(), here());
+            let said = |name: &str| here.iter().find(|plugin| plugin["name"] == name);
+            if cli.json {
+                let listed: Vec<Value> = installed
+                    .iter()
+                    .map(|plugin| {
+                        json!({ "name": plugin.manifest.name, "version": plugin.manifest.version, "here": said(&plugin.manifest.name) })
+                    })
+                    .collect();
+                print_json(&listed);
+                return Ok(());
+            }
+            if installed.is_empty() && here.is_empty() {
+                println!("No plugins. `kito plugin add --path <dir>` installs one.");
+            }
+            for plugin in &installed {
+                let manifest = &plugin.manifest;
+                println!(
+                    "{}",
+                    plugin_line(
+                        &manifest.name,
+                        &manifest.version,
+                        &manifest.description,
+                        said(&manifest.name)
+                    )
+                );
+            }
+            // What the repository relies on and this person does not have.
+            for plugin in
+                here.iter().filter(|plugin| plugin["installed"] == false && plugin["enabled"] == true)
+            {
+                println!("{}", plugin["problem"].as_str().unwrap_or_default());
+            }
+        }
+        PluginCmd::Info { name } => {
+            let plugin =
+                plugins::installed(name).ok_or_else(|| format!("the plugin `{name}` is not installed"))?;
+            let manifest = &plugin.manifest;
+            if cli.json {
+                print_json(manifest);
+                return Ok(());
+            }
+            let here = here();
+            let said = here.iter().find(|plugin| plugin["name"] == name.as_str());
+            println!("{}", plugin_line(&manifest.name, &manifest.version, &manifest.description, said));
+            println!("  program: {}", plugins::program(&plugin.dir, name).display());
+            println!("  written for API {}", manifest.api);
+            let asks: Vec<&str> = manifest.permissions.iter().map(|permission| permission.word()).collect();
+            println!("  asks for: {}", if asks.is_empty() { "nothing".to_owned() } else { asks.join(", ") });
+            for command in &manifest.commands {
+                println!("  kito {}  {}", command.name, command.about);
+            }
+            if let Some(why) = manifest.unfit() {
+                println!("  {why}");
+            }
+        }
+        PluginCmd::Enable { name, only } => {
+            let enabled: Value = daemon(cli)?
+                .call("plugin_enable", json!({ "name": name, "permissions": only }))
+                .map_err(fail)?;
+            if cli.json {
+                print_json(&enabled);
+                return Ok(());
+            }
+            let given = strings(&enabled["permissions"]);
+            let given = if given.is_empty() { "nothing".to_owned() } else { given.join(", ") };
+            println!("{name} is enabled in this repository. It may: {given}.");
+            for command in enabled["commands"].as_array().into_iter().flatten() {
+                println!(
+                    "  kito {}  {}",
+                    command["name"].as_str().unwrap_or_default(),
+                    command["about"].as_str().unwrap_or_default()
+                );
+            }
+        }
+        PluginCmd::Disable { name } => {
+            let done: Value = daemon(cli)?.call("plugin_disable", json!({ "name": name })).map_err(fail)?;
+            match done["changed"] == true {
+                true => println!("{name} is disabled in this repository."),
+                false => println!("{name} was not enabled in this repository."),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs a command of a plugin this repository enabled, with what it needs
+/// to reach the daemon in its environment. Returns its exit code.
+fn cmd_external(cli: &Cli, line: &[OsString]) -> Result<u8, String> {
+    use kitod::plugins;
+    let asked = line.first().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let unknown = || format!("`{asked}` is not a command of Kito (`kito --help` lists them)");
+    let root = root_of(cli).map_err(|_| unknown())?;
+    let mut client = Client::connect_or_start(&root).map_err(fail)?;
+    let listed: Value = client.call("plugins", json!({})).map_err(fail)?;
+    let provides = |plugin: &&Value| {
+        plugin["commands"].as_array().into_iter().flatten().any(|command| command["name"] == asked.as_str())
+    };
+    let all: &[Value] = listed.as_array().map_or(&[], Vec::as_slice);
+    let Some(plugin) = all.iter().find(|plugin| plugin["enabled"] == true && provides(plugin)) else {
+        // Enabled here and missing for this person: its commands are not
+        // known, its name is.
+        let missing = all.iter().find(|plugin| {
+            plugin["enabled"] == true && plugin["installed"] == false && plugin["name"] == asked.as_str()
+        });
+        if let Some(problem) = missing.and_then(|plugin| plugin["problem"].as_str()) {
+            return Err(problem.to_owned());
+        }
+        // Installed, and not let in here: say how.
+        let has = plugins::all_installed()
+            .into_iter()
+            .find(|plugin| plugin.manifest.commands.iter().any(|command| command.name == asked));
+        return Err(match has {
+            Some(plugin) => format!(
+                "`kito {asked}` is a command of the plugin `{}`, which this repository did not enable: \
+                 `kito plugin enable {}`",
+                plugin.manifest.name, plugin.manifest.name
+            ),
+            None => unknown(),
+        });
+    };
+    let name = plugin["name"].as_str().unwrap_or_default();
+    if let Some(problem) = plugin["problem"].as_str() {
+        return Err(problem.to_owned());
+    }
+    let program = plugin["program"].as_str().map(PathBuf::from).ok_or_else(unknown)?;
+    let key: Value = client.call("plugin_key", json!({ "name": name })).map_err(fail)?;
+    drop(client);
+    let status = std::process::Command::new(&program)
+        .args(&line[1..])
+        .env(plugins::ENV_REPO, &root)
+        .env(plugins::ENV_API, kitod::rpc::API.to_string())
+        .env(plugins::ENV_KEY, key["key"].as_str().unwrap_or_default())
+        .status()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    // Stopped by a signal: as a shell says it.
+    Ok(status.code().map_or(128, |code| code.clamp(0, 255) as u8))
 }
 
 /// Where the review of a lane stands, as text.
@@ -2766,6 +2978,16 @@ fn run() -> ExitCode {
             HookCmd::SessionStart => hook::session_start(),
         };
     }
+    // A command of a plugin: its exit code is the plugin's.
+    if let Cmd::External(line) = &cli.command {
+        return match cmd_external(&cli, line) {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("kito: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // So does a command run in a lane: its exit code is the command's.
     if let Cmd::Lane { command: LaneCmd::Run { lane, no_network, command } } = &cli.command {
         return match cmd_lane_run(&cli, lane, !*no_network, command) {
@@ -2824,6 +3046,8 @@ fn run() -> ExitCode {
         Cmd::Intent { summary, lane, task } => cmd_intent(&cli, summary, lane, task),
         Cmd::Hook { .. } => Ok(()),
         Cmd::Pull => cmd_pull(&cli),
+        Cmd::Plugin { command } => cmd_plugin(&cli, command),
+        Cmd::External(_) => unreachable!("answered above"),
         Cmd::Protect { off } => cmd_protect(&cli, !*off),
         Cmd::Status => cmd_status(&cli, false),
         Cmd::Daemon { command: DaemonCmd::Status } => cmd_status(&cli, true),

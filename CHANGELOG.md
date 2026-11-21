@@ -6,6 +6,22 @@ of a version are its section here.
 
 ## [Unreleased]
 
+Plugins ([ADR 0005](docs/adr/0005-plugins.md)), under way:
+
+- A plugin is a program, `kito-<name>`, with a `kito-plugin.toml`. `kito
+  plugin add --path <dir>` installs one for you; `kito plugin enable
+  <name>` lets it run in a repository, with the permissions it asks for
+  (`--only read,write` gives less); `list`, `info`, `disable`, `remove`.
+  Nothing of a plugin runs in a repository that did not enable it.
+- A command a plugin declares is a command of Kito there: `kito web`.
+- The daemon answers a plugin what the repository gave it (`read`,
+  `write`, `integrate`, `admin`) and refuses the rest, naming the
+  permission that is missing. Each plugin has a key of its own.
+- The daemon's methods are a numbered API, version 1, written down in
+  [docs/api.md](docs/api.md); `ping` answers `api`.
+- Not yet: installing from a release by name, events, gates, tools for
+  agents, assistants.
+
 ## [0.19.0]
 
 Review of a lane (phase 17, [ADR 0004](docs/adr/0004-review-of-a-lane.md)).

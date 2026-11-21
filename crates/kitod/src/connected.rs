@@ -447,7 +447,11 @@ impl Daemon {
         let flag = |key: &str| params.get(key).and_then(Value::as_bool).unwrap_or(false);
         let mut answer = match request.method.as_str() {
             "mirror_status" => return Ok(self.status()),
-            "ping" => return Ok(json!({ "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id() })),
+            "ping" => {
+                return Ok(
+                    json!({ "version": env!("CARGO_PKG_VERSION"), "api": rpc::API, "pid": std::process::id() }),
+                )
+            }
             "shutdown" => return Ok(json!({})),
             "attach" => {
                 let info = self.attach(up, text("lane")?, flag("write"))?;

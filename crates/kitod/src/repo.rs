@@ -704,6 +704,11 @@ impl Repo {
         &self.config
     }
 
+    /// What this repository says of a plugin, from now on (ADR 0005).
+    pub(crate) fn set_plugin_config(&mut self, name: &str, plugin: crate::plugins::PluginConfig) {
+        self.config.plugins.insert(name.to_owned(), plugin);
+    }
+
     /// Who signs the changes captured in this repository.
     pub fn identity(&self) -> &Identity {
         &self.identity

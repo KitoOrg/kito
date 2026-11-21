@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// The version of the daemon's methods, as plugins and other programs
+/// rely on them (ADR 0005, `docs/api.md`). Adding a method or an optional
+/// field of an answer does not change it; removing one, or changing what
+/// it means, does.
+pub const API: u32 = 1;
+
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;

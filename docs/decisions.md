@@ -1309,6 +1309,24 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-151 · A plugin says a key of its own, and a method needs one permission
+The first line on the daemon's socket is a key. The socket's own key is
+whoever can read the repository's data, as before; the key of a plugin
+(`.kito/plugins/<name>/key`, made when it is enabled, readable by its
+owner) is that plugin, and every request on the connection is checked
+against what the repository gave it before the daemon looks at it. Each
+method needs exactly one permission; one the list does not know needs
+`admin`, so that a method added later is closed to plugins until somebody
+says otherwise. `plugin_key` and `shutdown` are for no plugin, whatever it
+was given. Kito's own client says the key in `KITO_PLUGIN_KEY` when there
+is one, so that `kito` run by a plugin is that plugin too. A test reads
+`docs/api.md` and the daemon's source: every method is written down under
+the permission it needs, and nothing is written down that is not
+answered. A plugin is trusted as a program its person installed (it could
+read the socket's key from the disk): the permissions are about what a
+plugin is meant to do, and what a mistake of it can reach. The daemon of
+a connected directory does not answer plugins yet.
+
 ### D-150 · The owner's approval is given and does not count
 An approval by the owner of a lane, or by an agent that works for them,
 is recorded and shown as not counting ("the lane is theirs"): refusing it

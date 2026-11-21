@@ -96,6 +96,14 @@ agents = false
 # Whether an approval still counts after the lane changed.
 keep = false
 
+# Plugins are programs (`kito-<name>`) a person installs with `kito plugin
+# add`. Nothing of one runs here unless this repository enabled it, and
+# the daemon answers it only what it was given: `kito plugin enable <name>`
+# writes its section.
+# [plugins.web]
+# enabled = true
+# permissions = ["read", "write"]
+
 [scope]
 # Every lane declares what it will change before it changes it: functions
 # (src/auth.ts:getUser), files, directories (src/billing/). A change outside
@@ -175,6 +183,9 @@ pub struct Config {
     pub semantic: SemanticConfig,
     pub scope: ScopeConfig,
     pub review: ReviewConfig,
+    /// The plugins this repository enabled, by name (ADR 0005).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugins: std::collections::BTreeMap<String, crate::plugins::PluginConfig>,
 }
 
 /// What lanes may declare, and what they may change without declaring it.

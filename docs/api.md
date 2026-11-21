@@ -1,0 +1,148 @@
+# The daemon's API · version 1
+
+What a program asks the daemon of a repository, and what plugins
+([ADR 0005](adr/0005-plugins.md)) are answered. `kito`, `kito-mcp` and
+`kito-server` use nothing else.
+
+This is version **1**: the methods of Kito 0.19 and 0.20. `ping` answers
+the version a daemon speaks (`api`).
+
+- Adding a method, or an optional field to an answer, does not change the
+  number. A program ignores the fields it does not know.
+- Removing a method, or changing what one means, does; the daemon then
+  answers the version before as well, for one more release.
+
+## How to ask
+
+JSON-RPC 2.0, one message a line, on the repository's socket: a Unix
+socket at `.kito/kitod.sock` (when that path is too long for one,
+`kito-<hash of the directory>.sock` in the temporary directory); on
+Windows a named pipe, `\\.\pipe\kito-<hash of the directory>`, which the
+file `.kito/kitod.pipe` stands for. The daemon is started by `kito daemon start`, or by
+any `kito` command that needs it.
+
+The first line says a key, alone:
+
+```json
+{"key": "…64 hexadecimal characters…"}
+```
+
+A plugin says the one Kito put in its environment (`KITO_PLUGIN_KEY`,
+with `KITO_REPO`, the repository's directory, and `KITO_API`). The key of
+a plugin opens what the repository gave that plugin (the permissions
+below) and nothing else. Then requests and answers, a line each:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "lanes", "params": {}}
+{"jsonrpc": "2.0", "id": 1, "result": [ … ]}
+{"jsonrpc": "2.0", "id": 2, "error": {"code": -32020, "message": "…"}}
+```
+
+Errors that mean something of their own:
+
+| Code | Meaning |
+| --- | --- |
+| `-32020` | Refused: it is not done, and asking again will not help. The message says why, and what to do instead. A permission that is missing is this. |
+| `-32021` | The lane is written from another machine now. |
+| `-32022` | No such lane, or it is closed. |
+| `-32601`, `-32602`, `-32603`, `-32700` | As JSON-RPC says: unknown method, wrong parameters, an error inside, a line that is not a request. |
+
+A lane is named `lane/3`, `3`, or by the name of a permanent lane
+(`staging`); `main` is the main lane. Parameters in brackets may be left
+out. Paths are relative to the repository, with `/`.
+
+The answers are the types the daemon serializes, in `crates/kitod/src`:
+the file named in the last column defines each, field by field, with what
+it means.
+
+## Anybody who reached the daemon
+
+| Method | Parameters | Answers |
+| --- | --- | --- |
+| `ping` | | `version`, `api`, `pid` |
+
+## `read`
+
+| Method | Parameters | Answers | Defined in |
+| --- | --- | --- | --- |
+| `status` | | The daemon (`pid`, what it watches) and, under `repo`, the repository: files, ops, checkpoints, protection, checks, what was last pushed | `server.rs`, `repo.rs` (`Status`) |
+| `lanes` | `[all]` | The open lanes (with `all`, the closed ones too) | `lanes.rs` (`LaneInfo`) |
+| `lane_status` | `lane` | One lane, with its conflicts and the comments that wait | `lanes.rs` (`LaneInfo`) |
+| `lane_diff` | `lane`, `[paths]` | What the lane changes: files, hunks, symbols | `review.rs` (`LaneDiff`) |
+| `lane_files` | `[lane]`, `[paths]` | The files of a lane, each with the ID of its content | `files.rs` (`FileEntry`) |
+| `get_blobs` | `blobs` | Contents by their IDs, in base64 | `server.rs` |
+| `board` | | Who is on what: every open lane with its scope and where it stands | `scope.rs` |
+| `who_touches` | `target` | The lanes that declared or changed a function, a file or a directory | `scope.rs` |
+| `log` | `[lane]`, `[limit]`, `[path]` | The last changes, newest first | `repo.rs` |
+| `why` | `file`, `symbol`, `[lane]` | The history of a function | `repo.rs` |
+| `why_graph` | `target`, `[lane]`, `[uses]` | Why a function, a file or lines are the way they are | `why.rs` (`WhyGraph`) |
+| `reasons` | `[about]`, `[limit]` | Earlier work, found by the words of its reason | `why.rs` (`ReasonHit`) |
+| `notes` | `[lane]`, `[on]` | The notes left on code | `notes.rs` (`NoteInfo`) |
+| `comments` | `lane`, `[all]` | What was said about a lane, each comment followed by its answers | `comments.rs` (`CommentInfo`) |
+| `review` | `lane` | Where the review of a lane stands, and what is missing | `verdicts.rs` (`ReviewInfo`) |
+| `conflicts` | `[all]` | The conflicts that wait for a decision (with `all`, the decided ones too) | `kito-integrate` (`ConflictInfo`) |
+| `integration_result` | `job`, `[wait_ms]` | How an integration ended, waiting for it if it has not | `kito-integrate` (`IntegrationResult`) |
+| `events` | `[after]`, `[wait_ms]` | What happened since event `after`, waiting up to `wait_ms` for something: `events`, and `next` to ask with | `rpc.rs` (`Event`) |
+| `plugins` | | The plugins this repository names | `plugins.rs` (`PluginInfo`) |
+| `sync` | `[lane]` | Records what is saved and not recorded yet; changes nothing else | `server.rs` |
+| `before_edit` | `path`, `[lane]`, `[lines]`, `[whole]` | Whether an edit may be made, and what to read first | `guard.rs` (`EditAnswer`) |
+| `after_shell` | `[since_ms]`, `[lanes]`, `[main]` | What a command changed where it should not have | `guard.rs` |
+| `reasons_behind` | `lane` | The reasons behind what a lane replaced, not told yet | `guard.rs` (`Replaced`) |
+
+## `write`
+
+| Method | Parameters | Answers | Defined in |
+| --- | --- | --- | --- |
+| `open_lane` | `agent`, `intent`, `scope`, `[task]`, `[base]`, `[on]`, `[target]` | The lane, its working copy, and why what it declared is the way it is | `lanes.rs`, `guard.rs` |
+| `close_lane` | `lane` | The lane as it was closed | `lanes.rs` (`LaneInfo`) |
+| `extend_scope` | `lane`, `scope` | The scope now, and the why of what was added | `guard.rs` (`ScopeWhy`) |
+| `set_intent` | `summary`, `[lane]`, `[task]`, `[prompt]` | The intent the next changes are recorded with | `lanes.rs` |
+| `rename_symbol` | `symbol`, `new_name`, `[lane]` | What was renamed, and the uses that followed | `rename.rs` |
+| `put_file` | `lane`, `path`, `content`, `[executable]`, `[base]`, `[writer]` | What became of a file saved from elsewhere: recorded, merged, or a conflict | `files.rs` (`Put`) |
+| `remove_file` | `lane`, `path`, `[base]`, `[writer]` | The same, for a removal | `files.rs` (`Put`) |
+| `claim_writer` | `lane`, `writer` | Makes this machine the one that writes the lane | `server.rs` |
+| `notices` | `lane` | What the lane's agent must be told, taken once | `repo.rs` |
+| `add_note` | `on`, `text`, `[lane]`, `[agent]` | The note | `notes.rs` (`NoteInfo`) |
+| `remove_note` | `note` | The note, removed | `notes.rs` (`NoteInfo`) |
+| `comment` | `lane`, `text`, `[on]`, `[reply_to]`, `[agent]` | The comment | `comments.rs` (`CommentInfo`) |
+| `resolve_comment` | `comment` | The comment, resolved | `comments.rs` (`CommentInfo`) |
+| `verdict` | `lane`, `verdict` (`approve`, `request_changes`, `withdraw`), `[text]`, `[agent]` | Where the review stands now | `verdicts.rs` (`ReviewInfo`) |
+
+## `integrate`
+
+| Method | Parameters | Answers | Defined in |
+| --- | --- | --- | --- |
+| `request_integration` | `lane` | A job (`job#3`): `integration_result` says how it ended | `server.rs` |
+| `resolve_conflict` | `conflict`, `[choice]` (`main`, `lane`), `[text]` | The conflict, decided | `kito-integrate` (`ConflictInfo`) |
+| `catch_up` | `lane` | Brings into a permanent lane what its target got since | `kito-integrate` (`IntegrationResult`) |
+| `pull` | | Brings in the commits of the git remote, through a lane | `pull.rs` (`Pull`) |
+
+## `admin`
+
+| Method | Parameters | Answers |
+| --- | --- | --- |
+| `checkpoint` | `label` | The checkpoint made of the main lane as it is |
+| `rollback` | `to`, `[paths]`, `[dry_run]` | What going back to a checkpoint changes, or changed |
+| `protect` | `[on]` | Whether the main lane is protected now |
+| `configure` | `[checks]`, `[push]`, `[approvals]` | The rules of the repository now |
+| `create_lane` | `name`, `[from]` | A permanent lane |
+| `export_git` | | Exports the checkpoints to git |
+| `import_scip` | `file` | Reads who uses what from a SCIP index |
+| `reload` | | Reads the configuration again |
+| `plugin_enable` | `name`, `[permissions]` | The plugin, as the repository has it now |
+| `plugin_disable` | `name` | Whether something changed |
+
+A method this page does not list needs `admin`.
+
+## Never for a plugin
+
+`plugin_key` (the key of a plugin, given to whoever holds the socket's)
+and `shutdown`.
+
+## In a directory connected to a server
+
+The daemon of a connected directory (`kito connect`) answers the same
+methods by asking the server, as the person who connected, and adds
+`attach`, `detach`, `take` (`write`) and `mirror_status` (`read`) for the
+copies of lanes it keeps. It does not answer plugins yet: a plugin runs
+where the repository is.

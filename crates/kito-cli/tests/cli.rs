@@ -1958,3 +1958,132 @@ fn a_lane_is_reviewed_from_the_command_line() {
     assert!(done.contains("integrated"), "{done}");
     assert!(fs::read_to_string(root.join("shop.ts")).unwrap().contains("Math.round"));
 }
+
+/// A directory with the plugin of the tests in it, as a download would
+/// leave it: its manifest and its program (an example of this crate).
+fn hello_plugin(base: &Path, manifest: &str) -> PathBuf {
+    let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
+    let exe = std::env::current_exe().unwrap();
+    let built = exe
+        .ancestors()
+        .map(|dir| dir.join("examples").join(&name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("examples/{name} is not built: `cargo test -p kito-cli` builds it"));
+    let dir = base.join("hello-src");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(built, dir.join(&name)).unwrap();
+    fs::write(dir.join("kito-plugin.toml"), manifest).unwrap();
+    dir
+}
+
+const HELLO: &str = "name = \"hello\"\nversion = \"0.1.0\"\ndescription = \"Says what it is told\"\napi = 1\npermissions = [\"read\", \"write\"]\n\n[[command]]\nname = \"hello\"\nabout = \"Ask the daemon as a plugin\"\n\n[[command]]\nname = \"hi\"\nabout = \"The same, shorter\"\n";
+
+#[test]
+fn a_plugin_is_installed_enabled_and_answered_what_it_was_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    fs::write(root.join(".gitignore"), ".kito/\n.absent-personal-config/\nhello-src/\n").unwrap();
+    fs::write(root.join("shop.ts"), "export const price = 1;\n").unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+
+    // Not a command of Kito, and of no plugin.
+    let none = kito(root, &["hello", "env"]);
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("`hello` is not a command of Kito"));
+    assert!(ok(root, &["plugin", "list"]).contains("No plugins."));
+
+    // Installed for the person: it runs nowhere yet.
+    let source = hello_plugin(root, HELLO);
+    let added = ok(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    assert!(added.starts_with("hello 0.1.0 is installed in "), "{added}");
+    assert_eq!(ok(root, &["plugin", "list"]), "hello 0.1.0  [not enabled here]  Says what it is told\n");
+    let info = ok(root, &["plugin", "info", "hello"]);
+    assert!(info.contains("asks for: read, write") && info.contains("kito hi  The same, shorter"), "{info}");
+    let not_here = kito(root, &["hello", "env"]);
+    let said = String::from_utf8_lossy(&not_here.stderr).into_owned();
+    assert!(said.contains("which this repository did not enable: `kito plugin enable hello`"), "{said}");
+
+    // Enabled by the repository, with what it asks for.
+    let enabled = ok(root, &["plugin", "enable", "hello"]);
+    assert!(enabled.starts_with("hello is enabled in this repository. It may: read, write.\n"), "{enabled}");
+    let config = fs::read_to_string(root.join(".kito/config.toml")).unwrap();
+    assert!(
+        config.contains("[plugins.hello]\nenabled = true\npermissions = [\"read\", \"write\"]"),
+        "{config}"
+    );
+    assert!(ok(root, &["plugin", "list"]).contains("[enabled here (read, write)]"));
+
+    // Its commands are Kito's now, with what it needs to reach the daemon.
+    let env = ok(root, &["hello", "env"]);
+    assert!(env.contains("api: 1\n") && env.contains("key: 64 characters\n"), "{env}");
+    // The repository, as the system names it.
+    let told = env.lines().find_map(|line| line.strip_prefix("repo: ")).unwrap();
+    assert_eq!(Path::new(told).canonical().unwrap(), root, "{env}");
+    assert_eq!(kito(root, &["hi", "exit", "7"]).status.code(), Some(7));
+    let ping: Value = serde_json::from_str(&ok(root, &["hello", "ask", "ping"])).unwrap();
+    assert_eq!(ping["api"], 1);
+
+    // The daemon answers it what it was given: it reads and it writes...
+    let lanes: Value = serde_json::from_str(&ok(root, &["hello", "ask", "lanes"])).unwrap();
+    assert_eq!(lanes, serde_json::json!([]));
+    let opened = ok(
+        root,
+        &["hello", "ask", "open_lane", r#"{"agent":"helper","intent":"a cheaper price","scope":["./"]}"#],
+    );
+    assert!(opened.contains("\"id\":\"lane/1\""), "{opened}");
+    // ...and neither integrates, nor configures, nor gets a key.
+    for (method, params, needs) in [
+        ("request_integration", r#"{"lane":"1"}"#, "needs the permission `integrate`"),
+        ("configure", r#"{"checks":["true"]}"#, "needs the permission `admin`"),
+        ("plugin_enable", r#"{"name":"hello","permissions":["admin"]}"#, "needs the permission `admin`"),
+        ("plugin_key", r#"{"name":"hello"}"#, "is not for plugins"),
+        ("shutdown", "{}", "is not for plugins"),
+    ] {
+        let refused = kito(root, &["hello", "ask", method, params]);
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert_eq!(refused.status.code(), Some(3), "{method}: {said}");
+        assert!(said.contains(needs) && said.contains("hello"), "{method}: {said}");
+    }
+
+    // Given less than it asks for; never more.
+    ok(root, &["plugin", "enable", "hello", "--only", "read"]);
+    let refused = kito(root, &["hello", "ask", "close_lane", r#"{"lane":"1"}"#]);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("needs the permission `write`"));
+    let more = kito(root, &["plugin", "enable", "hello", "--only", "read,admin"]);
+    assert!(String::from_utf8_lossy(&more.stderr).contains("does not ask for `admin`"));
+
+    // Disabled, nothing of it runs here; removed, it is gone for the person.
+    assert_eq!(ok(root, &["plugin", "disable", "hello"]), "hello is disabled in this repository.\n");
+    assert!(!kito(root, &["hello", "env"]).status.success());
+    assert!(ok(root, &["plugin", "list"]).contains("[disabled here]"));
+    ok(root, &["plugin", "enable", "hello"]);
+    assert!(ok(root, &["plugin", "remove", "hello"]).starts_with("hello is removed."));
+    let gone = kito(root, &["hello", "env"]);
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("is not installed here: `kito plugin add hello`"));
+    assert!(ok(root, &["plugin", "list"]).contains("is not installed here"));
+}
+
+#[test]
+fn what_is_not_a_plugin_is_not_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    let refused = |manifest: &str, words: &str| {
+        let source = hello_plugin(root, manifest);
+        let out = kito(root, &["plugin", "add", "--path", source.to_str().unwrap()]);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success() && said.contains(words), "{said}");
+    };
+    refused(&HELLO.replace("api = 1", "api = 99"), "update Kito");
+    refused(
+        &HELLO.replace("name = \"hello\"\nversion", "name = \"other\"\nversion"),
+        "the program of the plugin `other`",
+    );
+    refused(&HELLO.replace("\"write\"", "\"everything\""), "kito-plugin.toml");
+    let none = kito(root, &["plugin", "add", "--path", root.join("nowhere").to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&none.stderr).contains("kito-plugin.toml"));
+    assert!(String::from_utf8_lossy(&kito(root, &["plugin", "info", "hello"]).stderr)
+        .contains("is not installed"));
+}

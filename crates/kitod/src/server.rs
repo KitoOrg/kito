@@ -193,6 +193,18 @@ impl Daemon {
         }
     }
 
+    /// Who a first line is from: the key of the socket is whoever can
+    /// read the repository's own data, the key of a plugin is that plugin.
+    fn who_said(&self, line: &str) -> Option<crate::plugins::Access> {
+        let key = self.key.as_deref()?;
+        if rpc::key_said(line, key)? {
+            return Some(crate::plugins::Access::Owner);
+        }
+        let said: Value = serde_json::from_str(line).ok()?;
+        let said = said.get("key")?.as_str()?.to_owned();
+        self.with_repo(|repo| Ok(repo.plugin_of_key(&said))).ok().flatten()
+    }
+
     fn with_repo<T>(&self, f: impl FnOnce(&mut Repo) -> Result<T>) -> Result<T> {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
@@ -369,7 +381,39 @@ impl Daemon {
                     Ok(json!({ "protected": on, "changed": changed }))
                 }
                 // Asked by whoever wants to know that the daemon is there.
-                "ping" => Ok(json!({ "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id() })),
+                "ping" => Ok(
+                    json!({ "version": env!("CARGO_PKG_VERSION"), "api": rpc::API, "pid": std::process::id() }),
+                ),
+                // Plugins (ADR 0005).
+                "plugins" => to_json(serde_json::to_value(
+                    self.with_repo(|repo| Ok(repo.plugins())).map_err(internal)?,
+                )),
+                "plugin_enable" => {
+                    let name = text("name")?;
+                    let permissions: Option<Vec<crate::plugins::Permission>> = match params.get("permissions")
+                    {
+                        None | Some(Value::Null) => None,
+                        Some(given) => Some(serde_json::from_value(given.clone()).map_err(|_| {
+                            (
+                                rpc::INVALID_PARAMS,
+                                "permissions are read, write, integrate or admin".to_owned(),
+                            )
+                        })?),
+                    };
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.enable_plugin(name, permissions)).map_err(internal)?,
+                    ))
+                }
+                "plugin_disable" => {
+                    let name = text("name")?;
+                    let changed = self.with_repo(|repo| repo.disable_plugin(name)).map_err(internal)?;
+                    Ok(json!({ "name": name, "changed": changed }))
+                }
+                "plugin_key" => {
+                    let name = text("name")?;
+                    let key = self.with_repo(|repo| repo.plugin_key(name)).map_err(internal)?;
+                    Ok(json!({ "name": name, "key": key }))
+                }
                 "status" => to_json(serde_json::to_value(self.status().map_err(internal)?)),
                 "sync" => {
                     let ops = match params.get("lane").and_then(Value::as_str) {
@@ -1726,19 +1770,20 @@ async fn integration_loop(daemon: Arc<Daemon>) {
 async fn serve_connection(daemon: Arc<Daemon>, stream: Box<dyn crate::ipc::Connection>) {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
-    // Whoever speaks first says the key of the socket.
-    let mut trusted = daemon.key.is_none();
+    // Whoever speaks first says a key: the socket's, or the one of a
+    // plugin this repository enabled (ADR 0005).
+    let mut access = daemon.key.is_none().then_some(crate::plugins::Access::Owner);
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if !trusted {
-            match daemon.key.as_deref().and_then(|key| rpc::key_said(&line, key)) {
-                Some(true) => {
-                    trusted = true;
+        let Some(who) = &access else {
+            match daemon.who_said(&line) {
+                Some(who) => {
+                    access = Some(who);
                     continue;
                 }
-                _ => {
+                None => {
                     let id = serde_json::from_str::<Request>(&line).map_or(0, |request| request.id);
                     let mut bytes =
                         serde_json::to_vec(&Response::err(id, rpc::REFUSED, rpc::NO_KEY)).unwrap_or_default();
@@ -1747,15 +1792,18 @@ async fn serve_connection(daemon: Arc<Daemon>, stream: Box<dyn crate::ipc::Conne
                     break;
                 }
             }
-        }
+        };
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                let worker = daemon.clone();
-                let id = request.id;
-                tokio::task::spawn_blocking(move || worker.handle(&request))
-                    .await
-                    .unwrap_or_else(|e| Response::err(id, rpc::INTERNAL_ERROR, e.to_string()))
-            }
+            Ok(request) => match who.refusal(&request.method) {
+                Some(why) => Response::err(request.id, rpc::REFUSED, why),
+                None => {
+                    let worker = daemon.clone();
+                    let id = request.id;
+                    tokio::task::spawn_blocking(move || worker.handle(&request))
+                        .await
+                        .unwrap_or_else(|e| Response::err(id, rpc::INTERNAL_ERROR, e.to_string()))
+                }
+            },
             Err(e) => Response::err(0, rpc::PARSE_ERROR, format!("invalid request: {e}")),
         };
         let mut bytes = serde_json::to_vec(&response).unwrap_or_default();

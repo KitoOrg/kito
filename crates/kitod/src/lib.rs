@@ -19,6 +19,7 @@ pub mod ipc;
 pub mod lanes;
 pub mod mirror;
 pub mod notes;
+pub mod plugins;
 pub mod pull;
 pub mod refs;
 pub mod rename;

@@ -438,6 +438,27 @@ Who reviewed is on the checkpoint, in the why of that code, and in the
 exported commit (`Reviewed-by:`). Agents have the tools `lane_diff`,
 `comment`, `comments`, `resolve_comment` and `review`.
 
+## Plugins
+
+What does not belong in Kito is added by plugins: programs of their own,
+which ask the daemon what `kito` asks ([ADR 0005](docs/adr/0005-plugins.md)).
+The web client is one, not part of Kito.
+
+```bash
+kito plugin add --path ./kito-web   # installed for you
+kito plugin enable web              # this repository lets it run, with what it asks for
+kito web                            # its command, now one of Kito's here
+kito plugin list
+```
+
+A plugin is `kito-<name>` and a `kito-plugin.toml` that says what it asks
+for and what it adds. Nothing of it runs in a repository that did not
+enable it, and the daemon answers it only what the repository gave it:
+`read`, `write`, `integrate`, `admin`. What a program may ask the daemon,
+and under which permission, is in [docs/api.md](docs/api.md): the
+daemon's API, version 1. `crates/kito-cli/examples/kito-hello.rs` is the
+smallest plugin there is.
+
 ## The rules as behaviour
 
 Three rules hold for every agent, and none of them depends on the agent
