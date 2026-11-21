@@ -19,6 +19,9 @@ const DEFAULT_LISTEN: &str = "127.0.0.1:7421";
 pub struct Config {
     /// Address `serve` listens on.
     pub listen: String,
+    /// Address `serve` answers HTTP on (ADR 0006); none: it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http: Option<String>,
     pub users: BTreeMap<String, User>,
     /// The plugins this server enabled, by name (ADR 0006).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -27,7 +30,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { listen: DEFAULT_LISTEN.to_owned(), users: BTreeMap::new(), plugins: BTreeMap::new() }
+        Config {
+            listen: DEFAULT_LISTEN.to_owned(),
+            http: None,
+            users: BTreeMap::new(),
+            plugins: BTreeMap::new(),
+        }
     }
 }
 

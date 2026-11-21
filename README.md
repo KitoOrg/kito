@@ -508,8 +508,14 @@ A server has plugins too ([ADR 0006](docs/adr/0006-server-plugins.md)):
 `kito-server plugin add --path <dir>`, then `plugin enable <name>`. On a
 server a plugin adds commands to `kito-server` (`[[server_command]]`)
 and is told what happens there (`[[server_event]]`: a repository added,
-a person added or removed, a role changed). Signing in and pages
-through the server's address are being built.
+a person added or removed, a role changed).
+
+`kito-server serve --http 0.0.0.0:7443` answers HTTP too, with the
+server's certificate: `/-/me`, `/-/session` and `/-/api/<repository>`
+are the server's own, and every other path goes to the plugin that
+serves pages there (`[pages]`), which is told who is signed in and may
+ask of a repository only what that person may do. Signing in with a
+provider is being built.
 
 What a program may ask the daemon, and under which permission, is in
 [docs/api.md](docs/api.md): the daemon's API, version 1.

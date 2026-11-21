@@ -83,6 +83,62 @@ const READ: &[&str] = &[
     "sync",
 ];
 
+/// The code of "there is no such repository for this person".
+pub const NO_SUCH_REPO: i64 = -32023;
+
+/// Asks a repository's daemon one thing as a person: what their role
+/// allows, and, with `within`, of that only what needs one of these
+/// permissions (the pages of a server ask within what their plugin was
+/// given). The answer is the daemon's.
+pub fn ask(
+    server: &Server,
+    name: &str,
+    user: &User,
+    repo: &str,
+    method: &str,
+    params: Value,
+    within: Option<&[kitod::plugins::Permission]>,
+) -> Result<Value, (i64, String)> {
+    // The same answer for one that is not there and one that is not theirs.
+    let root = server.repo(repo).filter(|_| user.may_use(repo)).ok_or_else(|| {
+        (NO_SUCH_REPO, format!("there is no repository `{repo}` for {name} on this server"))
+    })?;
+    let role = user.role_in(repo);
+    if !ALLOWED.contains(&method) {
+        return Err((
+            rpc::METHOD_NOT_FOUND,
+            format!("`{method}` is not something a client can ask through the server"),
+        ));
+    }
+    if role == Role::Read && !READ.contains(&method) {
+        return Err((rpc::REFUSED, format!("{name} may read this repository, and `{method}` changes it")));
+    }
+    if let (Some(given), Some(needed)) = (within, kitod::plugins::permission_of(method)) {
+        if !given.contains(&needed) {
+            return Err((
+                rpc::REFUSED,
+                format!(
+                    "the pages of this server may not ask `{method}`: no plugin that serves them was given `{}`",
+                    needed.word()
+                ),
+            ));
+        }
+    }
+    let mut params = match params {
+        Value::Object(params) => Value::Object(params),
+        _ => json!({}),
+    };
+    // Who asks is what the server says, whatever the client sent.
+    params["on_behalf_of"] = json!({ "name": name, "email": user.email, "role": role.word() });
+    let mut daemon = None;
+    let answer = forward(&mut daemon, &root, 0, method, params);
+    match (answer.result, answer.error) {
+        (_, Some(error)) => Err((error.code, error.message)),
+        (Some(value), None) => Ok(value),
+        (None, None) => Ok(Value::Null),
+    }
+}
+
 fn send(writer: &mut dyn Write, message: &impl serde::Serialize) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(message).map_err(std::io::Error::other)?;
     line.push(b'\n');

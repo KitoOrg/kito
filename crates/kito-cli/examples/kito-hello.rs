@@ -21,6 +21,8 @@
 //! the event in a file of its own under the server's directory, and
 //! fails for one that says `explode`; `kito-hello greet [...]`, a command
 //! it adds to `kito-server`, says where it runs and what it was told.
+//! `kito-hello serve-pages` serves one page, which says what the server
+//! told it with the request, until its standard input closes.
 
 use kitod::client::Client;
 use std::path::PathBuf;
@@ -153,6 +155,69 @@ fn main() -> ExitCode {
                     ExitCode::from(1)
                 }
             }
+        }
+        Some("serve-pages") => {
+            use std::io::{BufRead, BufReader, Read, Write};
+            // The server holds the standard input open: when it closes,
+            // the server is gone.
+            std::thread::spawn(|| {
+                let mut gone = Vec::new();
+                let _ = std::io::stdin().read_to_end(&mut gone);
+                std::process::exit(0);
+            });
+            let secret = said("KITO_PAGES_SECRET");
+            let listener = match std::net::TcpListener::bind(said("KITO_PAGES_LISTEN")) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    eprintln!("hello: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let path = first.split(' ').nth(1).unwrap_or("?").to_owned();
+                let mut headers = std::collections::BTreeMap::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        headers.insert(name.trim().to_lowercase(), value.trim().to_owned());
+                    }
+                }
+                let told = |name: &str| headers.get(name).cloned().unwrap_or_else(|| "-".to_owned());
+                let body = format!(
+                    "hello pages
+path={path}
+user={}
+secret={}
+mount={}
+cookie={}
+authorization={}
+",
+                    told("x-kito-user"),
+                    if told("x-kito-secret") == secret { "ok" } else { "wrong" },
+                    told("x-kito-mount"),
+                    told("cookie"),
+                    told("authorization"),
+                );
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: {}
+Set-Cookie: kito_session=theirs
+Set-Cookie: hello=1
+Connection: close
+
+{body}",
+                    body.len()
+                );
+            }
+            ExitCode::SUCCESS
         }
         Some("greet") => {
             let dir = PathBuf::from(said("KITO_SERVER_DIR"));

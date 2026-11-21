@@ -115,28 +115,44 @@ A sign-in plugin proves an identity and nothing more:
 
 ### 3. Pages: through the server's own address
 
-`kito-server` listens for HTTP when told to (`http = "0.0.0.0:7443"` in
-`server.toml`, with the certificate it already has, section "TLS" of
-phase 12; in the clear only on the machine itself).
+`kito-server serve` answers HTTP when told to (`--http <address>`, or
+`http = "0.0.0.0:7443"` in `server.toml`), encrypted with the
+certificate it already has (phase 12); in the clear (`--plain`) only on
+the machine itself.
+
+Who asks is known by a token (`Authorization: Bearer`, the one `user
+add` printed or the one of a session, section 2) or by a cookie: `POST
+/-/session` with a token opens a session and sets it (`HttpOnly`,
+`SameSite=Strict`, `Secure` when encrypted), `DELETE /-/session` ends
+it.
 
 - **The server serves no pages of its own.** Under `/-/` it has what
-  only it can answer: `/-/sign-in/…`, `/-/sign-out`, `/-/me`, and
+  only it can answer: `/-/me` (who asks, and the repositories they may
+  use), `/-/session`, `/-/sign-in/…` (section 2), and
   `/-/api/<repository>` (below). Everything else goes to the plugin
   whose `[pages]` mount is the longest that fits; with none, the address
   says so in a line of text.
 - **A pages plugin is a program that stays up.** The server starts
   `kito-<name> serve-pages` with an address on the machine itself to
   listen on (`KITO_PAGES_LISTEN`) and a secret (`KITO_PAGES_SECRET`),
-  and passes requests on to it, each with the secret and with who asks
-  (`X-Kito-User`, when somebody is signed in). It is started again when
-  it stops; a request to one that is down says so.
+  and passes requests on to it, each with the secret (`X-Kito-Secret`),
+  where it is mounted (`X-Kito-Mount`) and who asks (`X-Kito-User`, when
+  somebody is signed in). What the browser sent under those names is not
+  passed on, nor the person's token, nor the cookie of their session: a
+  plugin is told who asks, and cannot be them. It may set cookies of its
+  own, not the server's. The server holds the plugin's standard input
+  open: when that closes, the server is gone, and the plugin stops. It
+  is started again when it stops; a request to one that is down says so.
 - **A page asks about a repository as the person who is looking at
   it.** `/-/api/<repository>` takes a method of the daemon's API
-  (`docs/api.md`) and answers as the daemon would for that person: what
-  their role allows, and of that, what the plugin was given. The browser
-  asks it with its session cookie; the plugin's own program with the
-  secret and the user it was told. No page can do what the person
-  looking at it could not do with `kito`.
+  (`docs/api.md`), as `{ "method": …, "params": … }`, and answers as the
+  daemon would for that person: what their role allows. A browser asks
+  with its session cookie, and is then held to what the plugins that
+  serve pages were given (`read`, `write`, `integrate`); and its request
+  must carry the header `X-Kito`, which a page of another site cannot
+  set. With a token of their own (a script, the command line) a person
+  is held to their role alone. No page can do what the person looking at
+  it could not do with `kito`.
 - The web client (`kito-web`) is the same client in both places: served
   by `kito web` to one person, or by `kito-web serve-pages` behind a
   server to those who sign in.

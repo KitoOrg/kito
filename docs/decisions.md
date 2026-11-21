@@ -1309,6 +1309,26 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-156 · The server's HTTP: its own under `/-/`, the rest a plugin's
+`kito-server serve --http` answers HTTP next to its own protocol, on a
+runtime of its own, with the certificate it already has. Under `/-/` it
+answers what only it can; any other path goes to the plugin whose pages
+are mounted there, a program the server starts and reaches on the
+machine itself. The server opens the server's configuration again for
+each request, as it does for each connection: a person removed is gone
+at their next request. A session is a random value kept by the server
+while it runs (in memory: restarting the server ends the sessions), in a
+cookie scripts cannot read and other sites cannot send. A request with a
+cookie is a page's: it must carry `X-Kito`, and is held to what the
+plugins that serve pages were given, all of them together, since the
+server cannot tell which page of which plugin asked. A request with a
+token is a person's own, held to their role alone. A plugin that serves
+pages is told who asks and never handed what would let it be them; it
+learns that the server is gone when its standard input closes, which
+needs nothing of the system and is the same on Windows. What a
+repository's daemon refuses is said as it said it (403, 404, 400); 502
+is for a daemon that could not be reached.
+
 ### D-155 · An edit by hand is dated by its files too
 After a shell command an agent is told what the command changed in the
 main directory. "Since the command started" was judged by when an edit

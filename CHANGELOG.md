@@ -30,7 +30,18 @@ under way:
   command changed files of the main directory that were written before
   it and only recorded while it ran (a busy machine). An edit by hand is
   now dated by its files as well as by when it was recorded.
-- Not yet: the HTTP address and pages, signing in.
+- **The server's HTTP address**: `kito-server serve --http <address>`
+  (or `http = …` in `server.toml`), encrypted with the server's
+  certificate. `/-/me` says who asks; `POST /-/session` with a token
+  opens a session kept in a cookie; `POST /-/api/<repository>` asks that
+  repository's daemon as the person, within their role.
+- **Pages**: every other path is passed on to the plugin whose
+  `[pages]` are mounted there, which the server starts and keeps
+  running. It is told who asks (`X-Kito-User`), never handed their token
+  or their session. What pages ask of a repository is held to what the
+  plugin was given.
+- Not yet: signing in with a provider (`sign_in` plugins, session tokens
+  for the command line).
 
 ## [0.20.0]
 

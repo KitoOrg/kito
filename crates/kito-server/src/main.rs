@@ -22,6 +22,7 @@
 //! server answers `{"ok": {...}}` or `{"error": "..."}`. After that come
 //! the requests of the daemon's own protocol (JSON-RPC 2.0).
 
+mod http;
 mod session;
 mod state;
 mod tls;
@@ -103,6 +104,11 @@ enum Cmd {
         /// Address to listen on (default: the one in server.toml)
         #[arg(long, value_name = "ADDR")]
         listen: Option<String>,
+        /// Answer HTTP on this address too: who is signed in, a
+        /// repository asked as that person, and the pages of plugins
+        /// (default: `http` in server.toml, if it is there)
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
     },
     /// Serve one client over standard input and output: for SSH
     Stdio {
@@ -480,8 +486,11 @@ fn run(cli: &Cli) -> Result<(), String> {
             let server = Server::open(&dir_of(cli))?;
             println!("{}", tls::fingerprint(&server.dir)?);
         }
-        Cmd::Serve { listen, plain } => {
+        Cmd::Serve { listen, plain, http } => {
             let server = Server::open(&dir_of(cli))?;
+            if let Some(address) = http.as_deref().or(server.config.http.as_deref()) {
+                http::serve(&server, address, *plain)?;
+            }
             session::serve(server, listen.as_deref(), *plain)?;
         }
         Cmd::Stdio { user } => {

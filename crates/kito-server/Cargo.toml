@@ -22,6 +22,11 @@ toml.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 getrandom = "0.2"
+# The HTTP address (ADR 0006).
+tokio.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "service"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [dev-dependencies]
 tempfile.workspace = true
