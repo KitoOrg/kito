@@ -393,3 +393,122 @@ fn http_is_encrypted_with_the_server_s_certificate() {
     assert!(cookie.contains("; Secure"), "{cookie}");
     assert!(!String::from_utf8_lossy(&plain.stdout).contains("nobody is signed in"));
 }
+
+const SIGNS: &str = r#"name = "hello"
+version = "0.6.0"
+api = 1
+permissions = ["sign_in", "server_events"]
+
+[sign_in]
+method = "hello"
+about = "Sign in with hello"
+
+[[server_event]]
+kinds = ["signed_in", "sign_in_refused", "session_ended"]
+"#;
+
+#[test]
+fn somebody_signs_in_in_a_browser_as_who_a_plugin_says_they_are() {
+    let served = Served::start(|dir| {
+        install_hello(dir, SIGNS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        // Who the plugin says `bob` is, is bob here: no token is made.
+        let said = ok(dir, &["user", "add", "bob", "--identity", "hello:bob", "--role", "write"]);
+        assert!(said.contains("whoever signs in as hello:bob is bob. No token."), "{said}");
+        assert!(said.contains("--sign-in hello") && !said.contains("kito_"), "{said}");
+        assert!(ok(dir, &["user", "list"]).contains("bob <bob@hello.example> [hello:bob]: * (write)"));
+        // The plugin is asked who that is, and an identity is one person's.
+        let unknown = server(dir, &["user", "add", "ghost", "--identity", "hello:nobody"]).output().unwrap();
+        assert!(String::from_utf8_lossy(&unknown.stderr)
+            .contains("hello:nobody: hello knows nobody by that name"));
+        let twice = server(dir, &["user", "add", "bobby", "--identity", "hello:bob"]).output().unwrap();
+        assert!(String::from_utf8_lossy(&twice.stderr).contains("hello:id-bob is bob already"));
+        let none = server(dir, &["user", "add", "dan", "--identity", "github:dan"]).output().unwrap();
+        let none = String::from_utf8_lossy(&none.stderr).into_owned();
+        assert!(none.contains("no way to sign in with `github`: it has hello"), "{none}");
+    });
+    // What the server keeps is what does not change, not the login.
+    let config = fs::read_to_string(served.dir.join("server.toml")).unwrap();
+    assert!(config.contains("identities = [\"hello:id-bob\"]"), "{config}");
+
+    let ways = served.request("GET", "/-/sign-in", &[], None).json();
+    assert_eq!(
+        ways["methods"],
+        json!([{ "method": "hello", "about": "Sign in with hello", "path": "/-/sign-in/hello" }])
+    );
+    let nowhere = served.request("GET", "/-/sign-in/github", &[], None);
+    assert_eq!(nowhere.status, 404, "{}", nowhere.body);
+
+    // The browser is sent to the provider, with where to come back to.
+    let left = served.request("GET", "/-/sign-in/hello", &[], None);
+    assert_eq!(left.status, 302, "{}", left.body);
+    let to = format!(
+        "location: https://hello.example/authorize?state=left-1&redirect_uri=http://{}/-/sign-in/hello/callback",
+        served.http
+    );
+    assert!(left.head.contains(&to), "{}", left.head);
+    assert!(
+        left.head.contains("set-cookie: kito_sign_in=left-1; path=/-/sign-in; httponly; samesite=lax"),
+        "{}",
+        left.head
+    );
+
+    // Whoever comes back is the one who left, or nobody.
+    let back = "/-/sign-in/hello/callback?code=bob&state=left-1";
+    assert_eq!(served.request("GET", back, &[], None).status, 403);
+    assert_eq!(served.request("GET", back, &[("Cookie", "kito_sign_in=another")], None).status, 403);
+    let leaving = [("Cookie", "kito_sign_in=left-1")];
+    let signed = served.request("GET", back, &leaving, None);
+    assert_eq!(signed.status, 200, "{}", signed.body);
+    assert!(signed.body.contains("Signed in as bob."), "{}", signed.body);
+    let session = signed
+        .head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: kito_session="))
+        .and_then(|rest| rest.split(';').next())
+        .unwrap_or_else(|| panic!("{}", signed.head))
+        .to_owned();
+    assert!(session.starts_with("kitos_"), "{session}");
+    assert!(signed.head.contains("set-cookie: kito_sign_in=; "), "{}", signed.head);
+
+    // The session is bob, with what bob may do; what is kept is not the token.
+    let cookie = format!("kito_session={session}");
+    let me = served.request("GET", "/-/me", &[("Cookie", &cookie)], None).json();
+    assert_eq!((me["user"].as_str(), me["email"].as_str()), (Some("bob"), Some("bob@hello.example")));
+    assert_eq!(me["repos"], json!([{ "name": "shop", "role": "write" }]));
+    let bearer = format!("Bearer {session}");
+    assert_eq!(served.request("GET", "/-/me", &[("Authorization", &bearer)], None).json()["user"], "bob");
+    let kept = fs::read_to_string(served.dir.join("sessions.toml")).unwrap();
+    assert!(kept.contains("user = \"bob\"") && !kept.contains(&session), "{kept}");
+    // A token an administrator handed out is not a session of a browser.
+    let as_cookie = format!("kito_session={}", served.ada);
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &as_cookie)], None).status, 401);
+
+    // Somebody the plugin knows and the server does not is nobody here;
+    // so is one who said no at the provider.
+    let eve = served.request("GET", "/-/sign-in/hello/callback?code=eve&state=left-1", &leaving, None);
+    assert_eq!(eve.status, 403, "{}", eve.body);
+    assert!(eve.body.contains("hello:eve is nobody on this server"), "{}", eve.body);
+    assert!(!eve.head.contains("kito_session="), "{}", eve.head);
+    let no = served.request("GET", "/-/sign-in/hello/callback?code=refuse&state=left-1", &leaving, None);
+    assert_eq!(no.status, 403, "{}", no.body);
+    assert!(no.body.contains("they said no at hello"), "{}", no.body);
+
+    // The plugins that listen are told who signed in, and who was refused.
+    let told = fs::read_to_string(served.dir.join("plugins/hello/events.log")).unwrap_or_default();
+    assert_eq!(told.lines().collect::<Vec<_>>(), ["signed_in bob (hello:bob)", "sign_in_refused hello:eve"]);
+
+    // A session ends when it is closed, and with the person.
+    let closed = served.request("DELETE", "/-/session", &[("Cookie", &cookie)], None);
+    assert_eq!(closed.status, 200, "{}", closed.body);
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &cookie)], None).status, 401);
+    let told = fs::read_to_string(served.dir.join("plugins/hello/events.log")).unwrap_or_default();
+    assert_eq!(told.lines().last(), Some("session_ended bob"), "{told}");
+    let again = served.request("GET", back, &leaving, None);
+    let again = again.head.lines().find_map(|line| line.strip_prefix("set-cookie: kito_session=")).unwrap();
+    let cookie = format!("kito_session={}", again.split(';').next().unwrap());
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &cookie)], None).status, 200);
+    ok(&served.dir, &["user", "remove", "bob"]);
+    assert_eq!(served.request("GET", "/-/me", &[("Cookie", &cookie)], None).status, 401);
+    assert!(!fs::read_to_string(served.dir.join("sessions.toml")).unwrap().contains("bob"));
+}

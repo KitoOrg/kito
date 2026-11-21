@@ -23,6 +23,13 @@
 //! it adds to `kito-server`, says where it runs and what it was told.
 //! `kito-hello serve-pages` serves one page, which says what the server
 //! told it with the request, until its standard input closes.
+//!
+//! It signs people in, too (`kito-hello sign-in begin | finish | lookup
+//! <login>`), as a provider that does not exist: whoever a file of its
+//! own under the server's directory (`plugins/hello/sign-in`) names has
+//! signed in, nobody has while the file is not there, and `refuse` in it
+//! is a person who said no. In a browser the provider's answer is in the
+//! query (`code=<login>`). It knows everybody but `nobody`.
 
 use kitod::client::Client;
 use std::path::PathBuf;
@@ -155,6 +162,55 @@ fn main() -> ExitCode {
                     ExitCode::from(1)
                 }
             }
+        }
+        Some("sign-in") => {
+            let told: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap_or_default();
+            let person = |login: &str| {
+                serde_json::json!({ "identity": {
+                    // Not what the server keeps: it knows which plugin it asked.
+                    "provider": "somebody-else",
+                    "subject": format!("id-{login}"),
+                    "login": login,
+                    "email": format!("{login}@hello.example"),
+                }})
+            };
+            let browser = told["kind"] == "browser";
+            let answer = match args.get(1).map(String::as_str) {
+                Some("begin") if browser => serde_json::json!({
+                    "open": format!(
+                        "https://hello.example/authorize?state=left-1&redirect_uri={}",
+                        told["redirect"].as_str().unwrap_or_default()
+                    ),
+                    "state": "left-1",
+                }),
+                Some("begin") => serde_json::json!({
+                    "open": "https://hello.example/device",
+                    "code": "HELLO-1234",
+                    "state": "device-1",
+                    "interval": 0,
+                }),
+                Some("finish") => {
+                    let file = PathBuf::from(said("KITO_SERVER_DIR")).join("plugins/hello/sign-in");
+                    let said = match browser {
+                        true => told["query"]["code"].as_str().map(str::to_owned),
+                        false => std::fs::read_to_string(file).ok().map(|text| text.trim().to_owned()),
+                    };
+                    match said.as_deref() {
+                        None | Some("") => serde_json::json!({ "wait": 0 }),
+                        Some("refuse") => serde_json::json!({ "refused": "they said no at hello" }),
+                        Some(login) => person(login),
+                    }
+                }
+                Some("lookup") => match args.get(2).map(String::as_str) {
+                    Some("nobody") | None => {
+                        serde_json::json!({ "refused": "hello knows nobody by that name" })
+                    }
+                    Some(login) => person(login),
+                },
+                _ => return ExitCode::from(2),
+            };
+            println!("{answer}");
+            ExitCode::SUCCESS
         }
         Some("serve-pages") => {
             use std::io::{BufRead, BufReader, Read, Write};

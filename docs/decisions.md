@@ -1309,6 +1309,40 @@ states of main. Its first parent is the lane's commit before; its second,
 main's commit, when the lane was brought up to a new state of main, or
 the commit a catch-up merged.
 
+### D-157 · Signing in: sessions the server keeps, a provider it never trusts further
+A plugin that signs people in is run once for each step and answers who
+somebody is. What the server keeps of a person is `<method>:<subject>`,
+where the method is the one the plugin was enabled for, whatever the
+plugin wrote as the provider: a plugin does not speak for the people of
+another. The login is kept beside it for people to read, and is not what
+is compared. A person with an identity has no token.
+
+A session is a token the server makes (`kitos_…`, told apart from an
+administrator's `kito_…`), kept as its hash in `sessions.toml` under the
+server's directory with whose it is and when it ends (`[sign_in] days`,
+30): sessions outlive a restart, which the command line needs, and this
+replaces the sessions in memory of D-156. The same token is what a
+browser's cookie holds; only a session is taken from a cookie, never an
+administrator's token. Removing a person ends their sessions.
+
+For a command line the exchange is on the server's own port, before the
+server knows who asks: `{"sign_in": {"version", "method"}}`, answered
+with where to go and what to enter, then `{"poll": true}` until the
+answer is a session. What the plugin handed out between its two steps
+stays on the server's side of that one connection; the plugin is asked
+no oftener than it said, and for fifteen minutes at most. `kito connect`
+settles which server it talks to (its certificate) before it signs in.
+
+For a browser, what the plugin handed out goes in a cookie for ten
+minutes (`SameSite=Lax`, since the way back starts at the provider) and
+must come back equal in the query: whoever returns is the browser that
+left. The answer that opens the session is a page and not a redirect: a
+`SameSite=Strict` cookie is not sent on a request that follows a
+redirect from another site, and the page is where the next request
+starts. Somebody the provider knows and the server does not gets the
+same refusal whoever they are, and the plugins that listen are told
+(`signed_in`, `sign_in_refused`, `session_ended`).
+
 ### D-156 · The server's HTTP: its own under `/-/`, the rest a plugin's
 `kito-server serve --http` answers HTTP next to its own protocol, on a
 runtime of its own, with the certificate it already has. Under `/-/` it

@@ -179,6 +179,10 @@ enum UserCmd {
         /// work in them; their integrations wait for approval), integrate
         #[arg(long, value_enum, default_value = "integrate")]
         role: Role,
+        /// Who they are for a plugin that signs people in, as
+        /// <method>:<login> (github:bob): they sign in, and have no token
+        #[arg(long, value_name = "METHOD:LOGIN")]
+        identity: Option<String>,
     },
     /// Change what a person may do: everywhere, or in one repository
     Role {
@@ -430,22 +434,38 @@ fn run(cli: &Cli) -> Result<(), String> {
             println!("{name}{rules}");
             server.tell("repo_changed", json!({ "repo": name, "what": format!("{name}{rules}") }));
         }
-        Cmd::User { command: UserCmd::Add { name, email, repos, role } } => {
+        Cmd::User { command: UserCmd::Add { name, email, repos, role, identity } } => {
             let mut server = Server::open(&dir_of(cli))?;
-            let token = server.add_user(name, email.clone(), repos, *role)?;
+            // Who that is, asked of the plugin now: what is kept does not
+            // change when they rename themselves there.
+            let identity = identity.as_deref().map(|identity| server.look_up(identity)).transpose()?;
+            let token = server.add_user(name, email.clone(), repos, *role, identity.as_ref())?;
             server.tell(
                 "user_added",
                 json!({ "user": name, "role": role.word(), "what": format!("{name} ({})", role.word()) }),
             );
-            println!("{name} added. Their token, shown this once:");
-            println!("{token}");
-            // What they connect with: the token, and what says the server
-            // they reach is this one.
-            println!("They connect with:");
-            println!(
-                "  kito connect <host>:<port> <repository> --token {token} --fingerprint {}",
-                tls::fingerprint(&server.dir)?
-            );
+            if let Some(token) = &token {
+                println!("{name} added. Their token, shown this once:");
+                println!("{token}");
+                // What they connect with: the token, and what says the
+                // server they reach is this one.
+                println!("They connect with:");
+                println!(
+                    "  kito connect <host>:<port> <repository> --token {token} --fingerprint {}",
+                    tls::fingerprint(&server.dir)?
+                );
+            } else if let Some(identity) = &identity {
+                let method = &identity.provider;
+                println!(
+                    "{name} added: whoever signs in as {method}:{} is {name}. No token.",
+                    identity.login
+                );
+                println!("They connect with:");
+                println!(
+                    "  kito connect <host>:<port> <repository> --sign-in {method} --fingerprint {}",
+                    tls::fingerprint(&server.dir)?
+                );
+            }
         }
         Cmd::User { command: UserCmd::Role { name, role, repo } } => {
             let mut server = Server::open(&dir_of(cli))?;
@@ -473,14 +493,19 @@ fn run(cli: &Cli) -> Result<(), String> {
                     user.repos.iter().map(|repo| format!("{repo} ({})", user.role_in(repo).word())).collect();
                 let named = user.roles.iter().filter(|(repo, _)| !user.repos.contains(*repo));
                 places.extend(named.map(|(repo, role)| format!("{repo} ({})", role.word())));
-                println!("{name}{email}: {}", places.join(", "));
+                // Who they sign in as, by the login it had when added.
+                let signs = match user.logins.is_empty() {
+                    true => String::new(),
+                    false => format!(" [{}]", user.logins.join(", ")),
+                };
+                println!("{name}{email}{signs}: {}", places.join(", "));
             }
         }
         Cmd::User { command: UserCmd::Remove { name } } => {
             let mut server = Server::open(&dir_of(cli))?;
             server.remove_user(name)?;
             server.tell("user_removed", json!({ "user": name, "what": name }));
-            println!("{name} removed: their token no longer works.");
+            println!("{name} removed: their token and their sessions no longer work.");
         }
         Cmd::Fingerprint => {
             let server = Server::open(&dir_of(cli))?;

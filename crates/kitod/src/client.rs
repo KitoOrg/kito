@@ -57,6 +57,10 @@ pub struct Remote {
     /// accepted for a server on this machine only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plain: bool,
+    /// The way this person signs in to the server (`github`): the token
+    /// is then a session's, and `kito sign-in` gets another this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<String>,
 }
 
 impl Remote {
@@ -203,11 +207,9 @@ impl Client {
         })
     }
 
-    /// Connects to a server and says who is asking. With `repo`, the
-    /// requests that follow are about the remote's repository; without,
-    /// only the server's own (`server.repos`) are answered.
-    pub fn remote(remote: &Remote, repo: bool) -> Result<Client, ClientError> {
-        let mut client = match (&remote.server, remote.command.as_slice()) {
+    /// Reaches a server, and says nothing to it yet.
+    fn reach(remote: &Remote) -> Result<Client, ClientError> {
+        Ok(match (&remote.server, remote.command.as_slice()) {
             (Some(server), _) => {
                 let unreachable = |e: std::io::Error| ClientError::Server(format!("{server}: {e}"));
                 let (address, host) = remote.address()?;
@@ -247,19 +249,18 @@ impl Client {
             (None, []) => {
                 return Err(ClientError::Server("the remote names neither a server nor a command".into()))
             }
-        };
-        // Who is asking, and about which repository.
-        let mut hello = json!({ "version": PROTOCOL, "token": remote.token });
-        if repo {
-            hello["repo"] = json!(remote.repo);
-        }
-        let mut line = serde_json::to_vec(&json!({ "hello": hello }))
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        })
+    }
+
+    /// Says one thing to a server before it knows who asks, and returns
+    /// what it answers; what it refuses is an error.
+    fn say(&mut self, remote: &Remote, message: &Value) -> Result<Value, ClientError> {
+        let mut line = serde_json::to_vec(message).map_err(|e| ClientError::Protocol(e.to_string()))?;
         line.push(b'\n');
-        client.writer.write_all(&line)?;
-        client.writer.flush()?;
+        self.writer.write_all(&line)?;
+        self.writer.flush()?;
         let mut answer = Vec::new();
-        if client.reader.read_until(b'\n', &mut answer)? == 0 {
+        if self.reader.read_until(b'\n', &mut answer)? == 0 {
             return Err(ClientError::Server(format!("{}: it closed the connection", remote.place())));
         }
         // A server that encrypts answers a plain hello with something
@@ -273,8 +274,57 @@ impl Client {
         })?;
         match answer.get("error").and_then(Value::as_str) {
             Some(reason) => Err(ClientError::Refused(reason.to_owned())),
-            None if answer.get("ok").is_some() => Ok(client),
+            None => Ok(answer),
+        }
+    }
+
+    /// Connects to a server and says who is asking. With `repo`, the
+    /// requests that follow are about the remote's repository; without,
+    /// only the server's own (`server.repos`) are answered.
+    pub fn remote(remote: &Remote, repo: bool) -> Result<Client, ClientError> {
+        let mut client = Client::reach(remote)?;
+        // Who is asking, and about which repository.
+        let mut hello = json!({ "version": PROTOCOL, "token": remote.token });
+        if repo {
+            hello["repo"] = json!(remote.repo);
+        }
+        let answer = client.say(remote, &json!({ "hello": hello }))?;
+        match answer.get("ok") {
+            Some(_) => Ok(client),
             None => Err(ClientError::Protocol(format!("unexpected greeting: {answer}"))),
+        }
+    }
+
+    /// Signs in to a server in one of the ways its plugins offer (ADR
+    /// 0006). `tell` is given, once, where the person goes and what they
+    /// enter there (`open`, `code`); this waits while they do. The answer
+    /// is the token of a session, who it is for and the days it lasts.
+    pub fn sign_in(
+        remote: &Remote,
+        method: &str,
+        tell: &mut dyn FnMut(&Value),
+    ) -> Result<Value, ClientError> {
+        let mut client = Client::reach(remote)?;
+        let begun = client.say(remote, &json!({ "sign_in": { "version": PROTOCOL, "method": method } }))?;
+        let Some(how) = begun.get("sign_in") else {
+            return Err(ClientError::Protocol(format!("unexpected answer to a sign-in: {begun}")));
+        };
+        tell(how);
+        let interval = how["interval"].as_u64().unwrap_or(5);
+        let mut wait = interval;
+        loop {
+            // Never in a tight circle, whatever the server says.
+            std::thread::sleep(Duration::from_millis((wait * 1000).clamp(200, 60_000)));
+            let answer = client.say(remote, &json!({ "poll": true }))?;
+            if let Some(ok) = answer.get("ok") {
+                return Ok(ok.clone());
+            }
+            match answer.get("wait").and_then(Value::as_u64) {
+                Some(longer) => wait = longer.max(interval),
+                None => {
+                    return Err(ClientError::Protocol(format!("unexpected answer to a sign-in: {answer}")))
+                }
+            }
         }
     }
 

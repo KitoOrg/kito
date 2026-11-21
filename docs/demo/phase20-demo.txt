@@ -1,0 +1,100 @@
+== 1. A server enables the plugin
+
+$ kito-server --dir /demo/server plugin add --path /demo/kito-hello
+hello 0.6.0 is installed in /demo/config/plugins/hello
+  `kito-server plugin enable hello` lets it run on this server.
+
+$ kito-server --dir /demo/server plugin enable hello
+hello is enabled on this server. It may: read, sign_in, pages, server_events, server_admin.
+  signing in with hello
+  pages under /
+  run for user_added, signed_in, sign_in_refused, session_ended
+  kito-server greet
+
+$ kito-server --dir /demo/server plugin list
+hello 0.6.0  [enabled (read, sign_in, pages, server_events, server_admin)]
+  signing in with hello
+  pages under /
+  run for user_added, signed_in, sign_in_refused, session_ended
+  kito-server greet
+
+== 2. Its command is a command of kito-server
+
+$ kito-server --dir /demo/server greet everybody
+hello from a server: everybody
+
+== 3. A person is who the plugin says they are
+
+$ kito-server --dir /demo/server user add bob --identity hello:bob --role write
+bob added: whoever signs in as hello:bob is bob. No token.
+They connect with:
+  kito connect <host>:<port> <repository> --sign-in hello --fingerprint sha256:…
+
+$ kito-server --dir /demo/server user add ghost --identity hello:nobody
+kito-server: hello:nobody: hello knows nobody by that name
+
+$ kito-server --dir /demo/server user list
+bob <bob@hello.example> [hello:bob]: * (write)
+
+== 4. Connecting by signing in
+
+$ kito connect 127.0.0.1:PORT shop desk --plain --sign-in hello
+To sign in with hello, open https://hello.example/device
+and enter the code HELLO-1234
+Waiting until you have...
+/demo/desk is connected to `shop` on 127.0.0.1:PORT as bob.
+The connection is NOT encrypted (--plain).
+The main lane is in it (1 file), kept as the server has it: to change something, open a lane.
+A lane you open is edited on this machine and recorded on the server;
+`kito lane attach <lane>` brings the files of another's lane here, kept in step.
+
+$ kito --repo /demo/desk repos
+shop  (this directory)
+
+$ grep -v token desk/.kito/remote.toml
+server = "127.0.0.1:PORT"
+repo = "shop"
+plain = true
+sign_in = "hello"
+
+== 5. A browser signs in the same way
+
+$ curl http://127.0.0.1:PORT/-/sign-in
+{"methods":[{"about":"Sign in with hello","method":"hello","path":"/-/sign-in/hello"}]}
+
+$ curl -i http://127.0.0.1:PORT/-/sign-in/hello
+HTTP/1.1 302 Found
+location: https://hello.example/authorize?state=left-1&redirect_uri=http://127.0.0.1:PORT/-/sign-in/hello/callback
+set-cookie: kito_sign_in=left-1; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age=600
+
+$ curl -i --cookie kito_sign_in=left-1 "http://127.0.0.1:PORT/-/sign-in/hello/callback?code=bob&state=left-1"
+HTTP/1.1 200 OK
+set-cookie: kito_session=kitos_…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000
+
+$ curl --cookie kito_session=kitos_… http://127.0.0.1:PORT/-/me
+{"email":"bob@hello.example","repos":[{"name":"shop","role":"write"}],"user":"bob"}
+
+$ curl --cookie kito_session=kitos_… http://127.0.0.1:PORT/
+hello pages
+path=/
+user=bob
+secret=ok
+mount=/
+cookie=-
+authorization=-
+
+
+$ curl --cookie kito_sign_in=left-1 "http://127.0.0.1:PORT/-/sign-in/hello/callback?code=eve&state=left-1"
+{"error":"hello:eve is nobody on this server: an administrator adds people (`kito-server user add <name> --identity hello:eve`)"}
+
+$ curl -X DELETE --cookie kito_session=kitos_… http://127.0.0.1:PORT/-/session
+{}
+
+== 6. The plugin was told
+
+$ cat /demo/server/plugins/hello/events.log
+user_added bob (write)
+signed_in bob (hello:bob)
+signed_in bob (hello:bob)
+sign_in_refused hello:eve
+session_ended bob

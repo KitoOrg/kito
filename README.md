@@ -514,8 +514,25 @@ a person added or removed, a role changed).
 server's certificate: `/-/me`, `/-/session` and `/-/api/<repository>`
 are the server's own, and every other path goes to the plugin that
 serves pages there (`[pages]`), which is told who is signed in and may
-ask of a repository only what that person may do. Signing in with a
-provider is being built.
+ask of a repository only what that person may do.
+
+People sign in through a plugin as well (`[sign_in]`): the plugin says
+who somebody is, the server says what they may do.
+
+```console
+$ kito-server user add bob --identity github:bob --role write
+bob added: whoever signs in as github:bob is bob. No token.
+$ kito connect kito.example.com:7421 shop --sign-in github --fingerprint sha256:…
+To sign in with github, open https://github.com/login/device
+and enter the code ABCD-1234
+Waiting until you have...
+shop is connected to `shop` on kito.example.com:7421 as bob.
+```
+
+The session lasts thirty days (`[sign_in] days` in `server.toml`);
+`kito sign-in` gets another. A browser goes to `/-/sign-in/github` and
+comes back with a session cookie. Tokens stay for scripts and agents.
+`scripts/demo-phase20.sh` shows a server and its plugin at work.
 
 What a program may ask the daemon, and under which permission, is in
 [docs/api.md](docs/api.md): the daemon's API, version 1.

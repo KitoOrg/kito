@@ -26,6 +26,97 @@ pub struct Config {
     /// The plugins this server enabled, by name (ADR 0006).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, kitod::plugins::PluginConfig>,
+    /// How people who sign in are kept.
+    #[serde(skip_serializing_if = "SignInConfig::is_default")]
+    pub sign_in: SignInConfig,
+}
+
+/// `[sign_in]`: what holds for whoever signs in with a plugin (ADR 0006).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignInConfig {
+    /// Days a session lasts before the person signs in again.
+    pub days: u64,
+}
+
+impl Default for SignInConfig {
+    fn default() -> Self {
+        SignInConfig { days: 30 }
+    }
+}
+
+impl SignInConfig {
+    fn is_default(&self) -> bool {
+        *self == SignInConfig::default()
+    }
+}
+
+/// Who a plugin says somebody is: nothing about what they may do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    /// `github`: the way to sign in of the plugin that said so.
+    #[serde(default)]
+    pub provider: String,
+    /// What does not change when the person renames themselves there.
+    pub subject: String,
+    #[serde(default)]
+    pub login: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl Identity {
+    /// As a user's configuration keeps it: `github:583231`.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.provider, self.subject)
+    }
+}
+
+/// Who an answer of a plugin says somebody is. The provider is the way to
+/// sign in the plugin was enabled for, whatever it says: a plugin does
+/// not speak for the people of another.
+pub fn identity_of(method: &str, answer: &serde_json::Value) -> Result<Identity, String> {
+    if let Some(why) = answer["refused"].as_str() {
+        return Err(why.to_owned());
+    }
+    let mut identity: Identity = serde_json::from_value(answer["identity"].clone())
+        .map_err(|_| "the plugin did not say who that is".to_owned())?;
+    if identity.subject.trim().is_empty() {
+        return Err("the plugin named nobody".to_owned());
+    }
+    identity.provider = method.to_owned();
+    if identity.login.is_empty() {
+        identity.login = identity.subject.clone();
+    }
+    Ok(identity)
+}
+
+/// The sessions of the people who signed in: what each token hashes to,
+/// whose it is, and when it ends.
+#[derive(Default, Serialize, Deserialize)]
+struct Sessions {
+    #[serde(default)]
+    sessions: BTreeMap<String, Session>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Session {
+    user: String,
+    /// Milliseconds since the Unix epoch.
+    until_ms: u64,
+}
+
+const SESSIONS_FILE: &str = "sessions.toml";
+/// What a session's token starts with: told apart from the tokens an
+/// administrator hands out.
+pub const SESSION_PREFIX: &str = "kitos_";
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 impl Default for Config {
@@ -35,6 +126,7 @@ impl Default for Config {
             http: None,
             users: BTreeMap::new(),
             plugins: BTreeMap::new(),
+            sign_in: SignInConfig::default(),
         }
     }
 }
@@ -84,6 +176,12 @@ pub struct User {
     /// What they may do in the repositories where it is something else.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<String, Role>,
+    /// Who they are for the plugins that sign people in: `github:583231`
+    /// (ADR 0006). The login it had when it was added is for people to read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub logins: Vec<String>,
 }
 
 impl User {
@@ -230,14 +328,16 @@ impl Server {
         Ok(root)
     }
 
-    /// Adds a person and returns their token, which is not kept.
+    /// Adds a person and returns their token, which is not kept. With an
+    /// identity they sign in instead, and have no token.
     pub fn add_user(
         &mut self,
         name: &str,
         email: Option<String>,
         repos: &[String],
         role: Role,
-    ) -> Result<String, String> {
+        identity: Option<&Identity>,
+    ) -> Result<Option<String>, String> {
         check_name("user", name)?;
         if self.config.users.contains_key(name) {
             return Err(format!("{name} is a user already: remove them first to give them a new token"));
@@ -255,10 +355,25 @@ impl Server {
             true => vec!["*".to_owned()],
             false => repos.to_vec(),
         };
-        let user = User { email, token: hash_of(&token), repos, role, roles: BTreeMap::new() };
+        if let Some(taken) = identity.and_then(|identity| self.user_by_identity(identity)) {
+            return Err(format!("{} is {taken} already", identity.map(Identity::key).unwrap_or_default()));
+        }
+        let user = User {
+            email: email.or_else(|| identity.and_then(|identity| identity.email.clone())),
+            // Nothing hashes to nothing: with an identity there is no token.
+            token: identity.map_or_else(|| hash_of(&token), |_| String::new()),
+            repos,
+            role,
+            roles: BTreeMap::new(),
+            identities: identity.iter().map(|identity| identity.key()).collect(),
+            logins: identity
+                .iter()
+                .map(|identity| format!("{}:{}", identity.provider, identity.login))
+                .collect(),
+        };
         self.config.users.insert(name.to_owned(), user);
         self.save()?;
-        Ok(token)
+        Ok(identity.is_none().then_some(token))
     }
 
     /// Changes what a person may do: everywhere, or in one repository.
@@ -282,7 +397,159 @@ impl Server {
         if self.config.users.remove(name).is_none() {
             return Err(format!("{name} is not a user of this server"));
         }
-        self.save()
+        self.save()?;
+        // Their sessions end with them.
+        self.change_sessions(|sessions| sessions.retain(|_, session| session.user != name))
+    }
+
+    // ---------------------------------------------------------- signing in
+
+    /// The user an identity is, if the server has one.
+    pub fn user_by_identity(&self, identity: &Identity) -> Option<String> {
+        let key = identity.key();
+        self.config
+            .users
+            .iter()
+            .find(|(_, user)| user.identities.contains(&key))
+            .map(|(name, _)| name.clone())
+    }
+
+    /// The ways to sign in: the plugins enabled for it, by their method.
+    pub fn sign_in_methods(&self) -> Vec<(String, String)> {
+        let running = self.running();
+        let may = running
+            .iter()
+            .filter(|(_, config)| config.permissions.contains(&kitod::plugins::Permission::SignIn));
+        may.filter_map(|(found, _)| found.manifest.sign_in.as_ref())
+            .map(|spec| (spec.method.clone(), spec.about.clone()))
+            .collect()
+    }
+
+    /// Asks the plugin that signs people in by `method` one thing
+    /// (`begin`, `finish`, `lookup <login>`), with `told` on its input.
+    pub fn sign_in_step(
+        &self,
+        method: &str,
+        step: &[&str],
+        told: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use kitod::plugins::Permission;
+        let running = self.running();
+        let plugin = running.iter().find(|(found, config)| {
+            config.permissions.contains(&Permission::SignIn)
+                && found.manifest.sign_in.as_ref().is_some_and(|spec| spec.method == method)
+        });
+        let Some((found, _)) = plugin else {
+            let known: Vec<String> = self.sign_in_methods().into_iter().map(|(method, _)| method).collect();
+            return Err(match known.is_empty() {
+                true => format!("this server has no way to sign in with `{method}`: no plugin enabled here signs people in"),
+                false => format!("this server has no way to sign in with `{method}`: it has {}", known.join(", ")),
+            });
+        };
+        let name = &found.manifest.name;
+        let program = kitod::plugins::program(&found.dir, name);
+        let mut args = vec!["sign-in"];
+        args.extend(step);
+        let envs = [(ENV_SERVER_DIR, self.dir.as_os_str().to_owned())];
+        let input = serde_json::to_vec(told).unwrap_or_default();
+        let printed = kitod::plugins::run_program(
+            &program,
+            &args,
+            &self.dir,
+            &envs,
+            &input,
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|why| format!("the plugin `{name}` failed at `sign-in {}`: {why}", step[0]))?;
+        let text = String::from_utf8_lossy(&printed);
+        let last = text.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
+        serde_json::from_str(last)
+            .map_err(|_| format!("the plugin `{name}` answered something that is not an answer"))
+    }
+
+    /// The person a plugin says somebody is, by a login: for `user add`.
+    pub fn look_up(&self, identity: &str) -> Result<Identity, String> {
+        let (method, login) = identity
+            .split_once(':')
+            .filter(|(method, login)| !method.is_empty() && !login.is_empty())
+            .ok_or("an identity is written <method>:<login>, as in github:bob")?;
+        let answer = self.sign_in_step(method, &["lookup", login], &serde_json::json!({ "login": login }))?;
+        identity_of(method, &answer).map_err(|why| format!("{identity}: {why}"))
+    }
+
+    /// Who an identity is on this server, told to the plugins that
+    /// listen; `Err`: nobody, and why.
+    pub fn signed_in(&self, identity: &Identity) -> Result<String, String> {
+        let who = format!("{}:{}", identity.provider, identity.login);
+        match self.user_by_identity(identity) {
+            Some(name) => {
+                self.tell("signed_in", serde_json::json!({ "user": name, "identity": identity.key(), "what": format!("{name} ({who})") }));
+                Ok(name)
+            }
+            None => {
+                self.tell(
+                    "sign_in_refused",
+                    serde_json::json!({ "identity": identity.key(), "what": who.clone() }),
+                );
+                // The same answer for whoever it is: nothing about who is known.
+                Err(format!(
+                    "{who} is nobody on this server: an administrator adds people (`kito-server user add <name> \
+                     --identity {who}`)"
+                ))
+            }
+        }
+    }
+
+    fn sessions(&self) -> Sessions {
+        std::fs::read_to_string(self.dir.join(SESSIONS_FILE))
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Changes the sessions and writes them, readable by the server's
+    /// user only; the ones that ended are dropped on the way.
+    fn change_sessions(&self, change: impl FnOnce(&mut BTreeMap<String, Session>)) -> Result<(), String> {
+        use std::io::Write;
+        let mut all = self.sessions();
+        let now = now_ms();
+        all.sessions.retain(|_, session| session.until_ms > now);
+        change(&mut all.sessions);
+        let path = self.dir.join(SESSIONS_FILE);
+        let text = toml::to_string(&all).map_err(|e| e.to_string())?;
+        let staged = path.with_extension("toml.new");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+            .open(&staged)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .and_then(|()| std::fs::rename(&staged, &path))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Opens a session for a user and returns its token, which is not
+    /// kept: it ends after `[sign_in] days`.
+    pub fn open_session(&self, name: &str) -> Result<String, String> {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes).map_err(|e| format!("no randomness to make a session from: {e}"))?;
+        let token =
+            format!("{SESSION_PREFIX}{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let until_ms = now_ms() + self.config.sign_in.days * 24 * 3600 * 1000;
+        let session = Session { user: name.to_owned(), until_ms };
+        self.change_sessions(|sessions| drop(sessions.insert(hash_of(&token), session)))?;
+        Ok(token)
+    }
+
+    /// Ends a session, and tells the plugins that listen whose it was.
+    /// Nothing happens for one that is not there.
+    pub fn end_session(&self, token: &str) {
+        let hash = hash_of(token);
+        let Some(session) = self.sessions().sessions.get(&hash).cloned() else { return };
+        if self.change_sessions(|sessions| drop(sessions.remove(&hash))).is_ok() {
+            self.tell("session_ended", serde_json::json!({ "user": session.user, "what": session.user }));
+        }
     }
 
     // ----------------------------------------------------------- plugins
@@ -408,6 +675,16 @@ impl Server {
     /// The person a token belongs to.
     pub fn user_of(&self, token: &str) -> Option<(String, User)> {
         let hash = hash_of(token);
+        // A session: of somebody who signed in, until it ends.
+        if token.starts_with(SESSION_PREFIX) {
+            let session =
+                self.sessions().sessions.get(&hash).cloned().filter(|session| session.until_ms > now_ms())?;
+            let user = self.config.users.get(&session.user)?.clone();
+            return Some((session.user, user));
+        }
+        if token.is_empty() {
+            return None;
+        }
         self.config
             .users
             .iter()

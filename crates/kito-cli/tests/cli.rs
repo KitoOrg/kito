@@ -2293,3 +2293,121 @@ fn an_assistant_is_set_up_by_the_plugin_that_knows_it() {
     assert!(ok(root, &["assistant", "remove", "hello"]).contains("no longer set up"));
     assert!(!root.join("HELLO.md").exists());
 }
+
+const SIGNS: &str = r#"name = "hello"
+version = "0.6.0"
+api = 1
+permissions = ["sign_in"]
+
+[sign_in]
+method = "hello"
+about = "Sign in with hello"
+"#;
+
+#[test]
+fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let serverdir = base.join("server");
+    let server = |args: &[&str]| {
+        let mut command = Command::new(kito_server());
+        command
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".server-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    };
+    let run = |args: &[&str]| -> String {
+        let out = server(args).output().unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let src = base.join("src-repo");
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.py"), SHOP_PY).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-q", "-m", "start"]);
+    run(&["init", serverdir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let plugin = hello_plugin(&base, SIGNS);
+    run(&["plugin", "add", "--path", plugin.to_str().unwrap()]);
+    run(&["plugin", "enable", "hello"]);
+    run(&["user", "add", "bob", "--identity", "hello:bob"]);
+    struct Serving(std::process::Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        server(&["serve", "--listen", "127.0.0.1:0"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(serving.0.stdout.take().unwrap()), &mut line)
+        .unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap().to_owned();
+    // Who signed in at the provider that does not exist: a file says.
+    let at_hello = serverdir.join("plugins/hello/sign-in");
+    fs::create_dir_all(at_hello.parent().unwrap()).unwrap();
+    let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+
+    // A way the server does not have, and somebody it does not have:
+    // nothing is connected.
+    let none = kito(&base, &["connect", &address, "shop", "--sign-in", "github"]);
+    assert!(errors(&none).contains("no way to sign in with `github`: it has hello"), "{}", errors(&none));
+    fs::write(&at_hello, "eve").unwrap();
+    let eve = kito(&base, &["connect", &address, "shop", "--sign-in", "hello"]);
+    assert!(!eve.status.success());
+    assert!(errors(&eve).contains("hello:eve is nobody on this server"), "{}", errors(&eve));
+    assert!(!base.join("shop").exists());
+
+    // bob is told where to go and what to enter, and is connected when
+    // he has: the command waits meanwhile.
+    fs::remove_file(&at_hello).unwrap();
+    let (dir, at) = (base.clone(), address.clone());
+    let waiting = std::thread::spawn(move || kito(&dir, &["connect", &at, "shop", "--sign-in", "hello"]));
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert!(!base.join("shop").exists(), "connected before anybody signed in");
+    fs::write(&at_hello, "bob").unwrap();
+    let connected = waiting.join().unwrap();
+    assert!(connected.status.success(), "{}", errors(&connected));
+    let asked = errors(&connected);
+    assert!(asked.contains("To sign in with hello, open https://hello.example/device"), "{asked}");
+    assert!(asked.contains("and enter the code HELLO-1234"), "{asked}");
+    let said = String::from_utf8_lossy(&connected.stdout).into_owned();
+    assert!(said.contains("is connected to `shop` on") && said.contains("as bob."), "{said}");
+    let shop = base.join("shop");
+    let kept = fs::read_to_string(shop.join(".kito/remote.toml")).unwrap();
+    assert!(kept.contains("token = \"kitos_") && kept.contains("sign_in = \"hello\""), "{kept}");
+    assert!(ok(&shop, &["repos"]).contains("shop"));
+
+    // A session that ended says how to get another, and that works.
+    fs::remove_file(serverdir.join("sessions.toml")).unwrap();
+    let ended = kito(&shop, &["repos"]);
+    assert!(!ended.status.success());
+    assert!(errors(&ended).contains("this session ended") && errors(&ended).contains("kito sign-in"));
+    let again = ok(&shop, &["sign-in"]);
+    assert!(again.contains("as bob: the session lasts 30 days."), "{again}");
+    assert!(ok(&shop, &["repos"]).contains("shop"));
+    // The directory's daemon asks with the new session, too.
+    ok(&shop, &["status"]);
+
+    // One who says no at the provider keeps the session they had.
+    fs::write(&at_hello, "refuse").unwrap();
+    let no = kito(&shop, &["sign-in"]);
+    assert!(!no.status.success());
+    assert!(errors(&no).contains("they said no at hello"), "{}", errors(&no));
+    assert!(ok(&shop, &["repos"]).contains("shop"));
+}

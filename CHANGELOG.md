@@ -4,10 +4,11 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
-## [Unreleased]
+## [0.21.0]
 
-Plugins for the server ([ADR 0006](docs/adr/0006-server-plugins.md)),
-under way:
+Plugins for the server (phase 20,
+[ADR 0006](docs/adr/0006-server-plugins.md)): commands, events, pages
+and signing in are added to a server by programs of their own.
 
 - `kito-server plugin add --path <dir>`, `enable <name>` (`--only …`),
   `disable`, `list`: the same plugins, enabled by a server in
@@ -40,8 +41,20 @@ under way:
   running. It is told who asks (`X-Kito-User`), never handed their token
   or their session. What pages ask of a repository is held to what the
   plugin was given.
-- Not yet: signing in with a provider (`sign_in` plugins, session tokens
-  for the command line).
+- **Signing in**: a plugin with `[sign_in]` says who somebody is, and
+  the server says what they may do. `kito-server user add bob --identity
+  github:bob` adds a person who has no token; the plugin resolves the
+  login, and the server keeps what does not change when it is renamed.
+- `kito connect <server> <repo> --sign-in <method>` shows where to go
+  and the code to enter, waits, and keeps a session; `kito sign-in` gets
+  another when it has ended. A session lasts `[sign_in] days` (30), is
+  kept by the server as a hash, outlives a restart, and ends with the
+  person.
+- In a browser, `/-/sign-in` lists the ways, `/-/sign-in/<method>` goes
+  to the provider and comes back to a session cookie. The server's
+  events gained `signed_in`, `sign_in_refused` and `session_ended`.
+- Not in this version: a plugin that signs in with a real provider
+  (`kito-github` is next), and signing in for `ssh` sessions.
 
 ## [0.20.0]
 

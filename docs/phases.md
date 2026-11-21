@@ -2351,6 +2351,75 @@ listed and called by an agent, with and without a dot in their names
 - **Claude Code is still set up by Kito itself**, not by a plugin.
 - No registry of plugins, no signatures beyond a release's checksum.
 
+## Phase 20 · plugins for the server — done
+
+A team's server had people with tokens, and nothing else to grow with:
+no sign-in, no pages, no way to hear what happened on it. Now those are
+plugins too ([ADR 0006](adr/0006-server-plugins.md)), the same programs
+with the same manifest, enabled by a server. Released as 0.21.0.
+
+### What is there
+
+- **A server enables plugins** (`kito-server plugin add --path | enable
+  | disable | list`, `[plugins.<name>]` in `server.toml`), and gives
+  what is a server's to give: `sign_in`, `pages`, `server_events`,
+  `server_admin`. A repository still gives only its own.
+- **Commands**: a `[[server_command]]` is a command of `kito-server`,
+  run with the server's directory in `KITO_SERVER_DIR`.
+- **Events**: `repo_added`, `repo_changed`, `user_added`,
+  `user_removed`, `role_changed`, `signed_in`, `sign_in_refused`,
+  `session_ended`, `plugin_failed`, told after the fact by whoever did
+  the thing (D-154). A plugin that fails is said to the administrator
+  and in `plugin list`, and undoes nothing.
+- **The HTTP address** (`serve --http`, D-156): `/-/me`, `/-/session`,
+  `/-/api/<repository>` (the daemon's API, asked as the person, within
+  their role and within what the page's plugin was given). Every other
+  path is passed on to the plugin whose `[pages]` are mounted there,
+  started by the server and told who asks.
+- **Signing in** (D-157): `kito-<name> sign-in begin | finish | lookup`
+  say who somebody is; the server keeps `<method>:<subject>` on a user
+  (`user add --identity <method>:<login>`) and decides everything else.
+  `kito connect --sign-in <method>` and `kito sign-in` for the command
+  line, `/-/sign-in/<method>` for a browser. Sessions are the server's
+  (`sessions.toml`, hashed, thirty days by default).
+- `kito-hello` is a provider that does not exist, a page, an event
+  listener and a command, for the tests and the demo.
+
+### How it was tested
+
+- `kito-server/tests/plugins.rs`: enabling and its permissions, a
+  plugin's commands, the events in order, a plugin that fails.
+- `kito-server/tests/http.rs`: who asks by token and by session, the
+  API within a role, pages passed on with who asks and without their
+  token, HTTP in the clear only on this machine, HTTPS with the server's
+  certificate; signing in in a browser from the way out to the session,
+  the browser that did not leave, the person the server does not have,
+  the one who said no, sessions ended by closing and by removing the
+  person, what the plugins were told.
+- `kito-cli/tests/cli.rs`: `kito connect --sign-in` waiting until
+  somebody has signed in, a way and a person the server does not have,
+  a session that ended and `kito sign-in` after it.
+- `scripts/demo-phase20.sh`, kept in `docs/demo/phase20-demo.txt`.
+
+### Known limitations
+
+- **No plugin signs in with a real provider yet.** `kito-github` is
+  next; until then only `kito-hello` answers, which is for tests.
+- **A sign-in plugin is trusted for who it says somebody is.** One that
+  is wrong lets the wrong person in as a user the server has; it cannot
+  make a user, or give a role.
+- **Sessions are not listed or ended by an administrator** one by one:
+  removing the person ends theirs, and so does `sessions.toml` removed.
+  A session that runs out is dropped without `session_ended` being told.
+- **The directory's daemon is restarted by `kito sign-in`**: it holds
+  the session it started with.
+- **Signing in is for a server reached as host:port.** Through SSH a
+  person is who their key says.
+- **One plugin's pages cannot be told from another's** by the server:
+  pages together are held to what all of them were given (D-156).
+- **Not run on macOS or Windows** since 0.20.0: the project's CI has
+  been stopped by the account's billing, not by a failure.
+
 ## After phase 5
 
 - **0.5.1 · ready for Claude Code from `kito init`** (D-072). `init` and

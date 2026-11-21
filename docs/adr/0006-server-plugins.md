@@ -94,10 +94,12 @@ A sign-in plugin proves an identity and nothing more:
 - **The plugin answers questions; the server keeps the state.** It is
   run for each step, with JSON on its input and its output, and holds
   nothing between two steps but what the server hands back to it:
-  - `sign-in begin` → what the person must do: `{ "open": url, "code":
-    "ABCD-1234", "state": … }` (a code to type at an address: nothing
-    of the server need be reachable by the provider), or `{ "redirect":
-    url, "state": … }` for a browser;
+  - `sign-in begin` (told the `kind`: `device` for a command line,
+    `browser` with the address to come back to) → what the person must
+    do: `{ "open": url, "code": "ABCD-1234", "state": …, "interval":
+    seconds }` (a code to enter at an address: nothing of the server
+    need be reachable by the provider), or for a browser `{ "open": url,
+    "state": … }`, where the server sends it;
   - `sign-in finish` (with `state`, and for a browser the query it came
     back with) → the identity, `{ "wait": seconds }`, or a refusal with
     its reason;

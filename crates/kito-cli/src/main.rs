@@ -242,6 +242,10 @@ enum Cmd {
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
         #[arg(long)]
         token: Option<String>,
+        /// Sign in instead, in a way the server offers (`github`): you
+        /// are sent to a page to say it is you, and need no token
+        #[arg(long, value_name = "METHOD", conflicts_with = "token")]
+        sign_in: Option<String>,
         /// The fingerprint of the server's certificate, as `kito-server
         /// fingerprint` prints it there: what says the server you reach
         /// is the one you mean. Not needed for a server on this machine
@@ -258,6 +262,12 @@ enum Cmd {
         /// Do not set the directory up for Claude Code
         #[arg(long)]
         no_claude: bool,
+    },
+    /// Sign in again to the server this directory is connected to: when
+    /// the session ended, or to be somebody else
+    SignIn {
+        /// The way to sign in (default: the one this directory was connected with)
+        method: Option<String>,
     },
     /// The repositories you may use on the server this directory is connected to
     Repos,
@@ -1977,8 +1987,18 @@ fn print_scope(status: &Value) {
 /// How a server given on the command line is reached: `host:port` over
 /// TCP with a token, `ssh://user@host/dir` through SSH, where the person is
 /// who SSH says.
-fn remote_for(server: &str, repo: &str, token: &Option<String>) -> Result<Remote, String> {
+fn remote_for(
+    server: &str,
+    repo: &str,
+    token: &Option<String>,
+    sign_in: &Option<String>,
+) -> Result<Remote, String> {
     if let Some(rest) = server.strip_prefix("ssh://") {
+        if sign_in.is_some() {
+            return Err(
+                "a server reached through SSH knows you by your key: --sign-in is for host:port".into()
+            );
+        }
         let (host, dir) = rest
             .split_once('/')
             .filter(|(host, dir)| !host.is_empty() && !dir.is_empty())
@@ -1990,11 +2010,23 @@ fn remote_for(server: &str, repo: &str, token: &Option<String>) -> Result<Remote
             ..Remote::default()
         });
     }
+    if sign_in.is_some() {
+        // The token comes when they have signed in, after the server is
+        // known to be the one meant.
+        return Ok(Remote {
+            server: Some(server.to_owned()),
+            repo: repo.to_owned(),
+            sign_in: sign_in.clone(),
+            ..Remote::default()
+        });
+    }
     let token = token
         .clone()
         .or_else(|| std::env::var("KITO_TOKEN").ok())
         .filter(|token| !token.trim().is_empty())
-        .ok_or("a server reached as host:port wants a token: --token, or $KITO_TOKEN")?;
+        .ok_or(
+            "a server reached as host:port wants a token (--token, or $KITO_TOKEN), or --sign-in <method>",
+        )?;
     Ok(Remote {
         server: Some(server.to_owned()),
         repo: repo.to_owned(),
@@ -2040,6 +2072,57 @@ fn trusted(
          from a public authority).",
         remote.place()
     ))
+}
+
+/// Signs the person in to the remote's server and returns the remote with
+/// the session's token, and what the server said. Where to go and what to
+/// enter is said on standard error: what a command prints stays its own.
+fn sign_in_to(mut remote: Remote, method: &str) -> Result<(Remote, Value), String> {
+    let mut tell = |how: &Value| {
+        eprintln!("To sign in with {method}, open {}", how["open"].as_str().unwrap_or("?"));
+        if let Some(code) = how["code"].as_str() {
+            eprintln!("and enter the code {code}");
+        }
+        eprintln!("Waiting until you have...");
+    };
+    let signed = Client::sign_in(&remote, method, &mut tell).map_err(fail)?;
+    let token = signed["token"].as_str().ok_or("the server opened no session")?;
+    remote.token = Some(token.to_owned());
+    remote.sign_in = Some(method.to_owned());
+    Ok((remote, signed))
+}
+
+fn cmd_sign_in(cli: &Cli, method: &Option<String>) -> Outcome {
+    let root = root_of(cli)?;
+    let remote = Remote::load(&root).ok_or(
+        "this directory is a repository of its own: `kito sign-in` is for one connected to a server",
+    )?;
+    if remote.server.is_none() {
+        return Err("this directory reaches its server through SSH, which knows you by your key".into());
+    }
+    let method = method.clone().or_else(|| remote.sign_in.clone()).ok_or(
+        "this directory was connected with a token: say the way to sign in, as in `kito sign-in github`",
+    )?;
+    let (remote, signed) = sign_in_to(remote, &method)?;
+    // Asked as the person they now are, before anything is kept.
+    Client::remote(&remote, true).map_err(fail)?;
+    remote.save(&root).map_err(fail)?;
+    // The directory's daemon holds the session it started with: the next
+    // command starts one that has this one.
+    if let Ok(mut client) = Client::connect(&root) {
+        let _ = client.call_value("shutdown", json!({}));
+    }
+    let (user, days) = (signed["user"].as_str().unwrap_or("?"), signed["days"].as_u64().unwrap_or(0));
+    if cli.json {
+        print_json(&json!({ "user": user, "method": method, "days": days, "server": remote.place() }));
+    } else {
+        println!(
+            "Signed in to {} as {user}: the session lasts {}.",
+            remote.place(),
+            count(days, "day", "days")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, no_claude: bool) -> Outcome {
@@ -3161,14 +3244,20 @@ fn run() -> ExitCode {
         Cmd::Lanes { all } => cmd_lanes(&cli, *all),
         Cmd::Lane { command } => cmd_lane(&cli, command),
         Cmd::Board => cmd_board(&cli),
-        Cmd::Connect { server, name, dir, token, fingerprint, authority, plain, no_claude } => {
-            let how = remote_for(server, name, token)
-                .and_then(|remote| trusted(remote, fingerprint, *authority, *plain));
+        Cmd::Connect { server, name, dir, token, sign_in, fingerprint, authority, plain, no_claude } => {
+            // Who the server is comes first: nobody signs in to another.
+            let how = remote_for(server, name, token, sign_in)
+                .and_then(|remote| trusted(remote, fingerprint, *authority, *plain))
+                .and_then(|remote| match sign_in {
+                    Some(method) => sign_in_to(remote, method).map(|(remote, _)| remote),
+                    None => Ok(remote),
+                });
             match how {
                 Ok(remote) => cmd_connect(&cli, remote, name, dir, *no_claude),
                 Err(e) => Err(e),
             }
         }
+        Cmd::SignIn { method } => cmd_sign_in(&cli, method),
         Cmd::Repos => cmd_repos(&cli),
         Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),
         Cmd::Who { target } => cmd_who(&cli, target),
@@ -3215,19 +3304,23 @@ mod tests {
 
     #[test]
     fn a_server_is_reached_with_a_token_or_through_ssh() {
-        let tcp = remote_for("kito.example.com:7421", "shop", &Some("kito_abc".into())).unwrap();
+        let tcp = remote_for("kito.example.com:7421", "shop", &Some("kito_abc".into()), &None).unwrap();
         assert_eq!(
             (tcp.server.as_deref(), tcp.token.as_deref()),
             (Some("kito.example.com:7421"), Some("kito_abc"))
         );
         assert!(tcp.command.is_empty());
-        let ssh = remote_for("ssh://ada@kito.example.com/srv/kito", "shop", &None).unwrap();
+        let ssh = remote_for("ssh://ada@kito.example.com/srv/kito", "shop", &None, &None).unwrap();
         assert_eq!(
             ssh.command,
             ["ssh", "ada@kito.example.com", "kito-server", "--dir", "/srv/kito", "stdio"]
         );
         assert_eq!((ssh.server, ssh.token, ssh.repo.as_str()), (None, None, "shop"));
-        assert!(remote_for("ssh://ada@host", "shop", &None).is_err());
+        assert!(remote_for("ssh://ada@host", "shop", &None, &None).is_err());
+        // Signing in is for a server reached as host:port, and wants no token.
+        let signs = remote_for("kito.example.com:7421", "shop", &None, &Some("github".into())).unwrap();
+        assert_eq!((signs.token, signs.sign_in.as_deref()), (None, Some("github")));
+        assert!(remote_for("ssh://ada@host/srv/kito", "shop", &None, &Some("github".into())).is_err());
     }
 
     #[test]

@@ -146,6 +146,95 @@ fn send(writer: &mut dyn Write, message: &impl serde::Serialize) -> std::io::Res
     writer.flush()
 }
 
+/// How long somebody has to sign in, from when they started.
+const SIGN_IN_WITHIN: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Signs somebody in for a command line (ADR 0006): the plugin says where
+/// to go and what to enter there, the client asks (`{"poll": true}`)
+/// until the person has done it, and the answer is the token of a
+/// session. Who they are is the plugin's word; whether that is anybody
+/// here is the server's. What the plugin keeps between the two steps
+/// stays on this side.
+fn sign_in(server: &Server, asked: &Value, reader: &mut dyn BufRead, writer: &mut dyn Write) {
+    use std::time::{Duration, Instant};
+    let refuse = |writer: &mut dyn Write, reason: &str| {
+        let _ = send(writer, &json!({ "error": reason }));
+    };
+    if asked.get("version").and_then(Value::as_u64) != Some(PROTOCOL) {
+        return refuse(writer, &format!("this server speaks version {PROTOCOL} of the protocol"));
+    }
+    let Some(method) = asked.get("method").and_then(Value::as_str) else {
+        // No way named: the ways there are.
+        let methods: Vec<Value> = server
+            .sign_in_methods()
+            .into_iter()
+            .map(|(method, about)| json!({ "method": method, "about": about }))
+            .collect();
+        let _ = send(writer, &json!({ "methods": methods }));
+        return;
+    };
+    let begun = match server.sign_in_step(method, &["begin"], &json!({ "kind": "device" })) {
+        Ok(begun) => begun,
+        Err(e) => return refuse(writer, &e),
+    };
+    if let Some(why) = begun["refused"].as_str() {
+        return refuse(writer, why);
+    }
+    let interval = begun["interval"].as_u64().unwrap_or(5).min(60);
+    let told = json!({ "sign_in": {
+        "method": method,
+        "open": begun["open"],
+        "code": begun["code"],
+        "interval": interval,
+    }});
+    if send(writer, &told).is_err() {
+        return;
+    }
+    let started = Instant::now();
+    let mut asked_at: Option<Instant> = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if started.elapsed() > SIGN_IN_WITHIN {
+            return refuse(writer, "signing in took too long: start again");
+        }
+        // The plugin is asked no oftener than it said, whatever the client does.
+        if let Some(left) = asked_at.and_then(|at| Duration::from_secs(interval).checked_sub(at.elapsed())) {
+            std::thread::sleep(left);
+        }
+        asked_at = Some(Instant::now());
+        let finish = json!({ "kind": "device", "state": begun["state"] });
+        let answer = match server.sign_in_step(method, &["finish"], &finish) {
+            Ok(answer) => answer,
+            Err(e) => return refuse(writer, &e),
+        };
+        if let Some(wait) = answer["wait"].as_u64() {
+            if send(writer, &json!({ "wait": wait.min(60) })).is_err() {
+                return;
+            }
+            continue;
+        }
+        let identity = match crate::state::identity_of(method, &answer) {
+            Ok(identity) => identity,
+            Err(why) => return refuse(writer, &why),
+        };
+        // People added while this one was signing in count.
+        let now = Server::open(&server.dir);
+        let server = now.as_ref().unwrap_or(server);
+        let opened = server.signed_in(&identity).and_then(|name| Ok((server.open_session(&name)?, name)));
+        return match opened {
+            Ok((token, name)) => {
+                let days = server.config.sign_in.days;
+                let _ = send(writer, &json!({ "ok": { "token": token, "user": name, "days": days } }));
+            }
+            Err(why) => refuse(writer, &why),
+        };
+    }
+}
+
 /// Serves one client. `known` is who the client is when something else has
 /// already established it (SSH); otherwise its first line must carry a token.
 pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, known: Option<(String, User)>) {
@@ -157,6 +246,9 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
         let _ = send(writer, &json!({ "error": reason }));
     };
     let hello: Value = serde_json::from_str(&first).unwrap_or(Value::Null);
+    if let Some(asked) = hello.get("sign_in") {
+        return sign_in(server, asked, reader, writer);
+    }
     let Some(hello) = hello.get("hello") else {
         return refuse(
             writer,
@@ -169,8 +261,16 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
     let Some((name, user)) =
         known.or_else(|| hello.get("token").and_then(Value::as_str).and_then(|token| server.user_of(token)))
     else {
-        // The same answer for no token and for a wrong one.
-        return refuse(writer, "this token is not one the server knows");
+        // The same answer for no token and for a wrong one; a session
+        // says what it is by how it starts, and how to get another.
+        let session = hello.get("token").and_then(Value::as_str);
+        return match session.is_some_and(|token| token.starts_with(crate::state::SESSION_PREFIX)) {
+            true => refuse(
+                writer,
+                "this session ended, or is not one the server knows: sign in again (`kito sign-in`)",
+            ),
+            false => refuse(writer, "this token is not one the server knows"),
+        };
     };
     let repo = match hello.get("repo").and_then(Value::as_str) {
         Some(repo) => match server.repo(repo).filter(|_| user.may_use(repo)) {
