@@ -288,6 +288,27 @@ enum Cmd {
     Grant { name: String, role: String },
     /// Take this repository away from a person
     Revoke { name: String },
+    /// The audit log of the server this directory is connected to (admins)
+    Audit {
+        /// Each request, not what changed the server
+        #[arg(long)]
+        requests: bool,
+        #[arg(long)]
+        who: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        /// From when: 7d, 12h, 2w, or a day (2026-11-01)
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Check that no line of it was taken out or changed
+        #[arg(long)]
+        verify: bool,
+    },
+    /// The backups of the server this directory is connected to (admins):
+    /// list them (the default), or `now`
+    Backup { what: Option<String> },
     /// The people of the server this directory is connected to (admins)
     People {
         #[command(subcommand)]
@@ -3783,6 +3804,102 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
     Ok(())
 }
 
+/// `kito audit` (ADR 0017): the server's, for its admins.
+fn cmd_audit(
+    cli: &Cli,
+    requests: bool,
+    who: &Option<String>,
+    kind: &Option<String>,
+    since: &Option<String>,
+    limit: usize,
+    verify: bool,
+) -> Outcome {
+    let (remote, mut client) = server_here(cli, false)?;
+    if verify {
+        let said: Value = client.call("server.audit_verify", json!({})).map_err(fail)?;
+        if cli.json {
+            print_json(&said);
+        } else if said["whole"] == true {
+            println!(
+                "The audit log of {} is whole: {} lines, each chained to the one before.",
+                remote.place(),
+                said["lines"]
+            );
+        } else {
+            println!(
+                "The audit log of {} is NOT whole: {}",
+                remote.place(),
+                said["why"].as_str().unwrap_or("?")
+            );
+        }
+        return Ok(());
+    }
+    let mut params = json!({ "requests": requests, "who": who, "kind": kind, "limit": limit });
+    if let Some(since) = since {
+        params["since_ms"] = json!(moment(since)?);
+    }
+    let found: Value = client.call("server.audit", params).map_err(fail)?;
+    if cli.json {
+        print_json(&found);
+        return Ok(());
+    }
+    for entry in found.as_array().into_iter().flatten() {
+        let at: String = utc(entry["at_ms"].as_u64().unwrap_or(0)).chars().take(16).collect();
+        let repo = entry["repo"].as_str().map(|repo| format!(" [{repo}]")).unwrap_or_default();
+        let refused = if entry["ok"] == false { " (refused)" } else { "" };
+        println!(
+            "{at}  {:<16} {:<18} {}{repo}{refused}",
+            entry["by"].as_str().unwrap_or("?"),
+            entry["kind"].as_str().unwrap_or("?"),
+            entry["what"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+/// `kito backup [now]`: the server's backups, for its admins.
+fn cmd_backup(cli: &Cli, what: Option<&str>) -> Outcome {
+    let (remote, mut client) = server_here(cli, false)?;
+    let said: Value = match what {
+        None | Some("list") => client.call("server.backups", json!({})).map_err(fail)?,
+        Some("now") => client.call("server.backup_now", json!({})).map_err(fail)?,
+        Some(other) => {
+            return Err(format!("`kito backup {other}`: it is `kito backup` or `kito backup now`"))
+        }
+    };
+    if cli.json {
+        print_json(&said);
+        return Ok(());
+    }
+    if what == Some("now") {
+        println!(
+            "{} made on {}: {} files, {} bytes.",
+            said["name"].as_str().unwrap_or("?"),
+            remote.place(),
+            said["files"],
+            said["size"]
+        );
+        return Ok(());
+    }
+    match said["every_hours"].as_u64() {
+        Some(0) => println!("Backups of {} only when asked; the last {} kept.", remote.place(), said["keep"]),
+        Some(hours) => {
+            println!("A backup of {} every {hours} hours; the last {} kept.", remote.place(), said["keep"])
+        }
+        None => {}
+    }
+    let backups = said["backups"].as_array().cloned().unwrap_or_default();
+    if backups.is_empty() {
+        println!("None yet: `kito backup now` makes one.");
+    }
+    for one in backups {
+        let kept: Vec<&str> =
+            one["kept"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        println!("{}  {:>12} bytes  {}", one["name"].as_str().unwrap_or("?"), one["size"], kept.join(", "));
+    }
+    Ok(())
+}
+
 fn cmd_repos(cli: &Cli) -> Outcome {
     let root = root_of(cli)?;
     let remote = Remote::load(&root)
@@ -4857,6 +4974,10 @@ fn run() -> ExitCode {
         Cmd::Grant { name, role } => cmd_grant(&cli, name, Some(role)),
         Cmd::Revoke { name } => cmd_grant(&cli, name, None),
         Cmd::People { command } => cmd_people(&cli, command.as_ref()),
+        Cmd::Audit { requests, who, kind, since, limit, verify } => {
+            cmd_audit(&cli, *requests, who, kind, since, *limit, *verify)
+        }
+        Cmd::Backup { what } => cmd_backup(&cli, what.as_deref()),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),

@@ -1390,6 +1390,14 @@ most of the events. Search runs over what is there when asked, with no
 index of its own: a repository's history is read in memory already, and
 an index would be one more thing to keep in step.
 
+### D-171 · A chained log, and archives that need no stop
+The audit log is a chain of hashes in plain lines
+([ADR 0017](adr/0017-audit-and-backups.md)), not a database: it is read
+with any tool, and a line changed by hand is found. Backups are made
+while the server runs, because the stores are append-only and checked,
+and leave out what is rebuilt; encryption uses what the TLS library
+already brings, so nothing new is trusted for it.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

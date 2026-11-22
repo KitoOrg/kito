@@ -821,3 +821,88 @@ fn tasks_are_the_server_s_and_their_comments_reach_the_lanes_on_them() {
     assert_eq!(done["state"], "done");
     assert!(world.repo("shop").join(".kito/tasks.json").is_file());
 }
+
+#[test]
+fn what_changes_the_server_is_kept_in_a_chain_and_the_server_is_backed_up_whole() {
+    let mut world = World::new();
+    let root = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
+    ok(&world.dir, &["grant", "bob", "site", "read"]);
+
+    // On the server's machine: what changed it, by whom, and the chain whole.
+    let audit = ok(&world.dir, &["audit"]);
+    assert!(audit.contains("role_changed") && audit.contains("bob may read in site"), "{audit}");
+    assert!(audit.contains("user_added") && audit.contains("rose (admin)"), "{audit}");
+    assert!(ok(&world.dir, &["audit", "--verify"]).contains("The audit log is whole"));
+
+    // A backup of everything, encrypted with a key said once.
+    let made = ok(&world.dir, &["backup"]);
+    assert!(made.contains("kept here") && made.contains("shown this once"), "{made}");
+    let key: String = made.lines().last().unwrap().trim().to_owned();
+    assert_eq!(key.len(), 64, "{made}");
+    assert!(!ok(&world.dir, &["backup"]).contains("shown this once"));
+    let listed = ok(&world.dir, &["backup", "list"]);
+    assert_eq!(listed.lines().count(), 2, "{listed}");
+    let first =
+        world.dir.join("backups").join(listed.lines().last().unwrap().split_whitespace().next().unwrap());
+
+    // Put back elsewhere, with the key alone: the repositories and the people are there.
+    let key_file = world.dir.join("..").join("the-key");
+    fs::write(&key_file, format!("{key}\n")).unwrap();
+    let to = world.dir.join("..").join("restored");
+    let back = ok(
+        &world.dir,
+        &[
+            "restore",
+            first.to_str().unwrap(),
+            "--to",
+            to.to_str().unwrap(),
+            "--key",
+            key_file.to_str().unwrap(),
+        ],
+    );
+    assert!(back.contains("files put back"), "{back}");
+    assert!(to.join("server.toml").is_file() && to.join("repos/shop/.kito").is_dir());
+    assert!(!to.join("backup.key").exists() && !to.join("backups").exists());
+    let people = ok(&to, &["user", "list"]);
+    assert!(people.contains("rose") && people.contains("bob (member)"), "{people}");
+    assert!(fs::read_to_string(to.join("repos/shop/src/shop.ts")).unwrap().contains("total"));
+    // Its repositories open: the indexes left out are made again.
+    let set = ok(&to, &["repo", "set", "shop", "--approvals", "1"]);
+    assert!(set.contains("1 approval"), "{set}");
+    if let Ok(mut daemon) = Client::connect(&to.join("repos/shop")) {
+        let _ = daemon.call_value("shutdown", json!({}));
+    }
+    let again = server(&world.dir, &["restore", first.to_str().unwrap(), "--to", to.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&again.stderr).contains("not empty"));
+
+    // Through the server: every request kept; the log and the backups for admins only.
+    let address = world.serve();
+    let mut bob = connect(&address, &world.bob, "shop");
+    bob.call_value("status", json!({})).unwrap();
+    assert!(bob.call_value("server.audit", json!({})).unwrap_err().to_string().contains("only an admin"));
+    let mut admin = connect(&address, &root, "shop");
+    let asked = admin.call_value("server.audit", json!({ "requests": true, "who": "bob" })).unwrap();
+    assert!(
+        asked.as_array().unwrap().iter().any(|entry| entry["what"] == "status" && entry["repo"] == "shop"),
+        "{asked}"
+    );
+    assert_eq!(admin.call_value("server.audit_verify", json!({})).unwrap()["whole"], true);
+    let now = admin.call_value("server.backup_now", json!({})).unwrap();
+    assert!(now["name"].as_str().unwrap().starts_with("kito-backup-"));
+    assert_eq!(
+        admin.call_value("server.backups", json!({})).unwrap()["backups"].as_array().unwrap().len(),
+        3
+    );
+
+    // A line changed by hand is found.
+    let log = world.dir.join("audit/log.jsonl");
+    let text = fs::read_to_string(&log).unwrap().replacen("bob may read in site", "bob may maintain site", 1);
+    fs::write(&log, text).unwrap();
+    let broken = server(&world.dir, &["audit", "--verify"]).output().unwrap();
+    assert!(
+        !broken.status.success()
+            && String::from_utf8_lossy(&broken.stderr).contains("it was changed after it was written")
+    );
+}

@@ -2605,6 +2605,41 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 34 · the audit log and backups — done
+
+The person asked for an audit log of the server (people and access,
+rules and settings, repositories, every request), read by admins and
+made so that a change to it is found; and for backups of the whole
+server, encrypted, on a schedule, in a folder and in S3. Released as
+0.35.0 ([ADR 0017](adr/0017-audit-and-backups.md), D-171).
+
+### What is there
+
+- `audit/log.jsonl` (forever) and `audit/requests-<day>.jsonl` (90
+  days), hash-chained; `kito-server audit [--verify]`, `kito audit`,
+  `server.audit`, `server.audit_verify`.
+- Whole-server archives, zstd and ChaCha20-Poly1305 in chunks, the key
+  made once; a folder and S3; every 24 hours, 14 kept; `kito-server
+  backup [run | list | key | schedule | s3]`, `kito-server restore`,
+  `kito backup [now]`, `server.backups`, `server.backup_now`, and a
+  download for admins over HTTP.
+
+### How it was tested
+
+- Unit tests: the chain and a line changed by hand; an archive put back
+  as it was, and refused with another key, a byte changed or its end cut
+  off.
+- `kito-server/tests/server.rs`: the log of what changed the server and
+  of requests; a backup, listed, put back elsewhere with the key alone,
+  its repository opened; admins only, through the server.
+
+### Known limitations
+
+- **S3 is not tested against a real service** here: the requests are
+  signed as AWS says, and checked only for their form.
+- **A change to the log is found, not prevented.**
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 33 · search and numbers — done
 
 The person asked to search what was done and to count it: per

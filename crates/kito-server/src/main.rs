@@ -23,6 +23,8 @@
 //! the requests of the daemon's own protocol (JSON-RPC 2.0).
 
 mod admin;
+mod audit;
+mod backup;
 mod http;
 mod session;
 mod state;
@@ -127,6 +129,42 @@ enum Cmd {
     },
     /// Take a repository away from a person
     Revoke { name: String, repo: String },
+    /// What changed the server and who did it (ADR 0017); the latest first
+    Audit {
+        /// Each request, not what changed the server (kept 90 days)
+        #[arg(long)]
+        requests: bool,
+        #[arg(long)]
+        who: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        /// From when: 7d, 12h
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Check that no line was taken out or changed
+        #[arg(long)]
+        verify: bool,
+    },
+    /// Backups of the whole server, encrypted: run one now (the default),
+    /// list, key, schedule, s3
+    Backup {
+        #[command(subcommand)]
+        command: Option<BackupCmd>,
+    },
+    /// Put a backup back, into an empty directory: then serve from there
+    Restore {
+        /// The archive: a file, or `s3:<name>` as `backup list` names it
+        archive: String,
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// The backup key, as `backup key` printed it (default: this server's)
+        #[arg(long, value_name = "FILE")]
+        key: Option<PathBuf>,
+    },
     /// Print the fingerprint of the server's certificate: what clients
     /// connect with (`kito connect ... --fingerprint`)
     Fingerprint,
@@ -209,6 +247,43 @@ enum RepoCmd {
 }
 
 #[derive(Subcommand)]
+enum BackupCmd {
+    /// Make one now
+    Run,
+    /// The archives, here and in S3
+    List,
+    /// Print the backup key: keep it somewhere else, a restore needs it
+    Key,
+    /// How often, and how many are kept
+    Schedule {
+        /// Hours between two (0: only when asked)
+        #[arg(long)]
+        every: Option<u64>,
+        #[arg(long)]
+        keep: Option<usize>,
+        /// The folder for the archives; `none`: only in S3
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Send them to storage that speaks S3 too (or --off)
+    S3 {
+        #[arg(long, required_unless_present = "off")]
+        endpoint: Option<String>,
+        #[arg(long, required_unless_present = "off")]
+        bucket: Option<String>,
+        #[arg(long, default_value = "auto")]
+        region: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// A file with two lines: the access key, then the secret key
+        #[arg(long, value_name = "FILE")]
+        keys: Option<PathBuf>,
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum UserCmd {
     /// Add a person and print their token, once
     Add {
@@ -243,6 +318,22 @@ fn known_by(dir: &std::path::Path) -> Result<String, String> {
         true => Ok(String::new()),
         false => Ok(format!(" --fingerprint {}", tls::fingerprint(dir)?)),
     }
+}
+
+/// `7d`, `12h`, `2w` before now, in milliseconds since 1970.
+fn ago(given: &str) -> Result<u64, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let (number, unit) = given.trim().split_at(given.trim().len().saturating_sub(1));
+    let size = match unit {
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        "w" => 7 * 86_400_000,
+        _ => return Err(format!("`{given}` is no time: say 12h, 7d or 2w")),
+    };
+    let n: u64 = number.parse().map_err(|_| format!("`{given}` is no time: say 12h, 7d or 2w"))?;
+    Ok(now.saturating_sub(n * size))
 }
 
 /// Who changed a setting with `kito-server` itself, on the server's machine.
@@ -710,8 +801,196 @@ fn run(cli: &Cli) -> Result<(), String> {
             let server = Server::open(&dir_of(cli))?;
             println!("{}", tls::fingerprint(&server.dir)?);
         }
+        Cmd::Audit { requests, who, kind, repo, since, limit, verify } => {
+            let server = Server::open(&dir_of(cli))?;
+            if *verify {
+                let lines = audit::verify(&server.dir)?;
+                println!("The audit log is whole: {lines} lines, each chained to the one before.");
+                return Ok(());
+            }
+            let filter = audit::Filter {
+                requests: *requests,
+                who: who.clone(),
+                kind: kind.clone(),
+                repo: repo.clone(),
+                since_ms: since.as_deref().map(ago).transpose()?,
+                limit: *limit,
+            };
+            let found = audit::read(&server.dir, &filter);
+            if found.is_empty() {
+                println!("Nothing.");
+            }
+            for entry in found {
+                let at = audit::day_of(entry["at_ms"].as_u64().unwrap_or(0));
+                let repo = entry["repo"].as_str().map(|repo| format!(" [{repo}]")).unwrap_or_default();
+                let ok = match entry["ok"].as_bool() {
+                    Some(false) => " (refused)",
+                    _ => "",
+                };
+                println!(
+                    "{at}  {:<16} {:<18} {}{repo}{ok}",
+                    entry["by"].as_str().unwrap_or("?"),
+                    entry["kind"].as_str().unwrap_or("?"),
+                    entry["what"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Backup { command } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            match command.as_ref().unwrap_or(&BackupCmd::Run) {
+                BackupCmd::Run => {
+                    let done = backup::run(&server.dir, &server.config.backup)?;
+                    println!(
+                        "{}: {} files, {} bytes, kept {}.",
+                        done["name"].as_str().unwrap_or("?"),
+                        done["files"],
+                        done["size"],
+                        done["kept"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    );
+                    if let Some(key) = done["new_key"].as_str() {
+                        println!(
+                            "This server's backup key, made now and shown this once: keep it somewhere else."
+                        );
+                        println!("A backup cannot be put back without it.\n{key}");
+                    }
+                }
+                BackupCmd::List => {
+                    let listed = backup::list(&server.dir, &server.config.backup)?;
+                    if listed.is_empty() {
+                        println!("No backup yet: `kito-server backup` makes one.");
+                    }
+                    for one in listed {
+                        println!("{}  {:>12} bytes  {}", one.name, one.size, one.kept.join(", "));
+                    }
+                }
+                BackupCmd::Key => {
+                    let (key, new) = backup::key(&server.dir)?;
+                    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+                    if new {
+                        println!("Made now.");
+                    }
+                    println!("{hex}");
+                }
+                BackupCmd::Schedule { every, keep, dir } => {
+                    if let Some(every) = every {
+                        server.config.backup.every_hours = *every;
+                    }
+                    if let Some(keep) = keep {
+                        server.config.backup.keep = *keep;
+                    }
+                    if let Some(dir) = dir {
+                        server.config.backup.dir = Some(dir.clone());
+                    }
+                    server.save_config()?;
+                    let config = &server.config.backup;
+                    let place = match backup::folder(&server.dir, config) {
+                        Some(dir) => dir.display().to_string(),
+                        None => "only in S3".to_owned(),
+                    };
+                    match config.every_hours {
+                        0 => println!("Backups only when asked, the last {} kept, in {place}.", config.keep),
+                        hours => println!("A backup every {hours} hours while the server serves, the last {} kept, in {place}.", config.keep),
+                    }
+                    server.tell("backup_schedule", json!({ "what": format!("every {} hours, keep {}", config.every_hours, config.keep) }));
+                }
+                BackupCmd::S3 { endpoint, bucket, region, prefix, keys, off } => {
+                    if *off {
+                        server.config.backup.s3 = None;
+                        server.save_config()?;
+                        println!("Backups are no longer sent to S3.");
+                        server.tell("backup_s3", json!({ "what": "off" }));
+                        return Ok(());
+                    }
+                    if let Some(keys) = keys {
+                        let text =
+                            std::fs::read_to_string(keys).map_err(|e| format!("{}: {e}", keys.display()))?;
+                        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+                        let (Some(access_key), Some(secret_key)) = (lines.next(), lines.next()) else {
+                            return Err(format!(
+                                "{}: the access key, then the secret key, each on a line",
+                                keys.display()
+                            ));
+                        };
+                        backup::S3::keep_credentials(
+                            &server.dir,
+                            &backup::Credentials {
+                                access_key: access_key.to_owned(),
+                                secret_key: secret_key.to_owned(),
+                            },
+                        )?;
+                    }
+                    let s3 = backup::S3Config {
+                        endpoint: endpoint.clone().unwrap_or_default(),
+                        bucket: bucket.clone().unwrap_or_default(),
+                        region: region.clone(),
+                        prefix: prefix.clone(),
+                    };
+                    // Asked once, before it is kept: a storage that cannot be reached says so now.
+                    backup::S3::new(&server.dir, &s3)?.list()?;
+                    server.config.backup.s3 = Some(s3.clone());
+                    server.save_config()?;
+                    println!("Backups go to {}/{} too.", s3.endpoint, s3.bucket);
+                    server.tell("backup_s3", json!({ "what": format!("{}/{}", s3.endpoint, s3.bucket) }));
+                }
+            }
+        }
+        Cmd::Restore { archive, to, key } => {
+            let server = Server::open(&dir_of(cli)).ok();
+            let key = match (key, &server) {
+                (Some(file), _) => backup::key_from(file)?,
+                (None, Some(server)) => backup::key(&server.dir)?.0,
+                (None, None) => return Err("give the backup key: --key <file>".into()),
+            };
+            let input: Box<dyn std::io::Read> = match archive.strip_prefix("s3:") {
+                Some(name) => {
+                    let server = server.as_ref().ok_or(
+                        "an archive in S3 is fetched by the server it belongs to: run this in its directory",
+                    )?;
+                    let s3 = server.config.backup.s3.as_ref().ok_or("this server sends nothing to S3")?;
+                    backup::S3::new(&server.dir, s3)?.download(name)?
+                }
+                None => Box::new(std::fs::File::open(archive).map_err(|e| format!("{archive}: {e}"))?),
+            };
+            let count = backup::restore(input, &key, to)?;
+            if let Some(server) = &server {
+                audit::record(
+                    &server.dir,
+                    "backup_restored",
+                    None,
+                    None,
+                    &format!("{archive} into {}", to.display()),
+                );
+            }
+            println!(
+                "{count} files put back in {}. Serve from there: `kito-server --dir {} serve`.",
+                to.display(),
+                to.display()
+            );
+        }
         Cmd::Serve { listen, plain, http } => {
             let server = Server::open(&dir_of(cli))?;
+            // Backups as the schedule says, while the server serves.
+            let dir = server.dir.clone();
+            std::thread::spawn(move || loop {
+                let config = Server::open(&dir).map(|server| server.config.backup).unwrap_or_default();
+                match backup::due_in(&dir, &config) {
+                    Some(wait) if wait.is_zero() => {
+                        if let Err(why) = backup::run(&dir, &config) {
+                            eprintln!("kito-server: the backup failed: {why}");
+                            audit::record(&dir, "backup_failed", None, None, &why);
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                    Some(wait) => std::thread::sleep(wait.min(std::time::Duration::from_secs(3600))),
+                    None => std::thread::sleep(std::time::Duration::from_secs(3600)),
+                }
+            });
             if let Some(address) = http.as_deref().or(server.config.http.as_deref()) {
                 http::serve(&server, address, *plain)?;
             }

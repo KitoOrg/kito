@@ -315,7 +315,16 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                 writer,
                 "this session ended, or is not one the server knows: sign in again (`kito sign-in`)",
             ),
-            false => refuse(writer, "this token is not one the server knows"),
+            false => {
+                crate::audit::record(
+                    &server.dir,
+                    "token_refused",
+                    Some("somebody"),
+                    None,
+                    "a client with a token the server does not know",
+                );
+                refuse(writer, "this token is not one the server knows")
+            }
         };
     };
     let repo = match hello.get("repo").and_then(Value::as_str) {
@@ -369,7 +378,9 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
             person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
             now.saw(&name);
         }
-        let response = match serde_json::from_str::<Request>(&line) {
+        let parsed = serde_json::from_str::<Request>(&line);
+        let asked = parsed.as_ref().map(|request| request.method.clone()).unwrap_or_default();
+        let response = match parsed {
             Err(e) => Response::err(0, rpc::PARSE_ERROR, format!("invalid request: {e}")),
             Ok(request) => match request.method.as_str() {
                 "server.repos" => {
@@ -465,6 +476,14 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                 },
             },
         };
+        // Every request is kept, for 90 days (ADR 0017).
+        crate::audit::request(
+            &server.dir,
+            &name,
+            repo.as_ref().map(|(repo, _)| repo.as_str()),
+            &asked,
+            response.error.is_none(),
+        );
         if send(writer, &response).is_err() {
             return;
         }
@@ -525,6 +544,10 @@ fn note_settings(server: &Server, name: &str, repo: &str, method: &str, params: 
 
 /// The server's people, asked from a connected directory.
 const PEOPLE: &[&str] = &[
+    "server.audit",
+    "server.audit_verify",
+    "server.backups",
+    "server.backup_now",
     "server.settings_history",
     "server.members",
     "server.grant",
@@ -615,6 +638,43 @@ pub fn people(
         }
         _ if !admin => {
             Err(refused(format!("only an admin of this server may manage its people: {name} is a member")))
+        }
+        // The audit log and the backups (ADR 0017), for admins.
+        "server.audit" => {
+            let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+            let filter = crate::audit::Filter {
+                requests: params.get("requests").and_then(Value::as_bool).unwrap_or(false),
+                who: text("who"),
+                kind: text("kind"),
+                repo: text("repo"),
+                since_ms: params.get("since_ms").and_then(Value::as_u64),
+                limit: params.get("limit").and_then(Value::as_u64).unwrap_or(100).min(2000) as usize,
+            };
+            Ok(json!(crate::audit::read(&now.dir, &filter)))
+        }
+        "server.audit_verify" => match crate::audit::verify(&now.dir) {
+            Ok(lines) => Ok(json!({ "whole": true, "lines": lines })),
+            Err(why) => Ok(json!({ "whole": false, "why": why })),
+        },
+        "server.backups" => {
+            let listed = crate::backup::list(&now.dir, &now.config.backup).map_err(refused)?;
+            Ok(json!({
+                "backups": listed,
+                "every_hours": now.config.backup.every_hours,
+                "keep": now.config.backup.keep,
+                "folder": crate::backup::folder(&now.dir, &now.config.backup),
+                "s3": now.config.backup.s3.as_ref().map(|s3| format!("{}/{}", s3.endpoint, s3.bucket)),
+            }))
+        }
+        "server.backup_now" => {
+            let mut done = crate::backup::run(&now.dir, &now.config.backup).map_err(refused)?;
+            // The key is said on the server's machine, not over the network.
+            if done["new_key"].is_string() {
+                done["new_key"] =
+                    json!("made now: `kito-server backup key` on the server's machine prints it");
+            }
+            now.tell("backup_requested", json!({ "by": name, "what": done["name"] }));
+            Ok(done)
         }
         "server.people" => {
             let people: Vec<Value> = now

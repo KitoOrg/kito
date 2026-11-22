@@ -47,4 +47,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0014 · Roles in each repository, and roles of the server](0014-roles.md)
 - [0015 · Tasks: what needs doing, and the lanes that do it](0015-tasks.md)
 - [0016 · Search and numbers over what a repository did](0016-search-and-numbers.md)
+- [0017 · The server's audit log, and its backups](0017-audit-and-backups.md)
   (accepted)

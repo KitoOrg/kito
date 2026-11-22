@@ -29,6 +29,9 @@ pub struct Config {
     /// How people who sign in are kept.
     #[serde(skip_serializing_if = "SignInConfig::is_default")]
     pub sign_in: SignInConfig,
+    /// Backups of the whole server (ADR 0017).
+    #[serde(skip_serializing_if = "crate::backup::BackupConfig::is_default")]
+    pub backup: crate::backup::BackupConfig,
 }
 
 /// `[sign_in]`: what holds for whoever signs in with a plugin (ADR 0006).
@@ -138,6 +141,7 @@ impl Default for Config {
             users: BTreeMap::new(),
             plugins: BTreeMap::new(),
             sign_in: SignInConfig::default(),
+            backup: crate::backup::BackupConfig::default(),
         }
     }
 }
@@ -356,6 +360,10 @@ impl Server {
 
     /// Writes the configuration: it holds what tokens hash to, and is
     /// readable by its owner only.
+    pub fn save_config(&self) -> Result<(), String> {
+        self.save()
+    }
+
     fn save(&self) -> Result<(), String> {
         use std::io::Write;
         let path = self.dir.join(CONFIG_FILE);
@@ -898,6 +906,15 @@ impl Server {
     /// fact. One that fails is said, and held against nothing else.
     pub fn tell(&self, kind: &str, mut event: serde_json::Value) {
         use kitod::plugins::Permission;
+        // What changes the server is kept, whoever listens (ADR 0017).
+        let said = |key: &str| event.get(key).and_then(serde_json::Value::as_str).map(str::to_owned);
+        let what = said("what").unwrap_or_else(|| event.to_string());
+        // Who did it: whoever the event says; for a sign-in or a session, the person themselves.
+        let by = match kind {
+            "signed_in" | "session_ended" | "session_opened" => said("user"),
+            _ => said("by"),
+        };
+        crate::audit::record(&self.dir, kind, by.as_deref(), said("repo").as_deref(), &what);
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as u64);

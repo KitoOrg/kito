@@ -251,10 +251,11 @@ async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): J
     if who.by_cookie && headers.get("x-kito").is_none() {
         return said(StatusCode::FORBIDDEN, "not a request of a page of this server");
     }
-    if !call.method.starts_with("server.people") {
+    let theirs = ["server.people", "server.audit", "server.backup"];
+    if !theirs.iter().any(|prefix| call.method.starts_with(prefix)) {
         return said(
             StatusCode::NOT_FOUND,
-            "`/-/people` answers server.people, server.people_add, _remove and _role",
+            "`/-/people` answers the server's people, its audit log and its backups",
         );
     }
     let asked = tokio::task::spawn_blocking(move || {
@@ -276,6 +277,47 @@ async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): J
     }
 }
 
+/// `GET /-/admin/backups/<name>`: an archive as it is kept, for an admin to download.
+async fn download_backup(
+    State(http): State<Arc<Http>>,
+    Segment(name): Segment<String>,
+    headers: HeaderMap,
+) -> Response {
+    let server = match http.server() {
+        Ok(server) => server,
+        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    // A link the browser follows: it sends the session, and nothing a
+    // page adds. Reading changes nothing, and another site cannot read
+    // the answer.
+    let Some(who) = http.who(&server, &headers).filter(|who| who.user.is_admin()) else {
+        return said(StatusCode::FORBIDDEN, "the backups of this server are for its admins");
+    };
+    let plain = name.starts_with("kito-backup-") && name.ends_with(".kbak") && !name.contains(['/', '\\']);
+    let Some(path) = crate::backup::folder(&server.dir, &server.config.backup)
+        .map(|dir| dir.join(&name))
+        .filter(|path| plain && path.is_file())
+    else {
+        return said(StatusCode::NOT_FOUND, "no such backup in this server's folder");
+    };
+    crate::audit::record(&server.dir, "backup_downloaded", Some(&who.name), None, &name);
+    match tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|read| read)
+    {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 struct Opening {
     token: String,
@@ -290,8 +332,22 @@ async fn open_session(State(http): State<Arc<Http>>, Json(opening): Json<Opening
     };
     // The same answer for no token and for a wrong one.
     let Some((name, _)) = server.user_of(opening.token.trim()) else {
+        crate::audit::record(
+            &server.dir,
+            "token_refused",
+            Some("somebody"),
+            None,
+            "a browser with a token the server does not know",
+        );
         return said(StatusCode::UNAUTHORIZED, "this token is not one the server knows");
     };
+    crate::audit::record(
+        &server.dir,
+        "session_opened",
+        Some(&name),
+        None,
+        &format!("{name}, in a browser, with a token"),
+    );
     let id = match server.open_session(&name) {
         Ok(id) => id,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -463,6 +519,8 @@ async fn api(
     // A browser asks through pages: of what the person may do, what the
     // plugins that serve them were given.
     let within = who.by_cookie.then(|| http.pages_may.clone());
+    let (dir, person, method, place) =
+        (server.dir.clone(), who.name.clone(), call.method.clone(), repo.clone());
     let asked = tokio::task::spawn_blocking(move || {
         crate::session::ask(
             &server,
@@ -475,6 +533,7 @@ async fn api(
         )
     })
     .await;
+    crate::audit::request(&dir, &person, Some(&place), &method, matches!(asked, Ok(Ok(_))));
     match asked {
         Ok(Ok(value)) => answered(value),
         Ok(Err((code, message))) => {
@@ -670,6 +729,7 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         .route("/-/api/{repo}", post(api))
         .route("/-/admin/plugins", get(admin_plugins).post(admin_change))
         .route("/-/people", post(people))
+        .route("/-/admin/backups/{name}", get(download_backup))
         .route("/-/sign-in", get(ways))
         .route("/-/sign-in/{method}", get(begin_sign_in))
         .route("/-/sign-in/{method}/callback", get(finish_sign_in))

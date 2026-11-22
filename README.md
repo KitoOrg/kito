@@ -289,6 +289,21 @@ up Claude Code, as it always did, and names the others found.
 install script asks the same question once, and writes the answer with
 `kito assistant default`.
 
+### The audit log and backups of a server
+
+```bash
+kito-server audit                          # who changed people, access, rules, repositories
+kito-server audit --requests --who bob     # each request, for 90 days
+kito-server audit --verify                 # each line is chained: a change is found
+kito-server backup                         # the whole server, encrypted (the key is printed once)
+kito-server backup schedule --every 24 --keep 14
+kito-server backup s3 --endpoint https://… --bucket kito --keys keys.txt
+kito-server restore kito-backup-….kbak --to /srv/kito-restored
+```
+
+Admins do the same from a connected directory: `kito audit`, `kito
+backup`, `kito backup now`.
+
 ### Search and numbers
 
 ```bash

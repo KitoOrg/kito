@@ -4,6 +4,20 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.35.0]
+
+The server's audit log and backups (phase 34,
+[ADR 0017](docs/adr/0017-audit-and-backups.md)).
+
+- **`kito-server audit`**: who changed the server's people, access,
+  rules, plugins and repositories, every sign-in, and every request (90
+  days); each line chained to the one before, `--verify` finds a change.
+- **`kito-server backup`**: the whole server in one encrypted archive,
+  made while it runs, every 24 hours by default with the last 14 kept,
+  in a folder and in S3-compatible storage; `kito-server restore` puts
+  one back.
+- `kito audit` and `kito backup` for admins in a connected directory.
+
 ## [0.34.0]
 
 Search and numbers (phase 33, [ADR 0016](docs/adr/0016-search-and-numbers.md)).
