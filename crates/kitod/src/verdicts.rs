@@ -240,6 +240,7 @@ impl Repo {
         }
         // The verdict is on the lane as its agent just left it.
         self.scan_lane(lane)?;
+        let seen = self.lane_changed_files(lane);
         let verdict = Verdict {
             id: self.store.next_verdict_id(),
             lane,
@@ -249,8 +250,47 @@ impl Repo {
             text: text.map(str::to_owned),
             at_ms: now_ms(),
             at_ops: self.lane_ops(lane)?,
+            seen,
         };
         self.store.put_verdict(&verdict)?;
         self.review(lane)
+    }
+
+    /// The files a lane changed, with what is in each now.
+    pub(crate) fn lane_changed_files(
+        &self,
+        lane: LaneId,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, kito_core::BlobId> {
+        let Some(at) = self.lanes.get(&lane) else { return Default::default() };
+        at.work
+            .tree
+            .iter()
+            .filter(|(path, entry)| at.base_tree.get(path) != Some(*entry))
+            .map(|(path, entry)| (path.to_path_buf(), entry.blob))
+            .collect()
+    }
+
+    /// The requests for changes that stand on a lane, as comments its agent
+    /// is told (ADR 0019).
+    pub(crate) fn requested_changes(&self, lane: LaneId) -> Vec<crate::comments::CommentInfo> {
+        self.standing(lane)
+            .into_iter()
+            .filter(|(verdict, ..)| verdict.kind == VerdictKind::ChangesRequested)
+            .map(|(verdict, ..)| crate::comments::CommentInfo {
+                id: verdict.id.to_string(),
+                lane: lane.to_string(),
+                on: None,
+                lines: None,
+                quoted: None,
+                text: format!("changes requested: {}", verdict.text.clone().unwrap_or_default()),
+                by: reviewer(verdict).name.clone(),
+                person: None,
+                at_ms: verdict.at_ms,
+                reply_to: None,
+                resolved_by: None,
+                outdated: false,
+                suggestion: None,
+            })
+            .collect()
     }
 }

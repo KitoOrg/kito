@@ -4,6 +4,20 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.38.0]
+
+A review sent whole ([ADR 0019](docs/adr/0019-a-review-sent-whole.md)).
+
+- **`submit_review`**: the comments of a review and its verdict in one
+  go, every comment checked before any is written; the agent is told
+  them together. A request for changes that stands is told to the agent
+  too.
+- **Suggested changes**: a comment on lines carries the lines to put in
+  their place; the agent is told them, and `apply_suggestion` writes them
+  into the lane and resolves the comment.
+- **What changed since my review**: a verdict keeps what the files were;
+  `changes_since_review` shows what changed since, against that.
+
 ## [0.37.0]
 
 - **The command line has Kito's look**: `kito --help` starts with the

@@ -880,6 +880,122 @@ impl Daemon {
                     let lane = lane()?;
                     to_json(serde_json::to_value(self.with_repo(|repo| repo.review(lane)).map_err(internal)?))
                 }
+                // A review sent whole (ADR 0019): its comments, then the
+                // verdict, so the agent is told them together.
+                "submit_review" => {
+                    let lane = lane()?;
+                    let verdict = text("verdict")?.to_owned();
+                    let kind = match verdict.as_str() {
+                        "approve" => Some(kito_core::VerdictKind::Approved),
+                        "request_changes" => Some(kito_core::VerdictKind::ChangesRequested),
+                        "comment" => None,
+                        other => {
+                            return Err((
+                                rpc::INVALID_PARAMS,
+                                format!("{other:?} is not a review: approve, request_changes or comment"),
+                            ))
+                        }
+                    };
+                    let said =
+                        optional("text").map(|said| said.trim().to_owned()).filter(|said| !said.is_empty());
+                    let drafts: Vec<(Option<String>, String, Option<String>)> = params
+                        .get("comments")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|draft| {
+                            let field =
+                                |name: &str| draft.get(name).and_then(Value::as_str).map(str::to_owned);
+                            (field("on"), field("text").unwrap_or_default(), field("suggestion"))
+                        })
+                        .collect();
+                    if kind.is_none() && said.is_none() && drafts.is_empty() {
+                        return Err((
+                            rpc::INVALID_PARAMS,
+                            "a review says something: words, or comments".to_owned(),
+                        ));
+                    }
+                    let person = params.get("on_behalf_of").and_then(person_of);
+                    let done = self
+                        .with_repo(|repo| {
+                            // Every comment is checked before any is written.
+                            for (on, text, suggestion) in &drafts {
+                                if text.chars().filter(|c| c.is_alphabetic()).count() < 2
+                                    && suggestion.is_none()
+                                {
+                                    return Err(crate::Error::Other("a comment needs a few words".into()));
+                                }
+                                if let Some(on) = on {
+                                    repo.check_comment_target(lane, on)?;
+                                }
+                            }
+                            let mut written = Vec::new();
+                            for (on, text, suggestion) in &drafts {
+                                let words =
+                                    if text.trim().is_empty() { "Suggested change." } else { text.as_str() };
+                                let mut info =
+                                    repo.add_comment(lane, on.as_deref(), words, person.clone(), None, None)?;
+                                if let Some(suggestion) = suggestion {
+                                    let id = info.id.parse().map_err(|e: kito_core::IdParseError| {
+                                        crate::Error::Other(e.to_string())
+                                    })?;
+                                    info = repo.suggest(id, suggestion)?;
+                                }
+                                written.push(info);
+                            }
+                            let review = match kind {
+                                Some(kind) => {
+                                    let words = said.clone().or_else(|| {
+                                        (kind == kito_core::VerdictKind::ChangesRequested
+                                            && !written.is_empty())
+                                        .then(|| "see the comments".to_owned())
+                                    });
+                                    repo.give_verdict(lane, kind, words.as_deref(), person.clone(), None)?
+                                }
+                                None => {
+                                    if let Some(said) = &said {
+                                        written.push(repo.add_comment(
+                                            lane,
+                                            None,
+                                            said,
+                                            person.clone(),
+                                            None,
+                                            None,
+                                        )?);
+                                    }
+                                    repo.review(lane)?
+                                }
+                            };
+                            Ok((written, review))
+                        })
+                        .map_err(internal)?;
+                    Ok(
+                        json!({ "comments": to_json(serde_json::to_value(done.0))?, "review": to_json(serde_json::to_value(done.1))? }),
+                    )
+                }
+                "apply_suggestion" => {
+                    let id: kito_core::CommentId = text("comment")?
+                        .parse()
+                        .map_err(|e: kito_core::IdParseError| (rpc::INVALID_PARAMS, e.to_string()))?;
+                    let by = params.get("on_behalf_of").and_then(person_of);
+                    let (person, integrator) = (person_name(params), integrates(params));
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.apply_suggestion(id, by, person.as_deref(), integrator))
+                            .map_err(internal)?,
+                    ))
+                }
+                "changes_since_review" => {
+                    let lane = lane()?;
+                    let person = person_name(params);
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| {
+                            let person = person.clone().unwrap_or_else(|| repo.identity.author().name);
+                            repo.scan_lane(lane)?;
+                            repo.changes_since(lane, &person)
+                        })
+                        .map_err(internal)?,
+                    ))
+                }
                 "checkpoint" => {
                     let label = text("label")?;
                     let done = self.with_repo(|repo| repo.checkpoint(label)).map_err(internal)?;
@@ -1444,6 +1560,19 @@ impl Daemon {
                 ("commented", lane, person, format!("{on}{}", text(value, "text").unwrap_or_default()))
             }
             "resolve_comment" => ("comment_resolved", lane, person, text(value, "id").unwrap_or_default()),
+            "apply_suggestion" => {
+                ("suggestion_applied", text(value, "lane"), person, text(value, "id").unwrap_or_default())
+            }
+            "submit_review" => {
+                let count = value.get("comments").and_then(Value::as_array).map_or(0, Vec::len);
+                let kind = match text(params, "verdict").unwrap_or_default().as_str() {
+                    "approve" => "approved",
+                    "request_changes" => "changes requested",
+                    _ => "commented",
+                };
+                let words = text(params, "text").map(|words| format!(": {words}")).unwrap_or_default();
+                ("reviewed", lane, person, format!("{kind}, {count} comments{words}"))
+            }
             "verdict" => {
                 let words = text(params, "text").map(|words| format!(": {words}")).unwrap_or_default();
                 let kind = match text(params, "verdict").unwrap_or_default().as_str() {

@@ -43,6 +43,9 @@ pub struct CommentInfo {
     /// The code it is on changed since, or is gone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub outdated: bool,
+    /// Lines suggested in the place of those it is on (ADR 0019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -118,6 +121,11 @@ impl Repo {
         }
     }
 
+    /// Whether `target` is something a comment on `lane` can be on.
+    pub(crate) fn check_comment_target(&self, lane: LaneId, target: &str) -> Result<()> {
+        self.comment_target(lane, target).map(|_| ())
+    }
+
     /// Says something about a lane, about code in it (`target`), or in
     /// answer to a comment (`reply_to`). `by`: who says it (default:
     /// whoever runs the repository); `person`: whom an agent works for.
@@ -176,6 +184,7 @@ impl Repo {
             at_ops: self.lane_ops(lane)?,
             reply_to,
             resolved: None,
+            suggestion: None,
         };
         self.store.put_comment(&comment)?;
         Ok(self.comment_info(&comment))
@@ -243,7 +252,11 @@ impl Repo {
     pub(crate) fn comments_for_agent(&self, lane: LaneId) -> Vec<CommentInfo> {
         let agent = self.store.lane_record(lane).map(|lane| lane.agent.name.clone());
         let all = self.comments(lane, false).unwrap_or_default();
-        all.into_iter().filter(|comment| Some(&comment.by) != agent.as_ref()).collect()
+        let mut told: Vec<CommentInfo> =
+            all.into_iter().filter(|comment| Some(&comment.by) != agent.as_ref()).collect();
+        // A request for changes that stands is told as a comment is (ADR 0019).
+        told.extend(self.requested_changes(lane));
+        told
     }
 
     fn comment_info(&self, comment: &Comment) -> CommentInfo {
@@ -299,7 +312,61 @@ impl Repo {
             reply_to: comment.reply_to.map(|id| id.to_string()),
             resolved_by: comment.resolved.as_ref().map(|(by, _)| by.name.clone()),
             outdated,
+            suggestion: comment.suggestion.clone(),
         }
+    }
+
+    /// Gives a comment on lines the lines to put in their place.
+    pub fn suggest(&mut self, id: CommentId, suggestion: &str) -> Result<CommentInfo> {
+        let mut comment =
+            self.store.comment(id).cloned().ok_or_else(|| Error::Other(format!("{id}: no such comment")))?;
+        if comment.on.as_ref().is_none_or(|on| on.lines.is_none()) {
+            return Err(Error::Other(format!("{id} is not on lines: a suggestion takes the place of lines")));
+        }
+        comment.suggestion = Some(suggestion.trim_end_matches(['\n', '\r']).to_owned());
+        self.store.put_comment(&comment)?;
+        Ok(self.comment_info(&comment))
+    }
+
+    /// Puts what a comment suggests in the place of the lines it is on, in
+    /// the lane's working copy, and resolves it (ADR 0019). Refused when
+    /// the lines are not there any more.
+    pub fn apply_suggestion(
+        &mut self,
+        id: CommentId,
+        by: Option<Author>,
+        person: Option<&str>,
+        integrator: bool,
+    ) -> Result<CommentInfo> {
+        let comment =
+            self.store.comment(id).cloned().ok_or_else(|| Error::Other(format!("{id}: no such comment")))?;
+        let suggestion =
+            comment.suggestion.clone().ok_or_else(|| Error::Other(format!("{id} suggests nothing")))?;
+        if comment.resolved.is_some() {
+            return Err(Error::Other(format!("{id} is resolved already")));
+        }
+        self.scan_lane(comment.lane)?;
+        let info = self.comment_info(&comment);
+        let (Some(target), Some((from, to))) = (&comment.on, info.lines) else {
+            return Err(Error::Other(format!(
+                "the lines {id} is on are not in {} any more: change them by hand",
+                comment.lane
+            )));
+        };
+        let file = self.lane_dir(comment.lane).join("work").join(&target.path);
+        let text =
+            std::fs::read_to_string(&file).map_err(|e| Error::Other(format!("{}: {e}", file.display())))?;
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut lines: Vec<&str> = text.lines().collect();
+        let (from, to) = (from as usize - 1, (to as usize).min(lines.len()));
+        lines.splice(from..to, suggestion.lines());
+        let mut out = lines.join(newline);
+        if text.ends_with('\n') {
+            out.push_str(newline);
+        }
+        std::fs::write(&file, out).map_err(|e| Error::Other(format!("{}: {e}", file.display())))?;
+        self.scan_lane(comment.lane)?;
+        self.resolve_comment(id, by, person, integrator)
     }
 
     /// `true` if the lane recorded something on a symbol after its first

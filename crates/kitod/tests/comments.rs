@@ -269,3 +269,46 @@ fn a_comment_is_resolved_by_who_wrote_it_or_by_the_owner_of_the_lane() {
     assert!(repo.resolve_comment(CommentId(3), None, Some("ada"), false).is_ok());
     assert!(repo.comments(lane, false).unwrap().is_empty());
 }
+
+#[test]
+fn a_review_suggests_lines_tells_the_agent_and_shows_what_changed_since() {
+    let (_tmp, _root, mut repo) = shop();
+    let (lane, work) = open(&mut repo, "alice", "prices that are never negative");
+    write(&work, "src/shop.ts", &SHOP.replace("sum += price;", "sum += Math.floor(price);"));
+    let file = Path::new("src/shop.ts");
+    while !repo.before_edit(Some(lane), file, &[(4, 4)], false).unwrap().allowed {}
+
+    // Bob suggests lines in the place of line 4, and asks for changes.
+    let said =
+        repo.add_comment(lane, Some("src/shop.ts:4"), "Round, do not floor.", bob(), None, None).unwrap();
+    let said = repo.suggest(said.id.parse().unwrap(), "    sum += Math.round(price);\n").unwrap();
+    assert_eq!(said.suggestion.as_deref(), Some("    sum += Math.round(price);"));
+    repo.give_verdict(lane, VerdictKind::ChangesRequested, Some("Rounding."), bob(), None).unwrap();
+
+    // The agent is told both, the lines suggested with the comment.
+    let told = repo.before_edit(Some(lane), file, &[(4, 4)], false).unwrap();
+    assert!(!told.allowed && told.kind == "comments", "{told:?}");
+    assert!(
+        told.message.contains("Round, do not floor.")
+            && told.message.contains("    + ".to_owned().as_str())
+            && told.message.contains("Math.round(price);")
+            && told.message.contains("changes requested: Rounding."),
+        "{}",
+        told.message
+    );
+
+    // Nothing changed since bob's verdict; then the suggestion is applied.
+    assert!(repo.changes_since(lane, "bob").unwrap().files.is_empty());
+    let applied = repo.apply_suggestion(said.id.parse().unwrap(), bob(), None, true).unwrap();
+    assert_eq!(applied.resolved_by.as_deref(), Some("bob"));
+    let now = fs::read_to_string(work.join("src/shop.ts")).unwrap();
+    assert!(now.contains("    sum += Math.round(price);\n") && !now.contains("floor"), "{now}");
+    let since = repo.changes_since(lane, "bob").unwrap();
+    assert_eq!(since.files.len(), 1);
+    assert_eq!((since.files[0].added, since.files[0].removed), (1, 1));
+    assert!(since.files[0].hunks[0].lines.iter().any(|line| line == "+    sum += Math.round(price);"));
+    // Applied once: it is resolved, and suggests nothing more.
+    assert!(repo.apply_suggestion(said.id.parse().unwrap(), bob(), None, true).is_err());
+    // Who gave no verdict has nothing to compare with.
+    assert!(repo.changes_since(lane, "carol").is_err());
+}

@@ -74,6 +74,9 @@ const ALLOWED: &[&str] = &[
     "resolve_comment",
     "verdict",
     "review",
+    "submit_review",
+    "apply_suggestion",
+    "changes_since_review",
 ];
 
 /// Of those, what somebody who may only read can ask.
@@ -96,6 +99,7 @@ const READ: &[&str] = &[
     "lane_diff",
     "comments",
     "review",
+    "changes_since_review",
     // Asked before an edit and after a command: the answer changes nothing
     // of the repository.
     "before_edit",

@@ -92,6 +92,7 @@ with what comes with it, where a program named itself otherwise.
 | `notes` | `[lane]`, `[on]` | The notes left on code | `notes.rs` (`NoteInfo`) |
 | `comments` | `lane`, `[all]` | What was said about a lane, each comment followed by its answers | `comments.rs` (`CommentInfo`) |
 | `review` | `lane` | Where the review of a lane stands, and what is missing | `verdicts.rs` (`ReviewInfo`) |
+| `changes_since_review` | `lane` | What changed in the lane since the one who asks last approved it or asked for changes: each file, with its hunks against what they saw (ADR 0019) | `review.rs` (`ChangesSince`) |
 | `conflicts` | `[all]` | The conflicts that wait for a decision (with `all`, the decided ones too) | `kito-integrate` (`ConflictInfo`) |
 | `integration_result` | `job`, `[wait_ms]` | How an integration ended, waiting for it if it has not | `kito-integrate` (`IntegrationResult`) |
 | `events` | `[after]`, `[wait_ms]` | What happened since event `after`, waiting up to `wait_ms` for something: `events`, and `next` to ask with | `rpc.rs` (`Event`) |
@@ -137,6 +138,8 @@ with what comes with it, where a program named itself otherwise.
 | `task_reopen` | `task` | Open again | `tasks.rs` (`TaskInfo`) |
 | `task_drop` | `task` | Nobody will do it | `tasks.rs` (`TaskInfo`) |
 | `verdict` | `lane`, `verdict` (`approve`, `request_changes`, `withdraw`), `[text]`, `[agent]` | Where the review stands now | `verdicts.rs` (`ReviewInfo`) |
+| `submit_review` | `lane`, `verdict` (`approve`, `request_changes`, `comment`), `[text]`, `[comments]` (each `on`, `text`, `[suggestion]`) | A review sent whole (ADR 0019): every comment is checked before any is written, then the verdict is given. `comments`: those written; `review`: where it stands | `server.rs`, `comments.rs` |
+| `apply_suggestion` | `comment` | Puts the lines a comment suggests in the place of those it is on, in the lane's working copy, and resolves it. Refused when the lines are not there any more | `comments.rs` (`CommentInfo`) |
 
 ## `integrate`
 

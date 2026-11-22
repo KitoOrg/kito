@@ -637,3 +637,54 @@ fn a_lane_is_reviewed_on_the_server_and_then_somebody_integrates_it() {
         git_out(&world.main(), &["log", "-1", "--format=%B", "main"]).contains("Reviewed-by: carol")
     });
 }
+
+#[test]
+fn a_review_is_sent_whole_from_another_machine() {
+    let mut world = World::new();
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:write"]));
+    let bob = world.bob.clone();
+    let (bob, carol) = (desk(&mut world, "bob", &bob), desk(&mut world, "carol", &carol));
+    let work = open(&bob, "builder");
+    write(&work, "src/shop.ts", &SHOP.replace("price * quantity", "Math.floor(price * 100) * quantity"));
+    call(&bob, "sync", json!({ "lane": "1" }));
+
+    // One comment on a line that is not there: nothing of the review is written.
+    let said = refused(
+        &carol,
+        "submit_review",
+        json!({ "lane": "1", "verdict": "request_changes", "comments": [
+            { "on": "src/shop.ts:2", "text": "Round it." },
+            { "on": "src/nothing.ts:1", "text": "And this." },
+        ] }),
+    );
+    assert!(said.contains("no such file"), "{said}");
+    assert_eq!(call(&carol, "comments", json!({ "lane": "1" })), json!([]));
+
+    // Sent whole: the comments, a suggestion, and the verdict, as carol's.
+    let sent = call(
+        &carol,
+        "submit_review",
+        json!({ "lane": "1", "verdict": "request_changes", "text": "Rounding.", "comments": [
+            { "on": "src/shop.ts:2", "text": "Round, do not floor.", "suggestion": "  return Math.round(price * 100) * quantity;" },
+            { "text": "And a test, please." },
+        ] }),
+    );
+    let comments = sent["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 2, "{sent}");
+    assert_eq!((comments[0]["by"].as_str(), comments[0]["suggestion"].is_string()), (Some("carol"), true));
+    assert_eq!(sent["review"]["verdicts"][0]["by"], "carol", "{sent}");
+    assert!(events(&bob).contains("changes requested, 2 comments: Rounding."), "{}", events(&bob));
+
+    // Nothing changed since her review; bob applies her suggestion, and it has.
+    assert_eq!(call(&carol, "changes_since_review", json!({ "lane": "1" }))["files"], json!([]));
+    let id = comments[0]["id"].as_str().unwrap();
+    let applied = call(&bob, "apply_suggestion", json!({ "comment": id }));
+    assert_eq!(applied["resolved_by"], "bob", "{applied}");
+    wait_for("the suggestion in the lane", || {
+        read(&world.main().join(".kito/lanes/1/work"), "src/shop.ts").contains("Math.round")
+    });
+    let since = call(&carol, "changes_since_review", json!({ "lane": "1" }));
+    assert_eq!(since["files"][0]["path"], "src/shop.ts", "{since}");
+    // The copy bob writes in, on his machine, has it too.
+    wait_for("the suggestion in bob's copy", || read(&work, "src/shop.ts").contains("Math.round"));
+}

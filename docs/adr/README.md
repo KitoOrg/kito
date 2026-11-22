@@ -51,3 +51,5 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0018 · Repositories added, archived, renamed and deleted from afar](0018-repositories-from-afar.md)
   (accepted)
+- [0019 · A review sent whole, suggestions, and what changed since](0019-a-review-sent-whole.md)
+  (accepted)

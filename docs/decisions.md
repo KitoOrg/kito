@@ -1800,3 +1800,12 @@ When the last checkpoint of the permanent lane is the lane as it lands,
 main's checkpoint records its commit (`git_merge`, as for a pull) and is
 exported as a merge: `git log` shows what came through staging, and a
 branch that follows staging fast-forwards to main.
+
+### D-175 · A review is the comments and the verdict, sent together
+An agent told comments one by one starts on the first before the
+reviewer has finished ([ADR 0019](adr/0019-a-review-sent-whole.md)). The
+comments wait in the reviewer's browser, not on the server, because a
+draft is nobody else's business; they reach the repository in one call
+that checks them all first, so a review is never half there. What a
+reviewer saw is kept with the verdict as the contents of the files, not
+as a count of ops, so "since my review" is a diff of texts.

@@ -601,8 +601,17 @@ impl Daemon {
                 }
                 answer
             }
-            method @ ("set_intent" | "lane_status" | "lane_diff" | "comment" | "verdict" | "log"
-            | "extend_scope" | "why_graph") => {
+            method @ ("set_intent"
+            | "lane_status"
+            | "lane_diff"
+            | "comment"
+            | "verdict"
+            | "log"
+            | "extend_scope"
+            | "why_graph"
+            | "submit_review"
+            | "apply_suggestion"
+            | "changes_since_review") => {
                 self.barrier(up, params, false)?;
                 self.forward(up, method, params)?
             }

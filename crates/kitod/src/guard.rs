@@ -476,6 +476,13 @@ impl Repo {
                 for line in comment.quoted.iter().flat_map(|quoted| quoted.lines()).take(6) {
                     message.push_str(&format!("    > {line}\n"));
                 }
+                // What to put in their place, as the reviewer wrote it (ADR 0019).
+                if let Some(suggestion) = &comment.suggestion {
+                    message.push_str("    suggested in their place:\n");
+                    for line in suggestion.lines() {
+                        message.push_str(&format!("    + {line}\n"));
+                    }
+                }
             }
             message.push_str(
                 "Do what they ask, or answer with the comment tool (reply_to) when you will not or when \

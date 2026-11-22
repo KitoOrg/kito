@@ -152,6 +152,83 @@ fn hunks(before: &[u8], after: &[u8]) -> (Vec<Hunk>, usize, usize) {
     (found, added, removed)
 }
 
+/// What changed in a lane since somebody's last verdict on it (ADR 0019).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesSince {
+    pub lane: String,
+    /// The verdict they are compared with: `verdict#4`, given then.
+    pub verdict: String,
+    pub at_ms: u64,
+    pub files: Vec<FileDiff>,
+}
+
+impl Repo {
+    /// What changed in `lane` since `person` last approved it or asked for
+    /// changes: each file whose content is not what they saw then.
+    pub fn changes_since(&self, lane: LaneId, person: &str) -> Result<ChangesSince> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let verdict = self
+            .store
+            .verdicts()
+            .rev()
+            .filter(|verdict| verdict.lane == lane && verdict.kind != kito_core::VerdictKind::Withdrawn)
+            .find(|verdict| verdict.person.as_ref().unwrap_or(&verdict.by).name == person)
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "{person} gave no verdict on {lane}: there is no review to compare with"
+                ))
+            })?;
+        let now = &at.work.tree;
+        let mut paths: BTreeSet<PathBuf> = verdict.seen.keys().cloned().collect();
+        paths.extend(
+            now.iter()
+                .filter(|(path, entry)| at.base_tree.get(path) != Some(*entry))
+                .map(|(path, _)| path.to_path_buf()),
+        );
+        let blob =
+            |id: &kito_core::BlobId| -> Result<Vec<u8>> { Ok(self.store.get_blob(id)?.unwrap_or_default()) };
+        let mut files = Vec::new();
+        for path in paths {
+            // What they saw: the lane's, or else what it started from.
+            let then =
+                verdict.seen.get(&path).copied().or_else(|| at.base_tree.get(&path).map(|entry| entry.blob));
+            let later = now.get(&path).map(|entry| entry.blob);
+            if then == later {
+                continue;
+            }
+            let old = then.as_ref().map(blob).transpose()?.unwrap_or_default();
+            let new = later.as_ref().map(blob).transpose()?.unwrap_or_default();
+            let binary = kito_diff::text::is_binary(&old) || kito_diff::text::is_binary(&new);
+            let (hunks, added, removed) = match binary {
+                true => (Vec::new(), 0, 0),
+                false => hunks(&old, &new),
+            };
+            files.push(FileDiff {
+                path: shown(&path),
+                was: None,
+                change: match (then, later) {
+                    (None, _) => Change::Added,
+                    (_, None) => Change::Removed,
+                    _ => Change::Changed,
+                },
+                binary,
+                before: then.map(|id| id.to_string()),
+                after: later.map(|id| id.to_string()),
+                added,
+                removed,
+                hunks,
+                symbols: Vec::new(),
+            });
+        }
+        Ok(ChangesSince {
+            lane: lane.to_string(),
+            verdict: verdict.id.to_string(),
+            at_ms: verdict.at_ms,
+            files,
+        })
+    }
+}
+
 /// A path as Kito names files: with `/`.
 fn shown(path: &Path) -> String {
     kito_core::paths::portable_text(&path.display().to_string())

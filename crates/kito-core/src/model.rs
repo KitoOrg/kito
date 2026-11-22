@@ -742,6 +742,9 @@ pub struct Comment {
     /// Who resolved it, and when: it is kept, and no longer told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<(Author, u64)>,
+    /// Lines to put in the place of the lines it is on (ADR 0019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 /// The code a comment is on, as the lane had it then.
@@ -777,6 +780,10 @@ pub struct Verdict {
     pub at_ms: u64,
     /// How many ops the lane had then: what was looked at.
     pub at_ops: u64,
+    /// The files the lane changed, as they were then: what changed since
+    /// is what the reviewer has not seen (ADR 0019).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub seen: std::collections::BTreeMap<std::path::PathBuf, BlobId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
