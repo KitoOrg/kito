@@ -49,3 +49,43 @@ one without breaking the directories connected to it.
 - An upload is held whole on the server's disk until it ends; one never
   ended stays in `uploads/` until the server's keeper removes it.
 - The backups made before a delete still have the repository.
+
+## Amendment, 2026-11-22: a repository starts with something
+
+A repository added empty took no lane: a lane starts from what the main
+lane has, and `open_lane` answered that there was nothing a lane could
+start from. On a server the main lane is changed through lanes, so
+nobody connected to such a repository could put a first file in it: it
+was a dead end until somebody wrote files in its directory on the
+server's machine and made a checkpoint there.
+
+A repository added with no git address and no upload now starts with a
+first version: files written in its main directory, recorded, and a
+first checkpoint, "first version". Lanes open in it at once. It is not
+protected, as an empty one was not.
+
+- **Given nothing**, it starts with a `README.md` that holds `# <name>`.
+  `kito-server repo add <name>` and `kito repos add <name>` give it
+  nothing.
+- **Given files**, they are its first version, and there is no
+  `README.md` unless it is one of them. `server.repo_add` takes them in
+  `files`, a list of `{ "path": "kitchen.toml", "text": "…" }`; a list
+  of nothing is nothing given. The answer is the same, `{ "name": … }`,
+  and the request is still for admins.
+- **What may be given**: at most 32 files, each text at most 256 KiB. A
+  path is relative and written with `/`, with no empty part, no `.` or
+  `..` and no control character; it is not under `.kito` or `.git`,
+  whatever the case of the letters; none is given twice, or under a path
+  given as a file. A file that a `.gitignore` or `.kitoignore` among
+  them leaves out is refused as well: it would be on the server's disk
+  and on no lane. What is refused is said with its path, and nothing is
+  made.
+- **One way to start at a time**: `files` together with `from`, or with
+  an upload (`server.repo_upload_end`), is refused.
+
+The first version is recorded as any file saved in a main directory is:
+by whoever the server runs as. Who added the repository is in the audit
+log, with how many files were given. Over HTTP the request is the same
+(`POST /-/people`); a request there holds at most 2 MiB in all, so the
+files of one request together stay under that, while a client connected
+to the server's own port may give all 32 at their largest.

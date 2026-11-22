@@ -1,7 +1,7 @@
 //! A client's session: who it is, which repository it is about, and its
 //! requests passed on to that repository's daemon.
 
-use crate::state::{Role, Server, User};
+use crate::state::{FirstFiles, Role, Server, User};
 use kitod::client::{Client, ClientError, PROTOCOL};
 use kitod::rpc::{self, Request, Response};
 use serde_json::{json, Value};
@@ -552,6 +552,26 @@ fn note_settings(server: &Server, name: &str, repo: &str, method: &str, params: 
 }
 
 /// The server's people, asked from a connected directory.
+/// Why a plugin that asks as itself (ADR 0020) may not ask `method`, when
+/// it may not. What is asked of the server itself (its people, its
+/// repositories, its log, its backups) is a person's to ask: a plugin is
+/// given things in a repository, and is nobody on the server. Who uses the
+/// repository, and what was changed in its settings, it may know when it
+/// was given `admin` there.
+pub fn not_for_a_plugin(method: &str, given: &[kitod::plugins::Permission]) -> Option<String> {
+    if !PEOPLE.contains(&method) {
+        return None;
+    }
+    let of_the_repository = ["server.members", "server.settings_history"].contains(&method);
+    if of_the_repository && given.contains(&kitod::plugins::Permission::Admin) {
+        return None;
+    }
+    Some(match of_the_repository {
+        true => format!("a plugin may ask `{method}` only when it was given `admin`"),
+        false => format!("`{method}` is for a person: a plugin asks of a repository what it was given there"),
+    })
+}
+
 const PEOPLE: &[&str] = &[
     "server.repos_all",
     "server.repo_add",
@@ -679,7 +699,14 @@ pub fn people(
             let repo = text("name")?.to_owned();
             let from = params.get("from").and_then(Value::as_str).filter(|from| !from.trim().is_empty());
             let token = params.get("token").and_then(Value::as_str);
-            match from {
+            // One way to start a repository at a time.
+            if from.is_some() && gives_files(params) {
+                return Err((
+                    rpc::INVALID_PARAMS,
+                    "a repository comes from a git address or from the files given, not both".to_owned(),
+                ));
+            }
+            let with = match from {
                 // An address elsewhere: not a directory of the server's own machine.
                 Some(url) if !is_remote_git(url.trim()) => {
                     return Err(refused(format!(
@@ -687,13 +714,23 @@ pub fn people(
                         url.trim()
                     )))
                 }
-                Some(url) => now.add_repo_from_git(&repo, url.trim(), token).map_err(refused)?,
-                None => now.add_repo(&repo, None, false).map_err(refused)?,
+                Some(url) => {
+                    now.add_repo_from_git(&repo, url.trim(), token).map_err(refused)?;
+                    format!(" from {url}")
+                }
+                None => {
+                    let files = first_files(params)?;
+                    now.add_repo(&repo, None, files.as_ref(), false).map_err(refused)?;
+                    match params.get("files").and_then(Value::as_array).map_or(0, Vec::len) {
+                        0 => String::new(),
+                        1 => ", with 1 file given".to_owned(),
+                        given => format!(", with {given} files given"),
+                    }
+                }
             };
             // Whoever adds it maintains it.
             let _ = now.grant(name, &repo, Some(Role::Maintain));
-            let from_said = from.map(|url| format!(" from {url}")).unwrap_or_default();
-            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{from_said}") }));
+            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{with}") }));
             Ok(json!({ "name": repo }))
         }
         "server.repo_upload_begin" => {
@@ -722,6 +759,13 @@ pub fn people(
             let path = now.upload_path(text("id")?).map_err(refused)?;
             let repo = text("name")?.to_owned();
             let kind = text("kind")?;
+            // What was sent is the repository: it starts with nothing else.
+            if gives_files(params) {
+                return Err((
+                    rpc::INVALID_PARAMS,
+                    "a repository comes from what was sent or from the files given, not both".to_owned(),
+                ));
+            }
             let result = (|| -> Result<(), String> {
                 if now.repo(&repo).is_some() || now.dir.join("archived").join(&repo).exists() {
                     return Err(format!("the server already has something called `{repo}`"));
@@ -748,7 +792,7 @@ pub fn people(
                         Ok(())
                     }
                     // A git repository, as a bundle of its history.
-                    "git" => now.add_repo(&repo, Some(&path.to_string_lossy()), true).map(|_| ()),
+                    "git" => now.add_repo(&repo, Some(&path.to_string_lossy()), None, true).map(|_| ()),
                     other => Err(format!("`{other}`: an upload is `kito` or `git`")),
                 }
             })();
@@ -894,6 +938,40 @@ pub fn people(
             format!("`{method}` is not something a client can ask through the server"),
         )),
     }
+}
+
+/// Whether a request gives a new repository files to start with.
+fn gives_files(params: &Value) -> bool {
+    match params.get("files") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(given)) => !given.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// The files a request gives a new repository to start with (ADR 0018,
+/// amended): `files`, each a `path` in the repository and its `text`.
+/// `None`: it gives none.
+fn first_files(params: &Value) -> Result<Option<FirstFiles>, (i64, String)> {
+    const EACH: &str = "{ \"path\": …, \"text\": … }";
+    let wrong = |why: String| (rpc::INVALID_PARAMS, why);
+    if !gives_files(params) {
+        return Ok(None);
+    }
+    let given = params["files"].as_array().ok_or_else(|| wrong(format!("`files` is a list of {EACH}")))?;
+    let mut files = Vec::new();
+    for (at, file) in given.iter().enumerate() {
+        let path = file
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| wrong(format!("file {} of `files` has no `path`: each is {EACH}", at + 1)))?;
+        let text = file
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| wrong(format!("{path:?} has no `text`: each of `files` is {EACH}")))?;
+        files.push((path, text));
+    }
+    FirstFiles::new(&files).map(Some).map_err(wrong)
 }
 
 /// A git address of another machine, the only kind a client may have the

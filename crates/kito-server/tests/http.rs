@@ -99,24 +99,8 @@ impl Served {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap().join("server");
         ok(tmp.path(), &["init", dir.to_str().unwrap()]);
+        // Added with nothing: its README.md is what a lane starts from.
         ok(&dir, &["repo", "add", "shop"]);
-        // Something for a lane to start from.
-        let shop = dir.join("repos/shop");
-        fs::write(
-            shop.join(".gitignore"),
-            ".kito/
-",
-        )
-        .unwrap();
-        fs::write(
-            shop.join("shop.ts"),
-            "export const price = 1;
-",
-        )
-        .unwrap();
-        let mut repo = kitod::Repo::open(&shop).unwrap();
-        repo.checkpoint("first version").unwrap();
-        repo.close().unwrap();
         let ada = token_in(&ok(&dir, &["user", "add", "ada", "--repo", "shop:integrate"]));
         let carol = token_in(&ok(&dir, &["user", "add", "carol", "--repo", "shop:read"]));
         setup(&dir);
@@ -254,6 +238,56 @@ fn a_person_is_known_by_a_token_or_by_a_session_and_asks_as_themselves() {
     assert_eq!(served.request("GET", "/-/nothing", &[], None).status, 404);
 }
 
+#[test]
+fn an_admin_adds_a_repository_with_its_first_files_from_a_page() {
+    let served = Served::start(|dir| {
+        ok(dir, &["user", "role", "ada", "admin"]);
+    });
+    let session = |token: &str| {
+        let opened = served.request("POST", "/-/session", &[], Some(&json!({ "token": token })));
+        let value =
+            opened.head.lines().find_map(|line| line.strip_prefix("set-cookie: kito_session=")).unwrap();
+        format!("kito_session={}", value.split(';').next().unwrap())
+    };
+    let (ada, carol) = (session(&served.ada), session(&served.carol));
+    let add = |cookie: &str, params: Value| {
+        let call = json!({ "method": "server.repo_add", "params": params });
+        served.request("POST", "/-/people", &[("Cookie", cookie), ("X-Kito", "1")], Some(&call))
+    };
+
+    // The files reach the server as they were given: they are the first
+    // version of the repository, and a lane opens in it right away.
+    let files = json!([
+        { "path": "kitchen.toml", "text": "name = \"Shopworks\"\n" },
+        { "path": "recipes/review.md", "text": "# Review\n" },
+    ]);
+    let added = add(&ada, json!({ "name": "kitchen", "files": files }));
+    assert_eq!((added.status, added.json()), (200, json!({ "name": "kitchen" })), "{}", added.body);
+    let kitchen = served.dir.join("repos/kitchen");
+    assert_eq!(fs::read_to_string(kitchen.join("recipes/review.md")).unwrap(), "# Review\n");
+    assert!(!kitchen.join("README.md").exists());
+    let lane = json!({ "agent": "cook", "intent": "a recipe for releases", "scope": ["recipes/"] });
+    let opened = served.ask(&served.ada, "kitchen", "open_lane", lane);
+    assert_eq!((opened.status, opened.json()["id"].as_str()), (200, Some("lane/1")), "{}", opened.body);
+
+    // What cannot be given is a request that is wrong, said with the path.
+    let out = add(&ada, json!({ "name": "out", "files": [{ "path": "../out.md", "text": "" }] }));
+    assert_eq!(out.status, 400, "{}", out.body);
+    assert!(out.body.contains(r#"\"../out.md\" is not a path inside the repository"#), "{}", out.body);
+    let both = add(&ada, json!({ "name": "out", "from": "https://example.com/x.git", "files": files }));
+    assert_eq!(both.status, 400, "{}", both.body);
+    assert!(both.body.contains("from a git address or from the files given, not both"), "{}", both.body);
+    assert!(!served.dir.join("repos/out").exists());
+    // And it is for the admins of the server, as adding one with nothing is.
+    let refused = add(&carol, json!({ "name": "out", "files": files }));
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert!(!served.dir.join("repos/out").exists());
+
+    if let Ok(mut daemon) = kitod::client::Client::connect(&kitchen) {
+        let _ = daemon.call_value("shutdown", json!({}));
+    }
+}
+
 const PAGES: &str = r#"name = "hello"
 version = "0.5.0"
 api = 1
@@ -342,6 +376,24 @@ fn pages_are_passed_on_to_the_plugin_that_serves_them() {
         wrote.body.contains("may not ask `checkpoint`") || wrote.body.contains("not something a client"),
         "{}",
         wrote.body
+    );
+    // Of the server itself it is given nothing: its people, its
+    // repositories and its log are a person's to ask.
+    for method in ["server.people", "server.repos_all", "server.repo_add", "server.audit", "server.grant"] {
+        let asked = page(&format!("/ask/shop/{method}"), &[]);
+        assert!(
+            asked.body.starts_with("asked=HTTP/1.1 403") && asked.body.contains("is for a person"),
+            "{method}: {}",
+            asked.body
+        );
+    }
+    // Who uses the repository is for a plugin that was given `admin`.
+    let members = page("/ask/shop/server.members", &[]);
+    assert!(
+        members.body.starts_with("asked=HTTP/1.1 403")
+            && members.body.contains("only when it was given `admin`"),
+        "{}",
+        members.body
     );
     let call = json!({ "method": "lanes" });
     let nobody = served.request("POST", "/-/api/shop", &[("x-kito-plugin", "guess")], Some(&call));

@@ -313,13 +313,19 @@ backup`, `kito backup now`.
 
 ```bash
 kito repos                                   # those you may use
-kito repos add notes                         # admins: an empty one, which you maintain
+kito repos add notes                         # admins: a new one, which you maintain
 kito repos add api --from https://github.com/acme/api.git --token-file token.txt
 kito repos add mine --push ~/code/mine       # a Kito repository whole, or a git one
 kito repos rename api backend                # what is connected to `api` still reaches it
 kito repos archive backend                   # out of use; deleted after 30 days
 kito repos unarchive backend                 # owners; `kito repos delete … --confirm …` now
 ```
+
+A new one starts with a `README.md` that holds its name, in a first
+checkpoint: lanes open in it at once. A program that asks the server
+itself may give the files it starts with instead: `files` of
+`server.repo_add`, at most 32 texts of 256 KiB each, with their paths
+([ADR 0018](docs/adr/0018-repositories-from-afar.md), amended).
 
 ### Search and numbers
 
@@ -816,6 +822,9 @@ kito-server init /srv/kito
 ```bash
 kito-server --dir /srv/kito repo add shop --from /path/to/a/git/repository
 ```
+
+Without `--from` the repository is a new one: it starts with a `README.md`
+that holds its name, so that lanes can be opened in it at once.
 
 ```bash
 kito-server --dir /srv/kito user add ada --email ada@example.com --repo shop:integrate

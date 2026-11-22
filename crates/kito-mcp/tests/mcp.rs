@@ -194,7 +194,11 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
         .unwrap();
     assert!(intent["intent"].as_str().unwrap().len() >= 32);
     fs::write(workdir.join("src/shop.ts"), SHOP.replace("return sum;", "return Math.abs(sum);")).unwrap();
-    assert_eq!(mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap()["ops"], 2);
+    // Once it answers, what was saved is in the log. It counts what it wrote
+    // there itself: nothing, when the watcher saw the save first (the status
+    // below counts both ways).
+    let synced = mcp.tool("kito.sync", json!({ "lane": "lane/1" })).unwrap();
+    assert!(synced["ops"] == 2 || synced["ops"] == 0, "{synced}");
     let renamed = mcp
         .tool(
             "kito.rename_symbol",

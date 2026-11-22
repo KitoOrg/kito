@@ -553,9 +553,15 @@ async fn api(
         let Some((name, given)) = http.plugin_of(plugin) else {
             return said(StatusCode::UNAUTHORIZED, "this is not the secret of a plugin that runs here");
         };
+        let who = format!("plugin:{name}");
+        // It may use every repository, as what it was given there; of the
+        // server itself it is given nothing.
+        if let Some(why) = crate::session::not_for_a_plugin(&call.method, &given) {
+            crate::audit::request(&server.dir, &who, Some(&repo), &call.method, false);
+            return said(StatusCode::FORBIDDEN, &why);
+        }
         let user = crate::state::User { server_role: crate::state::ServerRole::Admin, ..Default::default() };
         let (dir, method, place) = (server.dir.clone(), call.method.clone(), repo.clone());
-        let who = format!("plugin:{name}");
         let asked = tokio::task::spawn_blocking(move || {
             crate::session::ask(&server, &name, &user, &repo, &call.method, call.params, Some(&given))
         })

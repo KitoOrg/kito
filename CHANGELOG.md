@@ -4,6 +4,24 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.2]
+
+- **A plugin that asks as itself is nobody on the server.** Since 0.39.0
+  a plugin that serves pages could ask what is asked of the server
+  itself (its people, its repositories, its audit log, its backups)
+  whatever it was given. It is now refused them; with `admin` it may
+  still ask who uses a repository and what was changed in its settings
+  ([ADR 0020](docs/adr/0020-plugins-that-work-on-their-own.md), amended).
+- **A repository added on a server starts with something.** One added
+  with nothing (`kito-server repo add <name>`, `kito repos add <name>`,
+  the web client) took no lane: there was nothing a lane could start
+  from, and on a server nothing but a lane changes the main lane. It now
+  starts with a `README.md` in a first checkpoint, and lanes open in it
+  at once ([ADR 0018](docs/adr/0018-repositories-from-afar.md), amended).
+- **`server.repo_add` takes `files`**: the texts a repository starts
+  with, each with its path (at most 32, of 256 KiB each), in place of
+  the `README.md`. Not together with a git address or an upload.
+
 ## [0.39.1]
 
 The first release since 0.38.0: it carries 0.39.0 too (plugins of a

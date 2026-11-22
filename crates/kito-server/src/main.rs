@@ -194,7 +194,8 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum RepoCmd {
-    /// Add a repository, empty or with the history of a git repository
+    /// Add a repository: with a README.md to start from, or with the
+    /// history of a git repository
     Add {
         name: String,
         /// A git repository to clone and import: a path or a URL
@@ -581,7 +582,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Cmd::Repo { command: RepoCmd::Add { name, from, unprotected } } => {
             let server = Server::open(&dir_of(cli))?;
-            let root = server.add_repo(name, from.as_deref(), !unprotected)?;
+            let root = server.add_repo(name, from.as_deref(), None, !unprotected)?;
             println!("Repository `{name}` created in {}", root.display());
             server.tell("repo_added", json!({ "repo": name, "what": name }));
             match (from, unprotected) {
@@ -589,9 +590,12 @@ fn run(cli: &Cli) -> Result<(), String> {
                     println!("Its main lane is protected: it changes only when a lane is integrated.")
                 }
                 (Some(_), true) => {}
-                (None, _) => println!(
-                    "It is empty: put its files there, `kito checkpoint`, then `kito-server repo set {name} --protect`."
-                ),
+                (None, _) => {
+                    println!("It starts with a README.md, for lanes to start from.");
+                    println!(
+                        "Its main lane is open to direct edits: `kito-server repo set {name} --protect` protects it."
+                    );
+                }
             }
         }
         Cmd::Repo { command: RepoCmd::Archive { name } } => {

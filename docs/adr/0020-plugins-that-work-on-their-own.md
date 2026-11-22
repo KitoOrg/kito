@@ -41,3 +41,16 @@ push.
   repository: it is given that by an administrator who enables it.
 - Only plugins that serve pages have a secret, so only they can work on
   their own; others still act when asked.
+
+## Amendment, 2026-11-22: nothing of the server itself
+
+A plugin that asked as itself was let through to what is asked of the
+server itself: its people, its repositories, its audit log, its backups.
+Those requests are answered by a person's role on the server, and the
+plugin was taken for an administrator there so that it could use every
+repository. It is now refused them before anything is asked: a plugin is
+given things in a repository, and is nobody on the server. Two of them
+are about one repository and are useful to a plugin that keeps it in step
+with something else: who uses it (`server.members`) and what was changed
+in its settings (`server.settings_history`). A plugin that was given
+`admin` may ask those, and no other.

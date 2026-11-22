@@ -1095,7 +1095,8 @@ a connected directory.
 - **Tokens do not expire**, and removing a person is the only way to take
   one back.
 - **A repository with no files cannot have lanes**: `repo add` without
-  `--from` makes one that is filled on the server.
+  `--from` makes one that is filled on the server. (It starts with a
+  `README.md` since 0.39.2.)
 - One thread for each client, and one connection to a daemon for each
   session: nothing above a handful of clients has been measured.
 

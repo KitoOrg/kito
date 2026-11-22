@@ -275,7 +275,9 @@ enum TaskCmd {
 enum ReposCmd {
     /// Every repository of the server, the archived ones too (admins)
     All,
-    /// Add one: empty, from a git address, or pushed from a directory here
+    /// Add one: new, from a git address, or pushed from a directory here
+    ///
+    /// A new one starts with a README.md, for lanes to start from.
     Add {
         name: String,
         /// A git address the server clones

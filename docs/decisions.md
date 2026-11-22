@@ -1824,3 +1824,25 @@ up is the plugin's to know (which application, which secret), so the
 server asks it (`sign-in ready`) rather than read its files
 ([ADR 0006](adr/0006-server-plugins.md), amended); a plugin that does
 not answer is taken to be ready, so the ones that exist keep working.
+
+### D-178 · A repository added on a server starts with a first version
+An empty repository on a server was a dead end: a lane starts from what
+the main lane has, and there the main lane changes only through lanes
+([ADR 0018](adr/0018-repositories-from-afar.md), amended). The server
+gives it a first version when it adds it, rather than teach `open_lane`
+to start from nothing: a lane is filed under a checkpoint everywhere
+else, and stays so. The files come with the request that adds it
+(`files`), not in a second one, so nobody meets the repository half
+made; a `README.md` when none come, because something has to be there.
+The paths are checked before anything is written, and what the files'
+own ignore rules would leave out is refused rather than left on the
+server's disk and on no lane.
+
+### D-179 · A plugin is nobody on the server
+A plugin that asks as itself reached the requests about the server's
+people and repositories, because it was taken for an administrator to be
+let into every repository ([ADR 0020](adr/0020-plugins-that-work-on-their-own.md),
+amended). It is refused them by name, before the person's rules are
+looked at, rather than given a lesser role: a role would let it through
+again the day a request is added for that role. What it may know of a
+repository's people comes with `admin`, which an administrator gives.

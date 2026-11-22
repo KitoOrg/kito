@@ -917,10 +917,12 @@ fn admins_add_archive_rename_and_owners_delete_repositories() {
     let said = bob.call_value("server.repo_add", json!({ "name": "notes" })).unwrap_err().to_string();
     assert!(said.contains("only an admin"), "{said}");
 
-    // Empty: the admin who adds it maintains it.
+    // Given nothing, it starts with a README.md; the admin who adds it
+    // maintains it.
     let mut admin = connect(&address, &rose, "shop");
     assert_eq!(admin.call_value("server.repo_add", json!({ "name": "notes" })).unwrap()["name"], "notes");
     assert!(world.repo("notes").join(".kito").is_dir());
+    assert_eq!(fs::read_to_string(world.repo("notes").join("README.md")).unwrap(), "# notes\n");
     let mut notes = connect(&address, &rose, "notes");
     notes.call_value("status", json!({})).unwrap();
     // Never a directory of the server's machine; a token only over https.
@@ -1028,6 +1030,186 @@ fn admins_add_archive_rename_and_owners_delete_repositories() {
         if let Ok(mut daemon) =
             Client::connect(&world.dir.join(if name.contains('/') { "" } else { "repos" }).join(name))
         {
+            let _ = daemon.call_value("shutdown", json!({}));
+        }
+    }
+}
+
+#[test]
+fn a_repository_added_starts_with_something_a_lane_can_start_from() {
+    let mut world = World::new();
+    let rose = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
+    let address = world.serve();
+    let mut admin = connect(&address, &rose, "shop");
+    let paths = |answer: &Value| -> Vec<String> {
+        let files = answer["files"].as_array().unwrap().iter();
+        let mut paths: Vec<String> = files.map(|file| file["path"].as_str().unwrap().to_owned()).collect();
+        paths.sort();
+        paths
+    };
+
+    // Given files, they are the first version of its main lane, and a lane
+    // opens in it right away. `.git` is git's; `.gitignore` is a file, and
+    // so is one that holds nothing.
+    let recipe = "# Review\n\nRead the diff before the description.\n";
+    let files = json!([
+        { "path": "kitchen.toml", "text": "name = \"Shopworks\"\n" },
+        { "path": "recipes/review.md", "text": recipe },
+        { "path": ".gitignore", "text": "*.log\n" },
+        { "path": ".github/CODEOWNERS", "text": "* @ada\n" },
+        { "path": "drafts/.keep", "text": "" },
+    ]);
+    let added = admin.call_value("server.repo_add", json!({ "name": "kitchen", "files": files })).unwrap();
+    assert_eq!(added, json!({ "name": "kitchen" }));
+    assert_eq!(fs::read_to_string(world.repo("kitchen").join("recipes/review.md")).unwrap(), recipe);
+    assert!(!world.repo("kitchen").join("README.md").exists());
+    let mut kitchen = connect(&address, &rose, "kitchen");
+    let on_main = kitchen.call_value("lane_files", json!({})).unwrap();
+    assert_eq!(
+        paths(&on_main),
+        [".github/CODEOWNERS", ".gitignore", "drafts/.keep", "kitchen.toml", "recipes/review.md"]
+    );
+    let review = on_main["files"].as_array().unwrap().iter().find(|file| file["path"] == "recipes/review.md");
+    let blob = review.unwrap()["blob"].as_str().unwrap().to_owned();
+    let kept = kitchen.call_value("get_blobs", json!({ "blobs": [blob] })).unwrap();
+    assert_eq!(kitod::rpc::decode(kept["blobs"][&blob].as_str().unwrap()).unwrap(), recipe.as_bytes());
+    let log = kitchen.call_value("log", json!({})).unwrap();
+    let first =
+        log.as_array().unwrap().iter().find(|item| item["type"] == "checkpoint").expect("a checkpoint");
+    assert_eq!((first["id"].as_str(), first["label"].as_str()), (Some("ckpt#1"), Some("first version")));
+    // Not protected, as one added with nothing never was.
+    let status = kitchen.call_value("status", json!({})).unwrap();
+    assert_eq!(
+        (status["repo"]["protected"].as_bool(), status["repo"]["ops_since_checkpoint"].as_u64()),
+        (Some(false), Some(0)),
+        "{status}"
+    );
+    let lane = kitchen
+        .call_value(
+            "open_lane",
+            json!({ "agent": "cook", "intent": "a recipe for releases", "scope": ["recipes/"] }),
+        )
+        .unwrap();
+    assert_eq!((lane["id"].as_str(), lane["owner"].as_str()), (Some("lane/1"), Some("rose")), "{lane}");
+    assert_eq!(
+        paths(&kitchen.call_value("lane_files", json!({ "lane": "lane/1" })).unwrap()),
+        paths(&on_main)
+    );
+
+    // Given nothing, or a list of nothing: a README.md with its name, and
+    // a lane just the same.
+    let nothing = [json!({ "name": "notes" }), json!({ "name": "blank", "files": [], "from": null })];
+    for params in nothing {
+        let name = params["name"].as_str().unwrap().to_owned();
+        admin.call_value("server.repo_add", params).unwrap();
+        assert_eq!(fs::read_to_string(world.repo(&name).join("README.md")).unwrap(), format!("# {name}\n"));
+        let mut there = connect(&address, &rose, &name);
+        assert_eq!(paths(&there.call_value("lane_files", json!({})).unwrap()), ["README.md"]);
+        let lane = there
+            .call_value(
+                "open_lane",
+                json!({ "agent": "writer", "intent": "say what is kept here", "scope": ["README.md"] }),
+            )
+            .unwrap();
+        assert_eq!(lane["id"], "lane/1", "{lane}");
+    }
+
+    // On the server's machine too.
+    let said = ok(&world.dir, &["repo", "add", "journal"]);
+    assert!(said.contains("It starts with a README.md"), "{said}");
+    assert_eq!(fs::read_to_string(world.repo("journal").join("README.md")).unwrap(), "# journal\n");
+    let listed = ok(&world.dir, &["repo", "list"]);
+    for name in ["journal", "kitchen", "notes"] {
+        assert!(listed.contains(&format!("{name}  [main open to direct edits, no checks]\n")), "{listed}");
+    }
+    ok(&world.dir, &["grant", "ada", "journal", "write"]);
+    let mut ada = connect(&address, &world.ada, "journal");
+    let lane = ada
+        .call_value("open_lane", json!({ "agent": "writer", "intent": "the first entry", "scope": ["./"] }))
+        .unwrap();
+    assert_eq!(lane["owner"], "ada", "{lane}");
+
+    // As many and as large as may be given: 32 files of 256 KiB.
+    let most: Vec<Value> = (0..32)
+        .map(|n| json!({ "path": format!("notes/{n}.md"), "text": format!("{n:02}").repeat(128 * 1024) }))
+        .collect();
+    admin.call_value("server.repo_add", json!({ "name": "edge", "files": most })).unwrap();
+    assert_eq!(fs::metadata(world.repo("edge").join("notes/31.md")).unwrap().len(), 256 * 1024);
+    let mut edge = connect(&address, &rose, "edge");
+    assert_eq!(edge.call_value("status", json!({})).unwrap()["repo"]["files"], 32);
+
+    // What cannot be given is said, with its path, and nothing is made.
+    let not_added = |admin: &mut Client, files: Value| -> String {
+        let asked = admin.call_value("server.repo_add", json!({ "name": "wrong", "files": files }));
+        let said = asked.unwrap_err().to_string();
+        assert!(!world.repo("wrong").exists(), "made all the same: {said}");
+        said
+    };
+    let file = |path: &str| json!([{ "path": path, "text": "x\n" }]);
+    for (path, why) in [
+        ("", "it is empty"),
+        ("/etc/motd", "it starts with `/`"),
+        ("docs\\intro.md", "separated with `/`, not `\\`"),
+        ("docs//intro.md", "it has an empty part"),
+        ("docs/", "it has an empty part"),
+        ("./intro.md", "it has `.` in it"),
+        ("docs/../../intro.md", "it has `..` in it"),
+        ("..", "it has `..` in it"),
+        ("docs/a\nb.md", "a control character"),
+        (".kito/config.toml", "`.kito` is Kito's own directory"),
+        (".git/hooks/pre-commit", "`.git` is git's own directory"),
+        (".GIT/config", "`.git` is git's own directory"),
+        (".git", "`.git` is git's own directory"),
+    ] {
+        let said = not_added(&mut admin, file(path));
+        let named = format!("{path:?} is not a path inside the repository: ");
+        assert!(said.contains(&named) && said.contains(why), "{path:?}: {said}");
+    }
+    let many: Vec<Value> = (0..33).map(|n| json!({ "path": format!("notes/{n}.md"), "text": "" })).collect();
+    let said = not_added(&mut admin, json!(many));
+    assert!(said.contains("at most 32 files, and 33 were given"), "{said}");
+    let large = json!([
+        { "path": "README.md", "text": "# wrong\n" },
+        { "path": "docs/large.md", "text": "x".repeat(256 * 1024 + 1) },
+    ]);
+    let said = not_added(&mut admin, large);
+    assert!(
+        said.contains("\"docs/large.md\" is too large to start a repository with: 262145 bytes"),
+        "{said}"
+    );
+    let twice = json!([{ "path": "a.md", "text": "one\n" }, { "path": "a.md", "text": "two\n" }]);
+    assert!(not_added(&mut admin, twice).contains("\"a.md\" is given twice"));
+    let both = json!([{ "path": "docs", "text": "" }, { "path": "docs/intro.md", "text": "" }]);
+    let said = not_added(&mut admin, both);
+    assert!(said.contains("\"docs/intro.md\" is given under \"docs\", which is given as a file"), "{said}");
+    // A file its own `.gitignore` leaves out would be on no lane.
+    let left_out = json!([{ "path": ".gitignore", "text": "*.log\n" }, { "path": "debug.log", "text": "" }]);
+    let said = not_added(&mut admin, left_out);
+    assert!(said.contains("\"debug.log\" would not be in the first version"), "{said}");
+    // What is not a list of paths and texts.
+    assert!(not_added(&mut admin, json!("README.md")).contains("`files` is a list"));
+    assert!(not_added(&mut admin, json!([{ "text": "x" }])).contains("file 1 of `files` has no `path`"));
+    assert!(not_added(&mut admin, json!([{ "path": "a.md" }])).contains("\"a.md\" has no `text`"));
+
+    // One way to start a repository at a time: files, a git address, or
+    // what is sent from a machine.
+    let from = json!({ "name": "wrong", "from": "https://example.com/x.git", "files": file("README.md") });
+    let said = admin.call_value("server.repo_add", from).unwrap_err().to_string();
+    assert!(said.contains("from a git address or from the files given, not both"), "{said}");
+    let id = admin.call_value("server.repo_upload_begin", json!({})).unwrap()["id"].clone();
+    let sent = json!({ "id": id, "name": "wrong", "kind": "git", "files": file("README.md") });
+    let said = admin.call_value("server.repo_upload_end", sent).unwrap_err().to_string();
+    assert!(said.contains("from what was sent or from the files given, not both"), "{said}");
+    assert!(!world.repo("wrong").exists());
+
+    // Who added what, and with how much, is kept.
+    let audit = ok(&world.dir, &["audit"]);
+    assert!(
+        audit.contains("kitchen, with 5 files given") && audit.contains("edge, with 32 files given"),
+        "{audit}"
+    );
+    for name in ["kitchen", "notes", "blank", "journal", "edge"] {
+        if let Ok(mut daemon) = Client::connect(&world.repo(name)) {
             let _ = daemon.call_value("shutdown", json!({}));
         }
     }

@@ -340,6 +340,93 @@ fn check_name(what: &str, name: &str) -> Result<(), String> {
     }
 }
 
+/// How many files a repository may be given to start with, and how many
+/// bytes each may hold (ADR 0018, amended).
+pub const FIRST_FILES: usize = 32;
+pub const FIRST_FILE_BYTES: usize = 256 * 1024;
+
+/// The files a new repository starts with: for each, its path in the
+/// repository and its text. These were checked: every path stays inside
+/// the repository and out of Kito's own directory and git's.
+pub struct FirstFiles(Vec<(String, String)>);
+
+impl FirstFiles {
+    /// Checks the paths and texts given; what cannot be is said with its path.
+    pub fn new(files: &[(&str, &str)]) -> Result<FirstFiles, String> {
+        if files.len() > FIRST_FILES {
+            return Err(format!(
+                "a repository starts with at most {FIRST_FILES} files, and {} were given: the rest goes in \
+                 through a lane",
+                files.len()
+            ));
+        }
+        let mut given = std::collections::BTreeSet::new();
+        for (path, text) in files {
+            if let Some(why) = not_a_first_path(path) {
+                return Err(format!("{path:?} is not a path inside the repository: {why}"));
+            }
+            if text.len() > FIRST_FILE_BYTES {
+                return Err(format!(
+                    "{path:?} is too large to start a repository with: {} bytes, and a file is at most \
+                     {FIRST_FILE_BYTES} (256 KiB)",
+                    text.len()
+                ));
+            }
+            if !given.insert(*path) {
+                return Err(format!("{path:?} is given twice"));
+            }
+        }
+        // A path is a file or a directory, not both.
+        for path in &given {
+            let mut above = path.match_indices('/').map(|(at, _)| &path[..at]);
+            if let Some(file) = above.find(|dir| given.contains(dir)) {
+                return Err(format!("{path:?} is given under {file:?}, which is given as a file"));
+            }
+        }
+        Ok(FirstFiles(files.iter().map(|(path, text)| ((*path).to_owned(), (*text).to_owned())).collect()))
+    }
+}
+
+/// Why a file of a new repository cannot have this path; `None`: it can.
+/// A path is written as Kito keeps them: from the repository's
+/// directory, with `/` between its parts.
+fn not_a_first_path(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return Some("it is empty".into());
+    }
+    if path.starts_with('/') {
+        return Some("it starts with `/`, and a path starts from the repository's directory".into());
+    }
+    if path.contains('\\') {
+        return Some("its parts are separated with `/`, not `\\`".into());
+    }
+    if path.chars().any(char::is_control) {
+        return Some("it has a control character in it".into());
+    }
+    for part in path.split('/') {
+        match part {
+            "" => return Some("it has an empty part (`//`, or a `/` at its end)".into()),
+            "." => return Some("it has `.` in it, which names nothing".into()),
+            ".." => return Some("it has `..` in it, which leads out of the repository".into()),
+            _ => {}
+        }
+        // What this machine reads as more than a name: `C:` on Windows.
+        let mut read = Path::new(part).components();
+        let name = matches!(
+            (read.next(), read.next()),
+            (Some(std::path::Component::Normal(name)), None) if name == part
+        );
+        if !name {
+            return Some(format!("this machine does not read {part:?} as a name"));
+        }
+    }
+    // Whatever the case: on some disks `.GIT` is `.git`.
+    let first = path.split('/').next().unwrap_or_default();
+    let kept = [(kito_store::STORE_DIR, "Kito"), (".git", "git")];
+    let (own, whose) = kept.into_iter().find(|(own, _)| first.eq_ignore_ascii_case(own))?;
+    Some(format!("`{own}` is {whose}'s own directory"))
+}
+
 impl Server {
     pub fn init(dir: &Path) -> Result<Server, String> {
         std::fs::create_dir_all(dir.join(REPOS_DIR)).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -603,7 +690,7 @@ impl Server {
             },
             None => url.to_owned(),
         };
-        let added = self.add_repo(name, Some(&given), true).map_err(|why| match token {
+        let added = self.add_repo(name, Some(&given), None, true).map_err(|why| match token {
             Some(token) => why.replace(token, "<token>"),
             None => why,
         })?;
@@ -627,10 +714,18 @@ impl Server {
         }
     }
 
-    /// Creates a repository: empty, or with the history of a git one. One
-    /// that comes with a history is protected unless told otherwise: its
-    /// main lane changes only when a lane is integrated.
-    pub fn add_repo(&self, name: &str, from: Option<&str>, protect: bool) -> Result<PathBuf, String> {
+    /// Creates a repository: with the history of a git one, or with a
+    /// first version made of the files given, a `README.md` when none are
+    /// (ADR 0018, amended). One that comes with a history is protected
+    /// unless told otherwise: its main lane changes only when a lane is
+    /// integrated.
+    pub fn add_repo(
+        &self,
+        name: &str,
+        from: Option<&str>,
+        files: Option<&FirstFiles>,
+        protect: bool,
+    ) -> Result<PathBuf, String> {
         check_name("repository", name)?;
         let root = self.dir.join(REPOS_DIR).join(name);
         if root.exists() {
@@ -638,6 +733,9 @@ impl Server {
         }
         let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
         match from {
+            Some(_) if files.is_some() => {
+                return Err("a repository comes from a git one or from the files given, not both".into())
+            }
             Some(from) => {
                 // A directory here is given to git as a plain path: git on
                 // Windows does not take one that starts with `\\?\` (ADR 0002).
@@ -669,11 +767,48 @@ impl Server {
                 repo.close().map_err(|e| fail(&e))?;
             }
             None => {
-                std::fs::create_dir_all(&root).map_err(|e| fail(&e))?;
-                kitod::Repo::init(&root).map_err(|e| fail(&e))?.close().map_err(|e| fail(&e))?;
+                // An empty main lane has nothing a lane could start from.
+                let readme = FirstFiles(vec![("README.md".to_owned(), format!("# {name}\n"))]);
+                let files = files.filter(|files| !files.0.is_empty()).unwrap_or(&readme);
+                // Made here and by nobody else: what is taken away if it
+                // fails is never another's.
+                std::fs::create_dir_all(self.dir.join(REPOS_DIR))
+                    .and_then(|()| std::fs::create_dir(&root))
+                    .map_err(|e| fail(&e))?;
+                if let Err(why) = Self::start_repo(&root, files) {
+                    // Nothing half made is left under the name.
+                    let _ = std::fs::remove_dir_all(&root);
+                    return Err(fail(&why));
+                }
             }
         }
         Ok(root)
+    }
+
+    /// Makes a repository of the empty directory `root`, with its first
+    /// version: the files written in its main directory, recorded, and
+    /// in a first checkpoint.
+    fn start_repo(root: &Path, files: &FirstFiles) -> Result<(), String> {
+        let said = |e: kitod::Error| e.to_string();
+        // The files first: what they say is ignored (`.gitignore`,
+        // `.kitoignore`) holds from the start, as in any directory.
+        for (path, text) in &files.0 {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap_or(root))
+                .and_then(|()| std::fs::write(&file, text))
+                .map_err(|e| format!("{path}: {e}"))?;
+        }
+        let mut repo = kitod::Repo::init(root).map_err(said)?;
+        repo.scan().map_err(said)?;
+        // What is not recorded would be on the server's disk and on no lane.
+        if let Some((path, _)) = files.0.iter().find(|(path, _)| !repo.tree().contains(Path::new(path))) {
+            return Err(format!(
+                "{path:?} would not be in the first version: the files given leave it out (a `.gitignore`, a \
+                 `.kitoignore`, or a `.git` in its path)"
+            ));
+        }
+        repo.checkpoint("first version").map_err(said)?;
+        repo.close().map_err(said)
     }
 
     /// Adds a person and returns their token, which is not kept. With an
