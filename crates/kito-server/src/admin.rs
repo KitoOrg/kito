@@ -72,6 +72,7 @@ pub fn listed(server: &Server) -> Value {
                 "installed": found.is_some(),
                 "version": manifest.map(|manifest| manifest.version.as_str()),
                 "description": manifest.map(|manifest| manifest.description.as_str()),
+                "runs": manifest.map(|manifest| manifest.runs()).unwrap_or_default(),
                 "asks": manifest.map(|manifest| manifest.permissions.clone()).unwrap_or_default(),
                 "adds": manifest.map(adds).unwrap_or_default(),
                 "enabled": config.is_some_and(|config| config.enabled),
@@ -95,7 +96,13 @@ pub fn listed(server: &Server) -> Value {
             let all: Vec<Value> = index
                 .plugins
                 .iter()
-                .map(|(name, listed)| json!({ "name": name, "about": listed.about, "latest": listed.latest }))
+                .map(|(name, listed)| {
+                    let mut one = json!({ "name": name, "about": listed.about, "latest": listed.latest });
+                    if !listed.runs.is_empty() {
+                        one["runs"] = json!(listed.runs);
+                    }
+                    one
+                })
                 .collect();
             said["listed"] = all.into();
         }
@@ -118,6 +125,9 @@ pub fn change(server: &mut Server, by: &str, ask: &Ask) -> Result<Value, String>
     };
     match ask.action.as_str() {
         "install" => {
+            if let Some(why) = kitod::registry::not_listed_for(name, "server") {
+                return Err(why);
+            }
             let (added, source) = kitod::registry::install(name, ask.version.as_deref())?;
             let manifest = &added.manifest;
             told(server, "plugin_installed", format!("{name} {}", manifest.version));

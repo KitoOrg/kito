@@ -996,7 +996,7 @@ impl Server {
                  add --path <dir>` first"
             )
         })?;
-        if let Some(why) = found.manifest.unfit() {
+        if let Some(why) = found.manifest.unfit().or_else(|| found.manifest.not_for("server")) {
             return Err(why);
         }
         let mut given = only.unwrap_or_else(|| found.manifest.permissions.clone());

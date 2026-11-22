@@ -518,6 +518,45 @@ impl Manifest {
     }
 
     /// Why this daemon does not run it. `None`: it does.
+    /// Where it runs (ADR 0008): `server`, `repository`, or both. A
+    /// plugin that sets up a coding assistant is for the machines people
+    /// work on, never a server; one that only signs in, serves pages or
+    /// adds server commands is for a server, never a repository.
+    pub fn runs(&self) -> Vec<&'static str> {
+        let in_a_repository = self.assistant.is_some()
+            || !self.commands.is_empty()
+            || !self.events.is_empty()
+            || !self.gates.is_empty()
+            || !self.tools.is_empty()
+            || self.session.is_some()
+            || self.permissions.iter().any(|permission| permission.of_a_repository());
+        let mut runs = Vec::new();
+        if self.assistant.is_none() {
+            runs.push("server");
+        }
+        if in_a_repository {
+            runs.push("repository");
+        }
+        runs
+    }
+
+    /// Why it is not enabled `where` (`server`, `repository`), if it is not for there.
+    pub fn not_for(&self, place: &str) -> Option<String> {
+        if self.runs().contains(&place) {
+            return None;
+        }
+        Some(match place {
+            "server" => format!(
+                "`{}` is for the machines people work on, not a server: `kito plugin add {}` there, in a repository",
+                self.name, self.name
+            ),
+            _ => format!(
+                "`{}` is for a server, not a repository: `kito-server plugin add {}` on the server's machine",
+                self.name, self.name
+            ),
+        })
+    }
+
     pub fn unfit(&self) -> Option<String> {
         (self.api > crate::rpc::API).then(|| {
             format!(
@@ -724,7 +763,7 @@ impl crate::Repo {
         let found = installed(name).ok_or_else(|| {
             Error::Other(format!("the plugin `{name}` is not installed: `kito plugin add` it first"))
         })?;
-        if let Some(why) = found.manifest.unfit() {
+        if let Some(why) = found.manifest.unfit().or_else(|| found.manifest.not_for("repository")) {
             return Err(Error::Other(why));
         }
         // What a repository gives: of what it asks for, what is a repository's.
@@ -940,6 +979,30 @@ pub fn write_config(store_dir: &Path, name: &str, plugin: Option<&PluginConfig>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plugin_runs_where_what_it_does_is() {
+        let runs = |text: &str| {
+            let manifest: Manifest =
+                toml::from_str(&format!("name = \"x\"\nversion = \"1.0.0\"\napi = 1\n{text}")).unwrap();
+            manifest.runs()
+        };
+        // A coding assistant set up: the machines people work on.
+        assert_eq!(runs("permissions = [\"read\"]\n[assistant]\nname = \"x\"\n"), ["repository"]);
+        // Signing in only: a server.
+        assert_eq!(
+            runs("permissions = [\"sign_in\", \"server_admin\"]\n[sign_in]\nmethod = \"x\"\nabout = \"X\"\n"),
+            ["server"]
+        );
+        // Pages, and commands in a repository: both.
+        assert_eq!(runs("permissions = [\"read\", \"pages\"]\n[pages]\n"), ["server", "repository"]);
+        let assistant: Manifest = toml::from_str(
+            "name = \"claude\"\nversion = \"1.0.0\"\napi = 1\n[assistant]\nname = \"claude\"\n",
+        )
+        .unwrap();
+        assert!(assistant.not_for("server").unwrap().contains("`kito plugin add claude`"));
+        assert!(assistant.not_for("repository").is_none());
+    }
 
     #[test]
     fn permissions_are_written_as_they_are_said() {

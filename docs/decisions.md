@@ -1407,6 +1407,13 @@ those directories may be on machines nobody can reach. A repository sent
 from a machine travels in the backups' archive, so one format is checked
 for both.
 
+### D-173 · Where a plugin runs is read from what it does
+A plugin does not say where it runs: its manifest already shows it, so
+`runs` is derived ([ADR 0008](adr/0008-plugin-registry.md), amended) and
+cannot disagree with what the plugin does. An assistant's plugin writes
+files in a working directory, which a server has none of; a plugin that
+only signs in or serves pages has nothing to do in a repository.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

@@ -65,6 +65,25 @@ fn is_zero(serial: &u64) -> bool {
 pub struct Listed {
     pub about: String,
     pub latest: String,
+    /// Where it runs: `server`, `repository` (`Manifest::runs`). Empty in
+    /// a registry written before it was said: anywhere.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<String>,
+}
+
+/// Why the registry says `name` is not for `place`, if it says so.
+pub fn not_listed_for(name: &str, place: &str) -> Option<String> {
+    let index = index().ok()?;
+    let listed = index.plugins.get(name)?;
+    if listed.runs.is_empty() || listed.runs.iter().any(|runs| runs == place) {
+        return None;
+    }
+    Some(match place {
+        "server" => format!(
+            "`{name}` is for the machines people work on, not a server: `kito plugin add {name}` there, in a repository"
+        ),
+        _ => format!("`{name}` is for a server, not a repository: `kito-server plugin add {name}` on the server's machine"),
+    })
 }
 
 /// `plugins/<name>.json`.

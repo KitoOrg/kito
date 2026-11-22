@@ -4,6 +4,15 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.36.1]
+
+- **A plugin runs where it is meant to**: the registry says, for each
+  plugin, whether it runs on a server, in a repository, or both.
+  `kito-server plugin add` and `enable` refuse a plugin that sets up a
+  coding assistant (`claude`, `codex`, `zcode`: for the machines people
+  work on), and `kito plugin add` and `enable` one that is only for a
+  server (`oidc`), saying where each goes.
+
 ## [0.36.0]
 
 Repositories from afar (phase 35,

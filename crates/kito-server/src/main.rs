@@ -404,6 +404,9 @@ fn run_plugin(cli: &Cli, command: &PluginCmd) -> Result<(), String> {
                         Some((name, version)) => (name, Some(version)),
                         None => (name.as_str(), None),
                     };
+                    if let Some(why) = kitod::registry::not_listed_for(name, "server") {
+                        return Err(why);
+                    }
                     let (added, source) = kitod::registry::install(name, version)?;
                     (added, Some(source))
                 }

@@ -914,6 +914,9 @@ fn cmd_plugin(cli: &Cli, command: &PluginCmd) -> Outcome {
                         Some((name, version)) => (name, Some(version)),
                         None => (name.as_str(), None),
                     };
+                    if let Some(why) = kitod::registry::not_listed_for(name, "repository") {
+                        return Err(why);
+                    }
                     let (added, source) = kitod::registry::install(name, version)?;
                     (added, Some(source))
                 }

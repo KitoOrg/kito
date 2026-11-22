@@ -198,3 +198,18 @@ One phase (22), released as 0.23.0, in four parts:
 3. administrators and `/-/admin/plugins`; the page in `kito-web`;
 4. `outdated` and `update`, the website's side (`/registry/`,
    `registry-add.sh`, `install.sh`, the domain), documents and the demo.
+
+## Amendment, 2026-11-22: where a plugin runs
+
+The person asked why plugins that set up a coding assistant were offered
+for install on a server's page. They are for the machines people work
+on. Each listing now says where its plugin runs, in `runs` of
+`index.json` and of each version: `server`, `repository`, or both. It is
+read from the manifest by one rule (`Manifest::runs`, and the same rule
+in the site's `registry-add.mjs`): a plugin with `[assistant]` never runs
+on a server; one with commands, tools, events, gates, a session or a
+repository's permissions runs in a repository. `kito-server plugin add`
+and `enable`, and the web client's Plugins page, leave out what is not
+for a server; `kito plugin add` and `enable` what is not for a
+repository. A listing without `runs`, from before, is taken to run
+anywhere.
