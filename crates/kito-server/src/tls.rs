@@ -63,6 +63,14 @@ pub fn fingerprint(dir: &Path) -> Result<String, String> {
     Ok(kitod::tls::fingerprint(certificates(dir)?[0].as_ref()))
 }
 
+/// `true` if the server's certificate comes with the chain of an
+/// authority (as Let's Encrypt gives it), not made by the server for
+/// itself: clients know it by its name, and its fingerprint changes at
+/// each renewal.
+pub fn from_authority(dir: &Path) -> bool {
+    certificates(dir).is_ok_and(|chain| chain.len() > 1)
+}
+
 /// What the server encrypts its connections with.
 pub fn config(dir: &Path) -> Result<Arc<ServerConfig>, String> {
     ensure(dir)?;

@@ -15,8 +15,17 @@ fn answered() -> Vec<String> {
     let mut methods = Vec::new();
     for line in text[start..end].lines() {
         // An arm of the match on the method, at its indentation.
-        let Some(arm) = line.strip_prefix("                \"") else { continue };
-        let Some((names, _)) = arm.split_once(" => ") else { continue };
+        // A long arm goes on, on the next line, after `| `.
+        let Some(arm) =
+            line.strip_prefix("                \"").or_else(|| line.strip_prefix("                | \""))
+        else {
+            continue;
+        };
+        let names = match arm.split_once(" => ") {
+            Some((names, _)) => names,
+            None if arm.ends_with('"') => arm,
+            None => continue,
+        };
         for name in names.split(" | ") {
             let name = name.trim_matches('"');
             if !name.is_empty() && name.bytes().all(|c| c.is_ascii_lowercase() || c == b'_') {

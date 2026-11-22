@@ -135,6 +135,48 @@ enum AssistantCmd {
 }
 
 #[derive(Subcommand)]
+enum TaskCmd {
+    /// The tasks still to do (`--all`: done and dropped too)
+    List {
+        #[arg(long)]
+        all: bool,
+        /// Only those for this person or agent
+        #[arg(long = "for", value_name = "WHO")]
+        assignee: Option<String>,
+    },
+    /// A task, its lanes and what was said on it
+    Show { task: String },
+    /// Ask for something to be done
+    Add {
+        #[arg(required = true)]
+        title: Vec<String>,
+        /// What it is about, in more words
+        #[arg(long, conflicts_with = "file")]
+        text: Option<String>,
+        /// The same, from a file
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Who it is for: a person or an agent
+        #[arg(long = "for", value_name = "WHO")]
+        assignee: Option<String>,
+    },
+    /// Say something on a task: the agents in its lanes are told
+    Comment {
+        task: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    /// Say who a task is for (nobody, without a name)
+    Assign { task: String, who: Option<String> },
+    /// The task is done
+    Done { task: String },
+    /// It is not done after all
+    Reopen { task: String },
+    /// Nobody will do it
+    Drop { task: String },
+}
+
+#[derive(Subcommand)]
 enum PeopleCmd {
     /// Add a person to the server: their token is printed once
     Add {
@@ -195,6 +237,11 @@ enum Cmd {
     Assistant {
         #[command(subcommand)]
         command: AssistantCmd,
+    },
+    /// Tasks: what needs doing here, and the lanes that do it
+    Task {
+        #[command(subcommand)]
+        command: Option<TaskCmd>,
     },
     /// Who may use the repository this directory is connected to, and as what
     Members,
@@ -3258,6 +3305,119 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
     Ok(())
 }
 
+/// A task as a line of a list: `task#3  in a lane  Prices in cents  (for bob; lane/2)`.
+fn task_line(task: &Value) -> String {
+    let state = match task["state"].as_str().unwrap_or("open") {
+        "in_lane" => "in a lane",
+        "ready" => "ready to close",
+        other => other,
+    };
+    let mut more = Vec::new();
+    if let Some(who) = task["for"].as_str() {
+        more.push(format!("for {who}"));
+    }
+    if let Some(agent) = task["claimed_by"].as_str() {
+        more.push(format!("taken up by {agent}"));
+    }
+    let lanes: Vec<&str> =
+        task["lanes"].as_array().into_iter().flatten().filter_map(|lane| lane["id"].as_str()).collect();
+    if !lanes.is_empty() {
+        more.push(lanes.join(", "));
+    }
+    if let Some(agent) = task["thinks_done"].as_str() {
+        more.push(format!("{agent} thinks it is done"));
+    }
+    let more = if more.is_empty() { String::new() } else { format!("  ({})", more.join("; ")) };
+    format!(
+        "{:<8} {:<15} {}{more}",
+        task["id"].as_str().unwrap_or("?"),
+        state,
+        task["title"].as_str().unwrap_or("")
+    )
+}
+
+/// `kito task` (ADR 0015).
+fn cmd_task(cli: &Cli, command: Option<&TaskCmd>) -> Outcome {
+    let mut client = daemon(cli)?;
+    let answer: Value = match command.unwrap_or(&TaskCmd::List { all: false, assignee: None }) {
+        TaskCmd::List { all, assignee } => {
+            let mut params = json!({ "state": if *all { "all" } else { "open" } });
+            if let Some(who) = assignee {
+                params["for"] = json!(who);
+            }
+            let listed: Value = client.call("tasks", params).map_err(fail)?;
+            if cli.json {
+                print_json(&listed);
+            } else if listed.as_array().is_none_or(Vec::is_empty) {
+                println!(
+                    "No task{}. `kito task add <title>` asks for one.",
+                    if *all { "" } else { " to do" }
+                );
+            } else {
+                listed.as_array().into_iter().flatten().for_each(|task| println!("{}", task_line(task)));
+            }
+            return Ok(());
+        }
+        TaskCmd::Show { task } => client.call("task", json!({ "task": task })).map_err(fail)?,
+        TaskCmd::Add { title, text, file, assignee } => {
+            let text = match (text, file) {
+                (Some(text), _) => text.clone(),
+                (None, Some(file)) => {
+                    std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?
+                }
+                (None, None) => String::new(),
+            };
+            client
+                .call("task_add", json!({ "title": title.join(" "), "text": text, "for": assignee }))
+                .map_err(fail)?
+        }
+        TaskCmd::Comment { task, text } => {
+            client.call("task_comment", json!({ "task": task, "text": text.join(" ") })).map_err(fail)?
+        }
+        TaskCmd::Assign { task, who } => client
+            .call("task_update", json!({ "task": task, "for": who.clone().unwrap_or_default() }))
+            .map_err(fail)?,
+        TaskCmd::Done { task } => client.call("task_done", json!({ "task": task })).map_err(fail)?,
+        TaskCmd::Reopen { task } => client.call("task_reopen", json!({ "task": task })).map_err(fail)?,
+        TaskCmd::Drop { task } => client.call("task_drop", json!({ "task": task })).map_err(fail)?,
+    };
+    if cli.json {
+        print_json(&answer);
+        return Ok(());
+    }
+    println!("{}", task_line(&answer));
+    if let Some(TaskCmd::Show { .. }) = command {
+        println!(
+            "Asked for by {}, {}.",
+            answer["by"].as_str().unwrap_or("?"),
+            utc(answer["at_ms"].as_u64().unwrap_or(0))
+        );
+        if let Some(text) = answer["text"].as_str().filter(|text| !text.is_empty()) {
+            println!("\n{text}");
+        }
+        for comment in answer["comments"].as_array().into_iter().flatten() {
+            println!(
+                "\n{}, {}:\n  {}",
+                comment["by"].as_str().unwrap_or("?"),
+                utc(comment["at_ms"].as_u64().unwrap_or(0)),
+                comment["text"].as_str().unwrap_or("").replace('\n', "\n  ")
+            );
+        }
+        if answer["state"] == "ready" {
+            println!(
+                "\nIts lanes are closed: `kito task done {}` if it is done.",
+                answer["id"].as_str().unwrap_or("")
+            );
+        } else if answer["state"] == "open" {
+            println!(
+                "\nWork on it in a lane: `kito lane open <agent> \"<why>\" --task {} ...`.",
+                answer["id"].as_str().unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The server this directory is connected to, asked as its person: about
 /// the repository (`repo`), or about the server.
 fn server_here(cli: &Cli, repo: bool) -> Result<(Remote, Client), String> {
@@ -4429,6 +4589,7 @@ fn run() -> ExitCode {
         ),
         Cmd::Claude => cmd_claude(&cli),
         Cmd::Instructions { command } => cmd_instructions(&cli, command.as_ref()),
+        Cmd::Task { command } => cmd_task(&cli, command.as_ref()),
         Cmd::Members => cmd_members(&cli),
         Cmd::Grant { name, role } => cmd_grant(&cli, name, Some(role)),
         Cmd::Revoke { name } => cmd_grant(&cli, name, None),

@@ -2605,6 +2605,46 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 32 · tasks — done
+
+Nothing in Kito said what needs doing before a lane was opened. The
+person asked for tasks: work items for lanes, taken up by agents when
+told, synchronised with GitHub issues, on the command line, in the web
+client and in "Needs you". Released as 0.33.0
+([ADR 0015](adr/0015-tasks.md), D-169).
+
+### What is there
+
+- `task#<n>`, kept in `.kito/tasks.json`: title, text, who asked, for
+  whom, state; comments; where it came from.
+- `tasks`, `task`, `task_add`, `task_update`, `task_claim`,
+  `task_comment`, `task_done`, `task_reopen`, `task_drop`, through the
+  server by role.
+- A lane opened for a task is one of its lanes; `in_lane`, then `ready`
+  when they are all closed; `done` and `dropped` said by a person; an
+  agent may say it thinks it is done.
+- Comments on a task reach the agents in its lanes with their notices.
+- `kito task …`; MCP tools `tasks`, `task`, `claim_task`, `task_done`.
+- The `kito connect` line that `user add` and the people page print
+  leaves the fingerprint out when the server's certificate comes from an
+  authority (it changes at each renewal).
+
+### How it was tested
+
+- `kitod` unit tests: states, numbers.
+- `kito-cli/tests/cli.rs`: a task asked for, worked on in a lane,
+  commented, ready, done, dropped; a lane refused for a task not there
+  or done.
+- `kito-server/tests/server.rs`: tasks through a server, by role; one
+  agent's claim; a comment told once to the lane's agent; an agent that
+  thinks a task is done, and the person who says it is.
+
+### Known limitations
+
+- **No history of a task's fields**: events say who changed what.
+- **Per repository**: no task spans repositories.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 31 · instructions, for the web client — done
 
 The web client's instructions page (kito-web 0.12) shows what each

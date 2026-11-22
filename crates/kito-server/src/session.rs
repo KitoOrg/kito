@@ -44,6 +44,16 @@ const ALLOWED: &[&str] = &[
     "after_shell",
     // What the session of an assistant runs on (ADR 0010).
     "assistant_session",
+    // Tasks (ADR 0015).
+    "tasks",
+    "task",
+    "task_add",
+    "task_update",
+    "task_claim",
+    "task_comment",
+    "task_done",
+    "task_reopen",
+    "task_drop",
     // What agents are told (ADR 0012).
     "instructions",
     "instructions_text",
@@ -91,6 +101,8 @@ const READ: &[&str] = &[
     "instructions",
     "instructions_text",
     "instructions_history",
+    "tasks",
+    "task",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
 ];
@@ -634,7 +646,7 @@ pub fn people(
                 None => (now.config.listen.rsplit_once(':').map(|(_, port)| port.to_owned()), false),
             };
             Ok(
-                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": (!plain).then(|| crate::tls::fingerprint(&now.dir).ok()).flatten(), "plain": plain, "port": port }),
+                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": (!plain && !crate::tls::from_authority(&now.dir)).then(|| crate::tls::fingerprint(&now.dir).ok()).flatten(), "plain": plain, "port": port }),
             )
         }
         "server.people_remove" | "server.people_role" => {

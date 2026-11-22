@@ -289,6 +289,26 @@ up Claude Code, as it always did, and names the others found.
 install script asks the same question once, and writes the answer with
 `kito assistant default`.
 
+### Tasks
+
+What needs doing, before anybody works on it:
+
+```bash
+kito task add Prices in cents --text "Everywhere money is." --for bob
+kito task                                   # what is still to do
+kito lane open erin --intent "prices in cents" --scope src/shop.ts --task task#1
+kito task comment task#1 Round half to even # told to the agents in its lanes
+kito task show task#1                       # its lanes, what was said
+kito task done task#1                       # once its lanes are closed, by a person
+```
+
+A task is `open`, `in_lane` while a lane is on it, `ready` when its
+lanes are all closed, then `done` or `dropped`, which only a person says.
+Agents use the MCP tools `tasks`, `claim_task` and `task_done` (which
+only says they think it is done) when they are told to work on tasks.
+Tasks are kept by Kito, not in the project, and shared through the
+server: whoever may write in a repository changes them.
+
 ### Instructions
 
 What the assistants are told is kept by Kito, not in the project: it is

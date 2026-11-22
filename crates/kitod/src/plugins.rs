@@ -115,9 +115,19 @@ const READ: &[&str] = &[
     "instructions",
     "instructions_text",
     "instructions_history",
+    // Tasks (ADR 0015).
+    "tasks",
+    "task",
 ];
 
 const WRITE: &[&str] = &[
+    "task_add",
+    "task_update",
+    "task_claim",
+    "task_comment",
+    "task_done",
+    "task_reopen",
+    "task_drop",
     "instructions_set",
     "instructions_remove",
     "open_lane",

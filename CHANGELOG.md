@@ -4,6 +4,21 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.33.0]
+
+Tasks (phase 32, [ADR 0015](docs/adr/0015-tasks.md)).
+
+- **`kito task`**: ask for something to be done, say whom it is for,
+  comment on it, close it. Kept by Kito, shared through the server, never
+  in the project's files.
+- **Lanes do tasks**: `kito lane open --task task#3`; a task has as many
+  lanes as it needs, and is ready to close once they are all closed.
+- **Agents take tasks up when told** (`tasks`, `claim_task`), hear what
+  is said on them, and say when they think one is done; a person closes
+  it.
+- The `kito connect` line leaves out the fingerprint of a server whose
+  certificate comes from an authority.
+
 ## [0.32.0]
 
 Instructions, for the web client (phase 31).

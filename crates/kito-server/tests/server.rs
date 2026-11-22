@@ -777,3 +777,47 @@ fn a_maintainer_changes_the_rules_but_not_the_checks_and_every_change_is_kept() 
     let mut bob = connect(&address, &world.bob, "shop");
     assert!(bob.call_value("server.settings_history", json!({})).is_err());
 }
+
+#[test]
+fn tasks_are_the_server_s_and_their_comments_reach_the_lanes_on_them() {
+    let mut world = World::new();
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:read"]));
+    let address = world.serve();
+    let mut ada = connect(&address, &world.ada, "shop");
+    let mut bob = connect(&address, &world.bob, "shop");
+    let mut reader = connect(&address, &carol, "shop");
+
+    let task = ada.call_value("task_add", json!({ "title": "Prices in cents", "for": "bob" })).unwrap();
+    assert_eq!((task["id"].as_str(), task["by"].as_str()), (Some("task#1"), Some("ada")));
+    assert_eq!(reader.call_value("tasks", json!({})).unwrap().as_array().unwrap().len(), 1);
+    assert!(reader.call_value("task_add", json!({ "title": "Mine now" })).is_err());
+
+    // An agent of bob takes it up, and another agent cannot.
+    bob.call_value("task_claim", json!({ "task": "task#1", "agent": "dana" })).unwrap();
+    let no = ada.call_value("task_claim", json!({ "task": "task#1", "agent": "erin" })).unwrap_err();
+    assert!(no.to_string().contains("taken up by dana already"), "{no}");
+    let lane = bob
+        .call_value("open_lane", json!({ "agent": "dana", "intent": "prices in cents", "scope": ["src/shop.ts"], "task": "task#1" }))
+        .unwrap();
+    let lane = lane["id"].as_str().unwrap().to_owned();
+    assert_eq!(reader.call_value("task", json!({ "task": "task#1" })).unwrap()["state"], "in_lane");
+
+    // What ada says on the task reaches the agent in its lane, once.
+    ada.call_value("task_comment", json!({ "task": "task#1", "text": "Round half to even." })).unwrap();
+    let told = bob.call_value("notices", json!({ "lane": lane })).unwrap();
+    let said: Vec<&Value> = told.as_array().unwrap().iter().filter(|n| n["kind"] == "task_comment").collect();
+    assert_eq!(said.len(), 1, "{told}");
+    assert!(said[0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("ada said on task#1, which your lane is for: Round half to even."));
+    let again = bob.call_value("notices", json!({ "lane": lane })).unwrap();
+    assert!(!again.as_array().unwrap().iter().any(|n| n["kind"] == "task_comment"), "{again}");
+
+    // The agent thinks it is done; a person says it is.
+    let thinks = bob.call_value("task_done", json!({ "task": "task#1", "agent": "dana" })).unwrap();
+    assert_eq!((thinks["thinks_done"].as_str(), thinks["state"].as_str()), (Some("dana"), Some("in_lane")));
+    let done = ada.call_value("task_done", json!({ "task": "task#1" })).unwrap();
+    assert_eq!(done["state"], "done");
+    assert!(world.repo("shop").join(".kito/tasks.json").is_file());
+}

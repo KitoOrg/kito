@@ -542,6 +542,19 @@ impl Repo {
         if let Some(why) = says_nothing(intent).filter(|_| name.is_none()) {
             return Err(Error::Other(why));
         }
+        // A lane for a task of this repository (ADR 0015) is for one there is, still to do.
+        if let Some(n) =
+            task.as_deref().filter(|task| task.trim().starts_with("task#")).and_then(crate::tasks::number)
+        {
+            let all = crate::tasks::load(&self.root);
+            match all.get(n) {
+                None => return Err(Error::Other(format!("task#{n}: no such task (`kito task list`)"))),
+                Some(found) if found.state != "open" => {
+                    return Err(Error::Other(format!("task#{n} is {}: reopen it first", found.state)))
+                }
+                Some(_) => {}
+            }
+        }
         // A permanent lane has no scope: it holds whatever lands on it.
         if name.is_none() && scope.iter().all(|item| item.trim().is_empty()) {
             return Err(Error::Other(

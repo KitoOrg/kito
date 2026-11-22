@@ -431,6 +431,158 @@ impl Daemon {
                         "kitchen": kitchen_now,
                     }))
                 }
+                // Tasks (ADR 0015): kept by Kito, out of the project's files.
+                "tasks" | "task" => {
+                    let (root, lanes) = self
+                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.lanes(true))))
+                        .map_err(internal)?;
+                    let all = crate::tasks::load(&root);
+                    if request.method == "task" {
+                        let n = crate::tasks::number(text("task")?)
+                            .ok_or((rpc::INVALID_PARAMS, "a task is task#<n>".to_owned()))?;
+                        let task =
+                            all.get(n).ok_or((rpc::INVALID_PARAMS, format!("task#{n}: no such task")))?;
+                        return to_json(serde_json::to_value(crate::tasks::info(task, &lanes, true)));
+                    }
+                    let state = optional("state").unwrap_or_else(|| "open".to_owned());
+                    let assignee = optional("for");
+                    let listed: Vec<crate::tasks::TaskInfo> = all
+                        .tasks
+                        .iter()
+                        .map(|task| crate::tasks::info(task, &lanes, false))
+                        .filter(|task| match state.as_str() {
+                            "all" => true,
+                            "open" => !matches!(task.state, "done" | "dropped"),
+                            wanted => task.state == wanted,
+                        })
+                        .filter(|task| assignee.is_none() || task.assignee == assignee)
+                        .collect();
+                    to_json(serde_json::to_value(listed))
+                }
+                "task_add" | "task_update" | "task_claim" | "task_comment" | "task_done" | "task_reopen"
+                | "task_drop" => {
+                    let by = person_name(params)
+                        .or_else(|| self.with_repo(|repo| Ok(repo.identity.name.clone())).ok())
+                        .filter(|by| !by.is_empty())
+                        .unwrap_or_else(|| "this machine".to_owned());
+                    let agent = optional("agent").filter(|agent| !agent.trim().is_empty());
+                    let source = params.get("source").filter(|source| !source.is_null()).cloned();
+                    let (root, lanes) = self
+                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.lanes(true))))
+                        .map_err(internal)?;
+                    let refused = |why: String| (rpc::REFUSED, why);
+                    let mut all = crate::tasks::load(&root);
+                    let now = crate::tasks::now_ms();
+                    let method = request.method.as_str();
+                    let (n, what) = if method == "task_add" {
+                        let n = all
+                            .add(
+                                text("title")?,
+                                &optional("text").unwrap_or_default(),
+                                &by,
+                                optional("for"),
+                                source.clone(),
+                            )
+                            .map_err(refused)?;
+                        (n, format!("task#{n} asked for by {by}"))
+                    } else {
+                        let n = crate::tasks::number(text("task")?)
+                            .ok_or((rpc::INVALID_PARAMS, "a task is task#<n>".to_owned()))?;
+                        let task = all.get_mut(n).map_err(refused)?;
+                        let what = match method {
+                            "task_update" => {
+                                if let Some(title) =
+                                    optional("title").filter(|title| !title.trim().is_empty())
+                                {
+                                    task.title = title.trim().to_owned();
+                                }
+                                if let Some(body) = optional("text") {
+                                    task.text = body.trim().to_owned();
+                                }
+                                if params.get("for").is_some() {
+                                    task.assignee = optional("for").filter(|who| !who.trim().is_empty());
+                                }
+                                if source.is_some() {
+                                    task.source = source.clone();
+                                }
+                                format!("task#{n} changed by {by}")
+                            }
+                            "task_claim" => {
+                                let agent = agent.clone().ok_or((
+                                    rpc::INVALID_PARAMS,
+                                    "give `agent`: who takes it up".to_owned(),
+                                ))?;
+                                if task.state != "open" {
+                                    return Err(refused(format!(
+                                        "task#{n} is {}: reopen it first",
+                                        task.state
+                                    )));
+                                }
+                                match &task.claimed_by {
+                                    Some(other) if *other != agent => {
+                                        return Err(refused(format!(
+                                            "task#{n} is taken up by {other} already"
+                                        )))
+                                    }
+                                    _ => task.claimed_by = Some(agent.clone()),
+                                }
+                                format!("{agent} takes up task#{n}")
+                            }
+                            "task_comment" => {
+                                let body = text("text")?.trim().to_owned();
+                                if body.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+                                    return Err(refused("a comment needs a few words".to_owned()));
+                                }
+                                let said_by = match &agent {
+                                    Some(agent) => format!("{agent} for {by}"),
+                                    None => by.clone(),
+                                };
+                                let next = task.comments.iter().map(|c| c.n).max().unwrap_or(0) + 1;
+                                task.comments.push(crate::tasks::TaskComment {
+                                    n: next,
+                                    by: said_by.clone(),
+                                    text: body,
+                                    at_ms: now,
+                                    source: source.clone(),
+                                });
+                                format!("{said_by} on task#{n}")
+                            }
+                            "task_done" => match &agent {
+                                // An agent says what it thinks; the person decides.
+                                Some(agent) => {
+                                    task.thinks_done = Some(agent.clone());
+                                    format!("{agent} thinks task#{n} is done")
+                                }
+                                None => {
+                                    task.state = "done".into();
+                                    task.thinks_done = None;
+                                    format!("task#{n} done, said {by}")
+                                }
+                            },
+                            "task_reopen" => {
+                                task.state = "open".into();
+                                task.thinks_done = None;
+                                format!("task#{n} reopened by {by}")
+                            }
+                            _ => {
+                                task.state = "dropped".into();
+                                format!("task#{n} dropped by {by}")
+                            }
+                        };
+                        task.updated_ms = now;
+                        (n, what)
+                    };
+                    crate::tasks::save(&root, &all).map_err(|why| (rpc::INTERNAL_ERROR, why))?;
+                    let kind = match method {
+                        "task_add" => "task_added",
+                        "task_comment" => "task_comment",
+                        "task_done" if agent.is_none() => "task_done",
+                        _ => "task_changed",
+                    };
+                    self.events.emit(kind, None, Some(by), what);
+                    let task = all.get(n).ok_or((rpc::INTERNAL_ERROR, "the task is gone".to_owned()))?;
+                    to_json(serde_json::to_value(crate::tasks::info(task, &lanes, true)))
+                }
                 // What agents are told (ADR 0012): kept by Kito, out of
                 // the project's files.
                 "instructions" => {

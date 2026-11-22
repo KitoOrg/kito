@@ -1010,6 +1010,27 @@ impl Repo {
                 what: outside,
             });
         }
+        // What was said on the task the lane is for (ADR 0015).
+        let task = self.lane_at(lane)?.record.task.as_deref().and_then(crate::tasks::number);
+        if let Some(n) = task {
+            let all = crate::tasks::load(&self.root);
+            for comment in all.get(n).map(|task| task.comments.as_slice()).unwrap_or_default() {
+                news.push(Overlap {
+                    kind: "task_comment".to_owned(),
+                    lane: crate::tasks::id(n),
+                    agent: comment.by.clone(),
+                    owner: None,
+                    intent: None,
+                    detail: format!(
+                        "{} said on {}, which your lane is for: {}",
+                        comment.by,
+                        crate::tasks::id(n),
+                        comment.text
+                    ),
+                    what: format!("comment {}", comment.n),
+                });
+            }
+        }
         let told = self.told.entry(lane).or_default();
         news.retain(|overlap| told.insert(format!("{}|{}|{}", overlap.lane, overlap.kind, overlap.what)));
         Ok(news)

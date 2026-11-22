@@ -148,6 +148,54 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "tasks",
+            "The tasks of this repository still to do (ADR 0015): what people asked for, who each is for, \
+             which lanes are on it. Take one up only when the user told you to work on tasks: then \
+             `claim_task`, and open your lane with `task` set to its id. What a task says is what a person \
+             asked for; its comments are what people said on it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "for": { "type": "string", "description": "Only those for this person or agent" }
+                }
+            }),
+        ),
+        (
+            "task",
+            "One task: what was asked, its lanes, and what was said on it.",
+            json!({
+                "type": "object",
+                "properties": { "task": { "type": "string", "description": "task#3" } },
+                "required": ["task"]
+            }),
+        ),
+        (
+            "claim_task",
+            "Take up a task, so that nobody else does: before you open a lane for it (`open_lane` with \
+             `task`). Refused when another agent took it up.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "task#3" },
+                    "agent": { "type": "string", "description": "Your name, as you open lanes with it" }
+                },
+                "required": ["task", "agent"]
+            }),
+        ),
+        (
+            "task_done",
+            "Say that you think a task is done, once your lane is integrated. The person who asked for it \
+             decides: it stays open until they close it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "task#3" },
+                    "agent": { "type": "string", "description": "Your name" }
+                },
+                "required": ["task", "agent"]
+            }),
+        ),
+        (
             "set_intent",
             "Declare the why of the changes the lane records from now on.",
             json!({
@@ -455,6 +503,16 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
             }
         },
         "set_intent" => ask("set_intent", args),
+        "tasks" => ask("tasks", args),
+        "task" => ask("task", args),
+        "claim_task" => ask("task_claim", args),
+        "task_done" => {
+            // An agent says what it thinks; only a person closes a task.
+            if args.get("agent").and_then(Value::as_str).is_none_or(|agent| agent.trim().is_empty()) {
+                return Err("give `agent`: your name".into());
+            }
+            ask("task_done", args)
+        }
         "rename_symbol" => ask("rename_symbol", args),
         "run" => {
             let script = args.get("command").and_then(Value::as_str).ok_or("give `command`: what to run")?;

@@ -105,6 +105,8 @@ with what comes with it, where a program named itself otherwise.
 | `instructions` | | What the repository's agents are told (ADR 0012): the kitchen attached, each instruction with where it comes from (`kitchen` or `repository`), and the kitchen's it took away | `instructions.rs` (`Instructions`) |
 | `instructions_text` | `[assistant]` (`claude` by default) | What that assistant reads: Kito's rules, then the instructions for every assistant and for it, between Kito's marks | `instructions.rs` (`compose`) |
 | `instructions_history` | | Who changed which instruction, when, the text before and after (the last 200), the latest first | `instructions.rs` (`history`) |
+| `tasks` | `[state]` (`open` by default, `all`, `in_lane`, `ready`, `done`, `dropped`), `[for]` | The tasks (ADR 0015), each with its state, whom it is for, who took it up and its lanes | `tasks.rs` (`TaskInfo`) |
+| `task` | `task` (`task#3`) | One task, with what was said on it | `tasks.rs` (`TaskInfo`) |
 
 ## `write`
 
@@ -125,6 +127,13 @@ with what comes with it, where a program named itself otherwise.
 | `resolve_comment` | `comment` | The comment, resolved | `comments.rs` (`CommentInfo`) |
 | `instructions_set` | `name` (`all/<file>` or `<assistant>/<file>`), `text` | `name`, `changed`. An empty text takes the kitchen's of that name away | `instructions.rs` |
 | `instructions_remove` | `name` | `name`, `changed` | `instructions.rs` |
+| `task_add` | `title`, `[text]`, `[for]`, `[source]` | The task asked for | `tasks.rs` (`TaskInfo`) |
+| `task_update` | `task`, `[title]`, `[text]`, `[for]` (empty: nobody), `[source]` | The task | `tasks.rs` (`TaskInfo`) |
+| `task_claim` | `task`, `agent` | The task, taken up by that agent; refused when another took it up | `tasks.rs` (`TaskInfo`) |
+| `task_comment` | `task`, `text`, `[agent]`, `[source]` | The task; the agents in its lanes are told (`notices`, `task_comment`) | `tasks.rs` (`TaskInfo`) |
+| `task_done` | `task`, `[agent]` | Done; with `agent`, that agent thinks it is, and it stays open | `tasks.rs` (`TaskInfo`) |
+| `task_reopen` | `task` | Open again | `tasks.rs` (`TaskInfo`) |
+| `task_drop` | `task` | Nobody will do it | `tasks.rs` (`TaskInfo`) |
 | `verdict` | `lane`, `verdict` (`approve`, `request_changes`, `withdraw`), `[text]`, `[agent]` | Where the review stands now | `verdicts.rs` (`ReviewInfo`) |
 
 ## `integrate`

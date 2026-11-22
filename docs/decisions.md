@@ -1372,6 +1372,15 @@ themselves anyway. The commands were cut to `grant` and `revoke` for
 repositories and `user role` for the server, at the person's asking.
 Adding repositories stays on the server's machine: it clones and imports.
 
+### D-169 · Tasks are metadata, and only people close them
+Tasks are kept like instructions, out of the project's files
+([ADR 0015](adr/0015-tasks.md)): what needs doing is not code, and a
+task file in the project would conflict and travel with branches. A lane
+belongs to a task through the `task` it already carried, so nothing in
+the history changes. Kito suggests a task is ready when its lanes are
+closed but never closes it, as the person chose: a lane closed is not
+proof the work is done, and an agent saying so is a suggestion.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

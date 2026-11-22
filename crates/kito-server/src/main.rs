@@ -236,6 +236,15 @@ enum UserCmd {
     Remove { name: String },
 }
 
+/// What tells clients the server is the one meant, on a `kito connect`
+/// line: nothing for a certificate from an authority, else its fingerprint.
+fn known_by(dir: &std::path::Path) -> Result<String, String> {
+    match tls::from_authority(dir) {
+        true => Ok(String::new()),
+        false => Ok(format!(" --fingerprint {}", tls::fingerprint(dir)?)),
+    }
+}
+
 /// Who changed a setting with `kito-server` itself, on the server's machine.
 const BY_HAND: &str = "the server's machine";
 
@@ -602,10 +611,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 // What they connect with: the token, and what says the
                 // server they reach is this one.
                 println!("They connect with:");
-                println!(
-                    "  kito connect <host>:<port>/{first} --token {token} --fingerprint {}",
-                    tls::fingerprint(&server.dir)?
-                );
+                println!("  kito connect <host>:<port>/{first} --token {token}{}", known_by(&server.dir)?);
             } else if let Some(identity) = &identity {
                 let method = &identity.provider;
                 println!(
@@ -613,10 +619,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                     identity.login
                 );
                 println!("They connect with:");
-                println!(
-                    "  kito connect <host>:<port>/{first} --sign-in {method} --fingerprint {}",
-                    tls::fingerprint(&server.dir)?
-                );
+                println!("  kito connect <host>:<port>/{first} --sign-in {method}{}", known_by(&server.dir)?);
             }
         }
         Cmd::User { command: UserCmd::Role { name, role } } => {

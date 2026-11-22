@@ -33,6 +33,7 @@ pub mod scope;
 pub mod semantic;
 pub mod server;
 pub mod simulate;
+pub mod tasks;
 pub mod tls;
 pub mod verdicts;
 pub mod why;

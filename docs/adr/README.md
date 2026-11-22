@@ -45,4 +45,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0012 · Instructions: what agents are told, kept by Kito and out of the project](0012-instructions.md)
 - [0013 · Connecting by one address, signed in in the browser](0013-connect-by-address.md)
 - [0014 · Roles in each repository, and roles of the server](0014-roles.md)
+- [0015 · Tasks: what needs doing, and the lanes that do it](0015-tasks.md)
   (accepted)

@@ -3262,3 +3262,80 @@ fn instructions_are_kept_by_kito_written_for_each_assistant_and_a_kitchen_comes_
     assert!(!root.join("CLAUDE.md").exists());
     ok(&root, &["daemon", "stop"]);
 }
+
+#[test]
+fn a_task_is_asked_for_done_in_lanes_and_closed_by_whoever_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.py"), SHOP_PY).unwrap();
+    ok(root, &["init", "--no-assistants"]);
+    let added = json(
+        root,
+        &["task", "add", "Prices", "in", "cents", "--text", "Everywhere money is.", "--for", "bob", "--json"],
+    );
+    assert_eq!(
+        (added["id"].as_str(), added["state"].as_str(), added["for"].as_str()),
+        (Some("task#1"), Some("open"), Some("bob"))
+    );
+    ok(root, &["task", "add", "A", "receipt", "for", "each", "order"]);
+    let list = ok(root, &["task"]);
+    assert!(list.contains("task#1   open            Prices in cents  (for bob)"), "{list}");
+    assert!(list.contains("task#2   open            A receipt for each order"), "{list}");
+
+    // A lane for a task that is not there, or no longer to do, is refused.
+    let none = kito(
+        root,
+        &[
+            "lane",
+            "open",
+            "erin",
+            "--intent",
+            "prices in cents",
+            "--scope",
+            "src/shop.py",
+            "--task",
+            "task#9",
+        ],
+    );
+    assert!(String::from_utf8_lossy(&none.stderr).contains("task#9: no such task"));
+    ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "erin",
+            "--intent",
+            "prices in cents",
+            "--scope",
+            "src/shop.py",
+            "--task",
+            "task#1",
+        ],
+    );
+    let shown = ok(root, &["task", "show", "task#1"]);
+    assert!(
+        shown.contains("in a lane") && shown.contains("lane/1") && shown.contains("Everywhere money is."),
+        "{shown}"
+    );
+    ok(root, &["task", "comment", "task#1", "Round", "half", "to", "even."]);
+    assert!(ok(root, &["task", "show", "1"]).contains("Round half to even."));
+
+    // Its last lane closed: ready to close, and closed by a person.
+    ok(root, &["lane", "close", "1"]);
+    let ready = ok(root, &["task", "show", "task#1"]);
+    assert!(ready.contains("ready to close") && ready.contains("kito task done task#1"), "{ready}");
+    ok(root, &["task", "done", "task#1"]);
+    assert!(!ok(root, &["task"]).contains("task#1"));
+    assert!(ok(root, &["task", "list", "--all"]).contains("task#1   done"));
+    let closed = kito(
+        root,
+        &["lane", "open", "erin", "--intent", "prices again", "--scope", "src/shop.py", "--task", "task#1"],
+    );
+    assert!(String::from_utf8_lossy(&closed.stderr).contains("task#1 is done: reopen it first"));
+    ok(root, &["task", "drop", "2"]);
+    assert_eq!(ok(root, &["task"]).trim(), "No task to do. `kito task add <title>` asks for one.");
+    // Kept by Kito, not in the project's files.
+    assert!(root.join(".kito/tasks.json").is_file());
+    ok(root, &["daemon", "stop"]);
+}
