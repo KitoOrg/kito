@@ -4,6 +4,13 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.36.2]
+
+- **A plugin enabled on a server works at once**: its pages are served,
+  and taken away when it is disabled, without starting the server again.
+- The web client is told which plugins run on the server (`/-/me`), to
+  show only what belongs to them.
+
 ## [0.36.1]
 
 - **A plugin runs where it is meant to**: the registry says, for each

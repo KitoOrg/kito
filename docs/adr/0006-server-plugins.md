@@ -215,3 +215,13 @@ One phase (20), released as 0.21.0, in three parts:
    --sign-in`, `/-/sign-in`.
 
 Then `kito-github`, and `kito-web` behind a server.
+
+## Amendment, 2026-11-22: pages without a restart
+
+The person asked that enabling a plugin take effect at once, not when
+the server starts again. The serving server now brings the plugins that
+serve pages in line with its configuration when it starts, right after
+a change from the browser, and every two seconds for a change made on
+its machine: one enabled is started, one disabled is stopped (its input
+closed, then its process ended), one updated or given other permissions
+is started again. Ways to sign in were already read for each request.

@@ -335,6 +335,30 @@ fn pages_are_passed_on_to_the_plugin_that_serves_them() {
 }
 
 #[test]
+fn pages_come_and_go_while_the_server_runs() {
+    let served = Served::start(|dir| install_hello(dir, PAGES));
+    let until = |wanted: u16| {
+        let mut last = 0;
+        for _ in 0..400 {
+            last = served.request("GET", "/", &[], None).status;
+            if last == wanted {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("the page answered {last}, not {wanted}");
+    };
+    // Nothing serves pages yet.
+    until(404);
+    // Enabled on the server's machine: served without a restart.
+    ok(&served.dir, &["plugin", "enable", "hello"]);
+    until(200);
+    // Disabled: gone, and its program stopped.
+    ok(&served.dir, &["plugin", "disable", "hello"]);
+    until(404);
+}
+
+#[test]
 fn http_that_is_not_encrypted_is_for_this_machine_only() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("server");

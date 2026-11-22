@@ -40,23 +40,29 @@ pub const ENV_PAGES_LISTEN: &str = "KITO_PAGES_LISTEN";
 pub const ENV_PAGES_SECRET: &str = "KITO_PAGES_SECRET";
 
 /// A plugin that serves pages, as the server reaches it.
+#[derive(Clone)]
 struct Pages {
     plugin: String,
+    /// The version that runs: another one installed is started in its place.
+    version: String,
+    /// What it was given, as the server's configuration says.
+    given: Vec<Permission>,
     /// The path its pages are under, without a `/` at its end.
     mount: String,
     /// Where it listens, on this machine.
     listen: String,
     secret: String,
+    /// Set when it is disabled or replaced: its program is stopped.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Http {
     dir: PathBuf,
     /// Encrypted: cookies are for encrypted connections only.
     secure: bool,
-    pages: Vec<Pages>,
-    /// What pages may ask of a repository: what the plugins that serve
-    /// them were given.
-    pages_may: Vec<Permission>,
+    /// The plugins that serve pages now: started and stopped as they are
+    /// enabled and disabled, while the server runs.
+    pages: std::sync::RwLock<Vec<Pages>>,
     client: Client<HttpConnector, Body>,
 }
 
@@ -170,9 +176,15 @@ async fn me(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
         .filter(|repo| who.user.may_use(repo))
         .map(|repo| json!({ "name": repo, "role": who.user.role_in(&repo).map(Role::word) }))
         .collect();
-    answered(
-        json!({ "user": who.name, "email": who.user.email, "repos": repos, "admin": who.user.is_admin(), "role": who.user.server_role.word() }),
-    )
+    answered(json!({
+        "user": who.name,
+        "email": who.user.email,
+        "repos": repos,
+        "admin": who.user.is_admin(),
+        "role": who.user.server_role.word(),
+        // What runs on this server: pages show what belongs to each.
+        "plugins": server.running().iter().map(|(found, _)| found.manifest.name.clone()).collect::<Vec<_>>(),
+    }))
 }
 
 /// Who asks, if they are an administrator of the server and the request
@@ -230,7 +242,13 @@ async fn admin_change(
         Ok(who) => who,
         Err((status, why)) => return said(status, why),
     };
-    let done = tokio::task::spawn_blocking(move || crate::admin::change(&mut server, &who.name, &ask)).await;
+    let settle = http.clone();
+    let done = tokio::task::spawn_blocking(move || {
+        let done = crate::admin::change(&mut server, &who.name, &ask);
+        settle.settle_pages();
+        done
+    })
+    .await;
     match done {
         Ok(Ok(done)) => answered(done),
         Ok(Err(why)) => said(StatusCode::BAD_REQUEST, &why),
@@ -518,7 +536,7 @@ async fn api(
     }
     // A browser asks through pages: of what the person may do, what the
     // plugins that serve them were given.
-    let within = who.by_cookie.then(|| http.pages_may.clone());
+    let within = who.by_cookie.then(|| http.pages_may());
     let (dir, person, method, place) =
         (server.dir.clone(), who.name.clone(), call.method.clone(), repo.clone());
     let asked = tokio::task::spawn_blocking(move || {
@@ -565,9 +583,11 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
     if path == "/-" || path.starts_with("/-/") {
         return said(StatusCode::NOT_FOUND, "the server has nothing at this address");
     }
-    let Some(page) =
-        http.pages.iter().filter(|page| under(&path, &page.mount)).max_by_key(|page| page.mount.len())
-    else {
+    let found = {
+        let pages = http.pages.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        pages.iter().filter(|page| under(&path, &page.mount)).max_by_key(|page| page.mount.len()).cloned()
+    };
+    let Some(page) = found else {
         let text =
             "kito-server: no plugin serves pages here. `/-/me` says who you are; `/-/api/<repository>` \
                     answers for a repository.\n";
@@ -641,27 +661,96 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
     }
 }
 
-/// Starts the plugins that serve pages, each listening on this machine,
-/// and keeps them running. The server holds their standard input open:
-/// when it closes, the server is gone, and a plugin stops.
-fn start_pages(server: &Server) -> Result<(Vec<Pages>, Vec<Permission>), String> {
-    let (mut pages, mut may) = (Vec::new(), Vec::new());
-    for (found, config) in server.running() {
-        let Some(spec) =
-            found.manifest.pages.as_ref().filter(|_| config.permissions.contains(&Permission::Pages))
-        else {
-            continue;
-        };
-        let name = found.manifest.name.clone();
-        // A port nobody has, on this machine only.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|listener| listener.local_addr())
-            .map_err(|e| format!("a port for the pages of `{name}`: {e}"))?
-            .port();
-        let (listen, secret) = (format!("127.0.0.1:{port}"), random_hex()?);
-        let program = kitod::plugins::program(&found.dir, &name);
-        let (dir, told) = (server.dir.clone(), (listen.clone(), secret.clone(), name.clone()));
-        std::thread::spawn(move || loop {
+impl Http {
+    /// What pages may ask of a repository: what the plugins that serve
+    /// them were given.
+    fn pages_may(&self) -> Vec<Permission> {
+        let pages = self.pages.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut may: Vec<Permission> = pages
+            .iter()
+            .flat_map(|page| page.given.iter().copied())
+            .filter(|permission| permission.of_a_repository())
+            .collect();
+        may.sort();
+        may.dedup();
+        may
+    }
+
+    /// Brings the plugins that serve pages in line with what the server
+    /// says now: one enabled is started, one disabled is stopped, one
+    /// updated or given other permissions is started again. Run when the
+    /// server starts, after a change from the browser, and every two
+    /// seconds for a change made on the server's machine.
+    fn settle_pages(&self) {
+        let Ok(server) = Server::open(&self.dir) else { return };
+        let wanted: Vec<(kitod::plugins::Installed, String, Vec<Permission>)> = server
+            .running()
+            .into_iter()
+            .filter_map(|(found, config)| {
+                let spec = found
+                    .manifest
+                    .pages
+                    .as_ref()
+                    .filter(|_| config.permissions.contains(&Permission::Pages))?;
+                let mount = spec.mount.trim_end_matches('/').to_owned();
+                let given = config.permissions.clone();
+                Some((found, mount, given))
+            })
+            .collect();
+        let mut pages = self.pages.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        pages.retain(|page| {
+            let same = wanted.iter().any(|(found, mount, given)| {
+                found.manifest.name == page.plugin
+                    && found.manifest.version == page.version
+                    && *mount == page.mount
+                    && *given == page.given
+            });
+            if !same {
+                page.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("kito-server: the pages of `{}` are no longer served", page.plugin);
+            }
+            same
+        });
+        for (found, mount, given) in wanted {
+            if pages.iter().any(|page| page.plugin == found.manifest.name) {
+                continue;
+            }
+            match start_pages(&server.dir, &found, mount, given) {
+                Ok(page) => {
+                    eprintln!("kito-server: pages: {} at {}/", page.plugin, page.mount);
+                    pages.push(page);
+                }
+                Err(e) => eprintln!("kito-server: {e}"),
+            }
+        }
+    }
+}
+
+/// Starts a plugin that serves pages, listening on this machine, and keeps
+/// it running until it is told to stop. The server holds its standard
+/// input open: when it closes, the server is gone or the plugin was
+/// disabled, and the plugin stops.
+fn start_pages(
+    dir: &std::path::Path,
+    found: &kitod::plugins::Installed,
+    mount: String,
+    given: Vec<Permission>,
+) -> Result<Pages, String> {
+    use std::sync::atomic::Ordering;
+    let name = found.manifest.name.clone();
+    // A port nobody has, on this machine only.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map_err(|e| format!("a port for the pages of `{name}`: {e}"))?
+        .port();
+    let (listen, secret) = (format!("127.0.0.1:{port}"), random_hex()?);
+    let program = kitod::plugins::program(&found.dir, &name);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (dir, told, stopped) =
+        (dir.to_path_buf(), (listen.clone(), secret.clone(), name.clone()), stop.clone());
+    std::thread::spawn(move || {
+        let pause = std::time::Duration::from_millis(200);
+        while !stopped.load(Ordering::SeqCst) {
             let child = std::process::Command::new(&program)
                 .arg("serve-pages")
                 .current_dir(&dir)
@@ -673,28 +762,47 @@ fn start_pages(server: &Server) -> Result<(Vec<Pages>, Vec<Permission>), String>
                 .spawn();
             match child {
                 Ok(mut child) => {
-                    // Held open while it runs: `wait` would close it, and
-                    // a closed input tells the plugin the server is gone.
+                    // Held open while it runs: a closed input tells the
+                    // plugin the server is gone.
                     let held = child.stdin.take();
-                    let status = child.wait();
-                    drop(held);
-                    eprintln!("kito-server: the plugin `{}`, which serves pages, stopped ({status:?}): started again", told.2);
+                    loop {
+                        if stopped.load(Ordering::SeqCst) {
+                            drop(held);
+                            // A moment to finish what it was answering.
+                            for _ in 0..10 {
+                                if matches!(child.try_wait(), Ok(Some(_))) {
+                                    return;
+                                }
+                                std::thread::sleep(pause);
+                            }
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return;
+                        }
+                        match child.try_wait() {
+                            Ok(None) => std::thread::sleep(pause),
+                            Ok(Some(status)) => {
+                                eprintln!(
+                                    "kito-server: the plugin `{}`, which serves pages, stopped ({status}): started again",
+                                    told.2
+                                );
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
                 Err(e) => eprintln!("kito-server: the plugin `{}`: {}: {e}", told.2, program.display()),
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        });
-        may.extend(config.permissions.iter().copied().filter(|permission| permission.of_a_repository()));
-        pages.push(Pages {
-            plugin: name,
-            mount: spec.mount.trim_end_matches('/').to_owned(),
-            listen,
-            secret,
-        });
-    }
-    may.sort();
-    may.dedup();
-    Ok((pages, may))
+            for _ in 0..10 {
+                if stopped.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(pause);
+            }
+        }
+    });
+    Ok(Pages { plugin: name, version: found.manifest.version.clone(), given, mount, listen, secret, stop })
 }
 
 /// Serves HTTP on `address` until the process ends: encrypted with the
@@ -713,15 +821,22 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         true => None,
         false => Some(tokio_rustls::TlsAcceptor::from(crate::tls::config(&server.dir)?)),
     };
-    let (pages, pages_may) = start_pages(server)?;
-    let mounted: Vec<String> =
-        pages.iter().map(|page| format!("{} at {}/", page.plugin, page.mount)).collect();
     let http = Arc::new(Http {
         dir: server.dir.clone(),
         secure: !plain,
-        pages,
-        pages_may,
+        pages: std::sync::RwLock::new(Vec::new()),
         client: Client::builder(TokioExecutor::new()).build_http(),
+    });
+    http.settle_pages();
+    let mounted: Vec<String> = {
+        let pages = http.pages.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        pages.iter().map(|page| format!("{} at {}/", page.plugin, page.mount)).collect()
+    };
+    // A plugin enabled or disabled on the server's machine counts at once.
+    let settling = http.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        settling.settle_pages();
     });
     let router = Router::new()
         .route("/-/me", get(me))

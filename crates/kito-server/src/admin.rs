@@ -46,11 +46,16 @@ fn adds(manifest: &plugins::Manifest) -> Vec<String> {
     adds
 }
 
-/// `true` for a plugin whose change takes effect when the server starts
-/// again: its pages are served, and its way to sign in offered, by the
-/// server that is running now.
-fn at_restart(manifest: &plugins::Manifest) -> bool {
-    manifest.pages.is_some() || manifest.sign_in.is_some()
+/// What a plugin adds that a person sees at once: its pages, its way to
+/// sign in. The running server starts and stops both as soon as the
+/// plugin is enabled or disabled.
+fn seen(manifest: &plugins::Manifest) -> Option<&'static str> {
+    match (manifest.pages.is_some(), manifest.sign_in.is_some()) {
+        (true, true) => Some("Its pages and its way to sign in"),
+        (true, false) => Some("Its pages"),
+        (false, true) => Some("Its way to sign in"),
+        (false, false) => None,
+    }
 }
 
 /// Every plugin the server's user has installed, with what the server
@@ -143,12 +148,11 @@ pub fn change(server: &mut Server, by: &str, ask: &Ask) -> Result<Value, String>
             let given: Vec<&str> = server.config.plugins[name].permissions.iter().map(|p| p.word()).collect();
             let given = if given.is_empty() { "nothing".to_owned() } else { given.join(", ") };
             told(server, "plugin_enabled", format!("{name} ({given})"));
-            let restart = at_restart(&found.manifest);
             let mut done = format!("{name} is enabled on this server. It may: {given}.");
-            if restart {
-                done.push_str(" Its pages and its way to sign in are there when the server starts again.");
+            if let Some(what) = seen(&found.manifest) {
+                done.push_str(&format!(" {what}: there now."));
             }
-            Ok(json!({ "done": done, "restart": restart }))
+            Ok(json!({ "done": done }))
         }
         "disable" => {
             if serves(server) {
@@ -175,12 +179,11 @@ pub fn change(server: &mut Server, by: &str, ask: &Ask) -> Result<Value, String>
                 return Err(format!("`{name}` was not enabled on this server"));
             }
             told(server, "plugin_disabled", name.to_owned());
-            let restart = found.as_ref().is_some_and(|found| at_restart(&found.manifest));
             let mut done = format!("{name} is disabled on this server.");
-            if restart {
-                done.push_str(" Its pages and its way to sign in are gone when the server starts again.");
+            if let Some(what) = found.as_ref().and_then(|found| seen(&found.manifest)) {
+                done.push_str(&format!(" {what}: gone now."));
             }
-            Ok(json!({ "done": done, "said": said, "restart": restart }))
+            Ok(json!({ "done": done, "said": said }))
         }
         "remove" => {
             // Disabled first: what runs is not pulled from under a server.
