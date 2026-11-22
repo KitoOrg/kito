@@ -4,6 +4,16 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.31.0]
+
+A repository's rules, for the web client (phase 30).
+
+- **The checks are changed by the server's admins** only, through the
+  server: they run commands on its machine.
+- **A kitchen** given through the server is another of its repositories.
+- **Who changed which rule**, and to what, is kept and shown to
+  maintainers and admins.
+
 ## [0.30.0]
 
 People, for the web client (phase 29).

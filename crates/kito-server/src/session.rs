@@ -148,10 +148,15 @@ pub fn ask(
         Value::Object(params) => Value::Object(params),
         _ => json!({}),
     };
+    settings_allowed(server, user, repo, method, &params)?;
+    let asked = params.clone();
     // Who asks is what the server says, whatever the client sent.
     params["on_behalf_of"] = json!({ "name": name, "email": user.email, "role": role.word() });
     let mut daemon = None;
     let answer = forward(&mut daemon, &root, 0, method, params);
+    if answer.error.is_none() {
+        note_settings(server, name, repo, method, &asked);
+    }
     match (answer.result, answer.error) {
         (_, Some(error)) => Err((error.code, error.message)),
         (Some(value), None) => Ok(value),
@@ -417,14 +422,24 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                         rpc::INVALID_PARAMS,
                         "this session is about no repository: name one when connecting",
                     ),
-                    Some((_, root)) => {
+                    Some((repo, root)) => {
                         // Who asks is what the server says, whatever the client sent.
                         let mut params = match request.params {
                             Value::Object(params) => Value::Object(params),
                             _ => json!({}),
                         };
-                        params["on_behalf_of"] = person.clone();
-                        forward(&mut daemon, root, request.id, method, params)
+                        match settings_allowed(server, &user, repo, method, &params) {
+                            Err((code, why)) => Response::err(request.id, code, why),
+                            Ok(()) => {
+                                let asked = params.clone();
+                                params["on_behalf_of"] = person.clone();
+                                let answer = forward(&mut daemon, root, request.id, method, params);
+                                if answer.error.is_none() {
+                                    note_settings(server, &name, repo, method, &asked);
+                                }
+                                answer
+                            }
+                        }
                     }
                 },
             },
@@ -435,8 +450,61 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
     }
 }
 
+/// What a maintainer may not change from a client, and where a kitchen
+/// may be (ADR 0014, amended): checks run commands on the server's
+/// machine, for its admins to say; a kitchen is another repository here.
+fn settings_allowed(
+    server: &Server,
+    user: &User,
+    repo: &str,
+    method: &str,
+    params: &Value,
+) -> Result<(), (i64, String)> {
+    if method != "configure" {
+        return Ok(());
+    }
+    if params.get("checks").is_some() && !user.is_admin() {
+        return Err((
+            rpc::REFUSED,
+            "the checks run commands on the server's machine: only its admins change them".to_owned(),
+        ));
+    }
+    match params.get("kitchen") {
+        None | Some(Value::Null) => Ok(()),
+        Some(kitchen) => {
+            let name = kitchen.as_str().and_then(|path| path.strip_prefix("../")).unwrap_or_default();
+            match !name.is_empty() && name != repo && server.repo(name).is_some() {
+                true => Ok(()),
+                false => Err((
+                    rpc::REFUSED,
+                    format!("a kitchen is another repository of this server, given as `../<name>`: {kitchen} is not"),
+                )),
+            }
+        }
+    }
+}
+
+/// Keeps who changed which setting of a repository, once it is changed.
+fn note_settings(server: &Server, name: &str, repo: &str, method: &str, params: &Value) {
+    match method {
+        "configure" => {
+            for setting in ["checks", "push", "approvals", "kitchen"] {
+                if let Some(value) = params.get(setting) {
+                    server.note_setting(repo, name, setting, value);
+                }
+            }
+        }
+        "protect" => {
+            let on = params.get("on").and_then(Value::as_bool).unwrap_or(true);
+            server.note_setting(repo, name, "protected", &json!(on));
+        }
+        _ => {}
+    }
+}
+
 /// The server's people, asked from a connected directory.
 const PEOPLE: &[&str] = &[
+    "server.settings_history",
     "server.members",
     "server.grant",
     "server.people",
@@ -469,6 +537,13 @@ pub fn people(
     let admin = user.is_admin();
     let owner = user.server_role == ServerRole::Owner;
     match method {
+        "server.settings_history" => {
+            let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
+            if role < Some(Role::Maintain) && !admin {
+                return Err(refused(format!("only a maintainer of `{repo}` sees its settings")));
+            }
+            Ok(json!(now.settings_history(repo)))
+        }
         "server.members" => {
             let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
             if role < Some(Role::Maintain) && !admin {

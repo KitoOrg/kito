@@ -712,3 +712,56 @@ fn a_role_changed_counts_at_once_and_who_was_here_is_known() {
         .clone();
     assert!(ada_seen.as_u64().is_some_and(|ms| ms > 0), "{members}");
 }
+
+#[test]
+fn a_maintainer_changes_the_rules_but_not_the_checks_and_every_change_is_kept() {
+    let mut world = World::new();
+    let erin = token_in(&ok(&world.dir, &["user", "add", "erin", "--repo", "shop:maintain"]));
+    let root = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
+    ok(&world.dir, &["repo", "set", "shop", "--approvals", "2"]);
+    let address = world.serve();
+    let mut maintainer = connect(&address, &erin, "shop");
+
+    // The checks run commands on the server's machine: its admins say them.
+    let no = maintainer.call_value("configure", json!({ "checks": ["rm -rf /"] })).unwrap_err();
+    assert!(no.to_string().contains("only its admins change them"), "{no}");
+    let mut admin = connect(&address, &root, "shop");
+    let set = admin.call_value("configure", json!({ "checks": ["true"] })).unwrap();
+    assert_eq!(set["checks"], json!(["true"]));
+
+    // A kitchen is another repository of this server, and nothing else.
+    for wrong in [json!("/etc"), json!("../shop"), json!("../nowhere"), json!("../../x")] {
+        let no = maintainer.call_value("configure", json!({ "kitchen": wrong })).unwrap_err();
+        assert!(no.to_string().contains("a kitchen is another repository of this server"), "{no}");
+    }
+    let set = maintainer.call_value("configure", json!({ "kitchen": "../site", "approvals": 1 })).unwrap();
+    assert_eq!((set["kitchen"].as_str(), set["approvals"].as_u64()), (Some("../site"), Some(1)));
+    maintainer.call_value("protect", json!({ "on": false })).unwrap();
+
+    // Who changed what, the latest first; for maintainers and admins.
+    let history = maintainer.call_value("server.settings_history", json!({})).unwrap();
+    let seen: Vec<(String, String, Value)> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["by"].as_str().unwrap().to_owned(),
+                c["setting"].as_str().unwrap().to_owned(),
+                c["value"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("erin".to_owned(), "protected".to_owned(), json!(false)),
+            ("erin".to_owned(), "kitchen".to_owned(), json!("../site")),
+            ("erin".to_owned(), "approvals".to_owned(), json!(1)),
+            ("rose".to_owned(), "checks".to_owned(), json!(["true"])),
+            ("the server's machine".to_owned(), "approvals".to_owned(), json!(2)),
+        ]
+    );
+    let mut bob = connect(&address, &world.bob, "shop");
+    assert!(bob.call_value("server.settings_history", json!({})).is_err());
+}

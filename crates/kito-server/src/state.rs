@@ -111,6 +111,10 @@ struct Session {
 const SESSIONS_FILE: &str = "sessions.toml";
 /// When each person was last here: a file each.
 const SEEN_DIR: &str = "seen";
+/// Who changed the settings of each repository, and to what: a file each.
+const SETTINGS_DIR: &str = "settings";
+/// How many changes of a repository's settings are kept.
+const SETTINGS_KEPT: usize = 200;
 /// What a session's token starts with: told apart from the tokens an
 /// administrator hands out.
 pub const SESSION_PREFIX: &str = "kitos_";
@@ -503,6 +507,34 @@ impl Server {
         if std::fs::write(&staged, now_ms().to_string()).is_ok() {
             let _ = std::fs::rename(&staged, dir.join(name));
         }
+    }
+
+    /// Notes that `by` set a repository's `setting` to `value`.
+    pub fn note_setting(&self, repo: &str, by: &str, setting: &str, value: &serde_json::Value) {
+        let dir = self.dir.join(SETTINGS_DIR);
+        if check_name("repository", repo).is_err() || std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join(format!("{repo}.jsonl"));
+        let mut lines: Vec<String> =
+            std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
+        let line = serde_json::json!({ "at_ms": now_ms(), "by": by, "setting": setting, "value": value });
+        lines.push(line.to_string());
+        let keep = lines.len().saturating_sub(SETTINGS_KEPT);
+        let staged = dir.join(format!(".{repo}.new"));
+        if std::fs::write(&staged, lines[keep..].join("\n") + "\n").is_ok() {
+            let _ = std::fs::rename(&staged, &path);
+        }
+    }
+
+    /// The changes of a repository's settings, the latest first.
+    pub fn settings_history(&self, repo: &str) -> Vec<serde_json::Value> {
+        let path = self.dir.join(SETTINGS_DIR).join(format!("{repo}.jsonl"));
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let mut changes: Vec<serde_json::Value> =
+            text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        changes.reverse();
+        changes
     }
 
     /// When a person was last here, in milliseconds since 1970.

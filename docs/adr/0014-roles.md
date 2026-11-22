@@ -87,3 +87,18 @@ Asked for with the people page of the web client:
   `/-/api/<repository>` answers `server.members` and `server.grant`.
   Adding somebody answers the port the server listens on and whether it
   encrypts, for the line they connect with.
+
+## Amended 2026-11-22: the settings page
+
+Asked for with the settings page of the web client:
+
+- **The checks are the admins'**: they run commands on the server's
+  machine, so through the server only its admins change them. A
+  maintainer sees them, and changes the other rules.
+- **A kitchen is another repository of the server**, given as
+  `../<name>`: nothing else is taken through the server, so no folder of
+  the server's machine can be named.
+- **Who changed which rule, and to what**, is kept by the server
+  (`settings/<repository>.jsonl`, the last 200), from a client or from
+  `kito-server repo set` on its machine, and given to maintainers and
+  admins (`server.settings_history`).

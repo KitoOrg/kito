@@ -236,6 +236,9 @@ enum UserCmd {
     Remove { name: String },
 }
 
+/// Who changed a setting with `kito-server` itself, on the server's machine.
+const BY_HAND: &str = "the server's machine";
+
 fn dir_of(cli: &Cli) -> PathBuf {
     cli.dir
         .clone()
@@ -522,6 +525,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             if *protect || *unprotect {
                 let _: Value =
                     daemon.call("protect", json!({ "on": *protect })).map_err(|e| e.to_string())?;
+                server.note_setting(name, BY_HAND, "protected", &json!(*protect));
             }
             let mut rules = json!({});
             if !checks.is_empty() || *no_checks {
@@ -545,7 +549,10 @@ fn run(cli: &Cli) -> Result<(), String> {
             } else if *no_kitchen {
                 rules["kitchen"] = Value::Null;
             }
-            let now: Value = daemon.call("configure", rules).map_err(|e| e.to_string())?;
+            let now: Value = daemon.call("configure", rules.clone()).map_err(|e| e.to_string())?;
+            for (setting, value) in rules.as_object().into_iter().flatten() {
+                server.note_setting(name, BY_HAND, setting, value);
+            }
             let checks: Vec<String> = serde_json::from_value(now["checks"].clone()).unwrap_or_default();
             let rules = rules_of(
                 now["protected"].as_bool().unwrap_or(false),

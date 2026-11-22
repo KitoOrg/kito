@@ -2605,6 +2605,33 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 30 · a repository's rules, for the web client — done
+
+The web client's settings page (kito-web 0.12) changes a repository's
+rules as its maintainers may. Asked for with it: checks for admins only,
+since they run commands on the server; and who changed what. Released
+as 0.31.0 (ADR 0014, amended).
+
+### What is there
+
+- `configure` with `checks`, through the server, for admins only.
+- A kitchen given through the server must be another of its
+  repositories.
+- `server.settings_history`: who changed which rule, and to what.
+
+### How it was tested
+
+- `kito-server/tests/server.rs`: a maintainer refused the checks and
+  any kitchen that is not another repository; an admin who sets the
+  checks; the history in order, with `repo set` on the server's machine.
+- The page, against kito-web's `scripts/demo-team.sh`, in a browser.
+
+### Known limitations
+
+- **The history is the last 200 changes** of each repository; the audit
+  log of the server is still to come.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 29 · people, for the web client — done
 
 The web client's people page (kito-web 0.11) needed what the server
