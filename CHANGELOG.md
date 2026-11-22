@@ -4,6 +4,20 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.34.0]
+
+Search and numbers (phase 33, [ADR 0016](docs/adr/0016-search-and-numbers.md)).
+
+- **`kito search`**: reasons, changes, lanes, tasks, comments and notes,
+  by words, kind, time, who (a person, an agent, an assistant, a
+  model), where (a file, a directory, a function) and outcome.
+- **`kito stats`**: lanes week by week and how long they take, each
+  assistant and model, the busiest code, review.
+- `--everywhere` asks every repository you may use on the server; agents
+  have the tool `search`.
+- What happens is kept from now on (`.kito/activity.jsonl`), refusals
+  and held edits included.
+
 ## [0.33.0]
 
 Tasks (phase 32, [ADR 0015](docs/adr/0015-tasks.md)).

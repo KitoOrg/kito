@@ -44,6 +44,9 @@ const ALLOWED: &[&str] = &[
     "after_shell",
     // What the session of an assistant runs on (ADR 0010).
     "assistant_session",
+    // Search and numbers (ADR 0016).
+    "search",
+    "stats",
     // Tasks (ADR 0015).
     "tasks",
     "task",
@@ -103,6 +106,8 @@ const READ: &[&str] = &[
     "instructions_history",
     "tasks",
     "task",
+    "search",
+    "stats",
     // Asks that what is already saved be recorded: no change of theirs.
     "sync",
 ];

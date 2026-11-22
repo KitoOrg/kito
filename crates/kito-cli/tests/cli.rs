@@ -3339,3 +3339,64 @@ fn a_task_is_asked_for_done_in_lanes_and_closed_by_whoever_asked() {
     assert!(root.join(".kito/tasks.json").is_file());
     ok(root, &["daemon", "stop"]);
 }
+
+#[test]
+fn what_was_done_is_found_and_counted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.py"), SHOP_PY).unwrap();
+    ok(root, &["init", "--no-assistants"]);
+    ok(root, &["checkpoint", "-m", "start"]);
+    ok(root, &["task", "add", "Prices", "in", "cents"]);
+    ok(
+        root,
+        &[
+            "lane",
+            "open",
+            "erin",
+            "--intent",
+            "prices in whole cents",
+            "--scope",
+            "src/shop.py",
+            "--task",
+            "task#1",
+        ],
+    );
+    fs::write(root.join(".kito/lanes/1/work/src/shop.py"), format!("{SHOP_PY}\n# cents\n")).unwrap();
+    ok(root, &["sync", "1"]);
+    assert!(ok(root, &["integrate", "1"]).contains("integrated"));
+    ok(
+        root,
+        &["lane", "open", "frank", "--intent", "a receipt for every order", "--scope", "src/receipt.py"],
+    );
+    ok(root, &["lane", "close", "2"]);
+
+    // Found by its words, its place, who did it, and how it ended.
+    let found = json(root, &["search", "cents", "--json"]);
+    let kinds: Vec<&str> = found.as_array().unwrap().iter().filter_map(|hit| hit["kind"].as_str()).collect();
+    assert!(kinds.contains(&"lane") && kinds.contains(&"task") && kinds.contains(&"change"), "{found}");
+    let lanes = json(root, &["search", "--kind", "lane", "--where", "src/shop.py", "--json"]);
+    assert_eq!(lanes.as_array().unwrap().len(), 1, "only erin.s lane was on src/shop.py: {lanes}");
+    assert_eq!(lanes[0]["outcome"][0], "integrated");
+    let given_up = json(root, &["search", "--kind", "lane", "--outcome", "given_up", "--json"]);
+    assert_eq!(given_up[0]["by"], "frank", "{given_up}");
+    assert_eq!(json(root, &["search", "--who", "nobody-at-all", "--json"]), serde_json::json!([]));
+    assert!(ok(root, &["search", "receipt"]).contains("a receipt for every order"));
+
+    // Counted.
+    let stats = json(root, &["stats", "--json"])["this"].clone();
+    let weeks = stats["flow"]["weeks"].as_array().unwrap();
+    let sum = |key: &str| weeks.iter().map(|week| week[key].as_u64().unwrap()).sum::<u64>();
+    assert_eq!((sum("opened"), sum("integrated"), sum("given_up")), (2, 1, 1), "{stats}");
+    assert!(stats["flow"]["median_open_to_integrated_ms"].is_u64(), "{stats}");
+    assert!(
+        stats["hotspots"]["files"].as_array().unwrap().iter().any(|file| file["path"] == "src/shop.py"),
+        "{stats}"
+    );
+    let said = ok(root, &["stats", "--since", "7d"]);
+    assert!(said.contains("Lanes: 2 opened, 1 integrated, 1 given up"), "{said}");
+    assert!(root.join(".kito/activity.jsonl").is_file());
+    assert!(kito(root, &["stats", "--since", "yesterday"]).status.code() != Some(0));
+    ok(root, &["daemon", "stop"]);
+}

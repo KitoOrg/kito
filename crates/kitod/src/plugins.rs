@@ -118,6 +118,9 @@ const READ: &[&str] = &[
     // Tasks (ADR 0015).
     "tasks",
     "task",
+    // Search and numbers (ADR 0016).
+    "search",
+    "stats",
 ];
 
 const WRITE: &[&str] = &[

@@ -147,6 +147,7 @@ fn an_agent_does_a_whole_piece_of_work_through_the_tools() {
             "kito.sync",
             "kito.status",
             "kito.log",
+            "kito.search",
             "kito.tasks",
             "kito.task",
             "kito.claim_task",

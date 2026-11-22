@@ -137,6 +137,8 @@ struct Events {
     /// The number of the last event, and the last ones.
     log: Mutex<(u64, std::collections::VecDeque<rpc::Event>)>,
     news: std::sync::Condvar,
+    /// Where every event but saves is kept (ADR 0016).
+    activity: Option<std::path::PathBuf>,
 }
 
 impl Events {
@@ -158,6 +160,9 @@ impl Events {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as u64);
         let event = rpc::Event { seq: log.0, at_ms, kind: kind.to_owned(), lane, by, what, paths };
+        if let Some(file) = &self.activity {
+            crate::insights::keep(file, &event);
+        }
         log.1.push_back(event);
         while log.1.len() > EVENTS_KEPT {
             log.1.pop_front();
@@ -430,6 +435,34 @@ impl Daemon {
                         "approvals": approvals,
                         "kitchen": kitchen_now,
                     }))
+                }
+                // Search and numbers (ADR 0016).
+                "search" => {
+                    let words: Vec<String> =
+                        optional("q").unwrap_or_default().split_whitespace().map(str::to_owned).collect();
+                    let kinds: Vec<String> = params
+                        .get("kinds")
+                        .and_then(Value::as_array)
+                        .map(|kinds| kinds.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    let query = crate::insights::Query {
+                        words,
+                        kinds,
+                        since_ms: params.get("since_ms").and_then(Value::as_u64),
+                        until_ms: params.get("until_ms").and_then(Value::as_u64),
+                        who: optional("who").filter(|who| !who.trim().is_empty()),
+                        place: optional("where").filter(|place| !place.trim().is_empty()),
+                        outcome: optional("outcome").filter(|outcome| !outcome.trim().is_empty()),
+                        limit: params.get("limit").and_then(Value::as_u64).unwrap_or(50).min(500) as usize,
+                    };
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.search(&query)).map_err(internal)?,
+                    ))
+                }
+                "stats" => {
+                    let since = params.get("since_ms").and_then(Value::as_u64);
+                    let until = params.get("until_ms").and_then(Value::as_u64);
+                    Ok(self.with_repo(|repo| repo.stats(since, until)).map_err(internal)?)
                 }
                 // Tasks (ADR 0015): kept by Kito, out of the project's files.
                 "tasks" | "task" => {
@@ -1387,7 +1420,13 @@ impl Daemon {
                     Some("out_of_scope") => {
                         format!("{}: outside the scope, not made", list(value, "outside"))
                     }
-                    _ => return,
+                    // Held back once, for reasons the agent was not told
+                    // (ADR 0016: counted, per assistant).
+                    Some("ok") | None => return,
+                    Some(_) => {
+                        let what = format!("{path}: held back once, for what the agent was not told");
+                        return self.events.emit("edit_held", lane.or(Some("main".to_owned())), person, what);
+                    }
                 };
                 ("edit_refused", lane.or(Some("main".to_owned())), person, what)
             }
@@ -2329,7 +2368,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         debounce,
         shutdown: Notify::new(),
         queue: Queue::new(),
-        events: Events::default(),
+        events: Events { activity: Some(crate::insights::activity_file(&root)), ..Events::default() },
         writers: Mutex::default(),
         holds: Mutex::default(),
         push_wanted: Notify::new(),

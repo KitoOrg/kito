@@ -14,6 +14,7 @@ pub mod fsinfo;
 pub mod guard;
 pub mod identity;
 pub mod ignore;
+pub mod insights;
 pub mod instructions;
 pub mod integrate;
 pub mod ipc;

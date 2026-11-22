@@ -1381,6 +1381,15 @@ the history changes. Kito suggests a task is ready when its lanes are
 closed but never closes it, as the person chose: a lane closed is not
 proof the work is done, and an agent saying so is a suggestion.
 
+### D-170 · The events are the record of what the history does not keep
+Refusals, held edits, failed checks and conflicts were already events;
+keeping the events on disk ([ADR 0016](adr/0016-search-and-numbers.md))
+gives the numbers the person asked for without a second way of saying
+what happened. Saves are left out: the history holds them, and they are
+most of the events. Search runs over what is there when asked, with no
+index of its own: a repository's history is read in memory already, and
+an index would be one more thing to keep in step.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

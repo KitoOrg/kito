@@ -107,6 +107,8 @@ with what comes with it, where a program named itself otherwise.
 | `instructions_history` | | Who changed which instruction, when, the text before and after (the last 200), the latest first | `instructions.rs` (`history`) |
 | `tasks` | `[state]` (`open` by default, `all`, `in_lane`, `ready`, `done`, `dropped`), `[for]` | The tasks (ADR 0015), each with its state, whom it is for, who took it up and its lanes | `tasks.rs` (`TaskInfo`) |
 | `task` | `task` (`task#3`) | One task, with what was said on it | `tasks.rs` (`TaskInfo`) |
+| `search` | `[q]` (words, all of them), `[kinds]`, `[since_ms]`, `[until_ms]`, `[who]`, `[where]`, `[outcome]`, `[limit]` | What matches (ADR 0016): reasons, changes, lanes, tasks, comments, notes, the best first | `insights.rs` |
+| `stats` | `[since_ms]`, `[until_ms]` | Lane flow by week and its medians, per assistant and model, busy files and functions, review | `insights.rs` |
 
 ## `write`
 

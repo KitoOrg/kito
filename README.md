@@ -289,6 +289,19 @@ up Claude Code, as it always did, and names the others found.
 install script asks the same question once, and writes the answer with
 `kito assistant default`.
 
+### Search and numbers
+
+```bash
+kito search prices cents                     # reasons, changes, lanes, tasks, comments, notes
+kito search --where src/shop.ts --since 30d  # what was done there this month
+kito search --who codex --outcome conflicted # lanes of Codex that met a conflict
+kito stats --since 4w                        # flow, each assistant and model, busy code, review
+kito stats --everywhere                      # every repository you may use on the server
+```
+
+What happens is kept as it happens (`.kito/activity.jsonl`, not in the
+project): the numbers start when a repository first runs 0.34.
+
 ### Tasks
 
 What needs doing, before anybody works on it:

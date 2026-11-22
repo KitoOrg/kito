@@ -46,4 +46,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0013 · Connecting by one address, signed in in the browser](0013-connect-by-address.md)
 - [0014 · Roles in each repository, and roles of the server](0014-roles.md)
 - [0015 · Tasks: what needs doing, and the lanes that do it](0015-tasks.md)
+- [0016 · Search and numbers over what a repository did](0016-search-and-numbers.md)
   (accepted)

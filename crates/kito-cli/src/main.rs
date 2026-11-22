@@ -238,6 +238,44 @@ enum Cmd {
         #[command(subcommand)]
         command: AssistantCmd,
     },
+    /// Search what was done here: reasons, lanes, tasks, comments, notes, changes
+    Search {
+        words: Vec<String>,
+        /// reason, lane, task, comment, note, change (again for more; default: all)
+        #[arg(long = "kind", value_name = "KIND")]
+        kinds: Vec<String>,
+        /// From when: 7d, 12h, 2w, or a day (2026-11-01)
+        #[arg(long)]
+        since: Option<String>,
+        /// Until when, as --since
+        #[arg(long)]
+        until: Option<String>,
+        /// A person, an agent, an assistant or a model
+        #[arg(long)]
+        who: Option<String>,
+        /// A file, a directory (src/) or a function (file:name)
+        #[arg(long = "where", value_name = "PLACE")]
+        place: Option<String>,
+        /// integrated, given_up, open, refused, conflicted, failed_checks
+        #[arg(long)]
+        outcome: Option<String>,
+        #[arg(long, default_value = "30")]
+        limit: usize,
+        /// Every repository you may use on the server this directory is connected to
+        #[arg(long)]
+        everywhere: bool,
+    },
+    /// The numbers: how lanes flow, each assistant and model, busy code, review
+    Stats {
+        /// From when: 7d, 12h, 2w, or a day (2026-11-01)
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        /// Every repository you may use on the server this directory is connected to
+        #[arg(long)]
+        everywhere: bool,
+    },
     /// Tasks: what needs doing here, and the lanes that do it
     Task {
         #[command(subcommand)]
@@ -3305,6 +3343,227 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
     Ok(())
 }
 
+/// `7d`, `12h`, `2w` before now, or a day (`2026-11-01`), in milliseconds since 1970.
+fn moment(given: &str) -> Result<u64, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let given = given.trim();
+    let unit = |c: char| match c {
+        'h' => Some(3_600_000u64),
+        'd' => Some(86_400_000),
+        'w' => Some(7 * 86_400_000),
+        _ => None,
+    };
+    if let Some(last) = given.chars().last() {
+        if let (Some(size), Ok(n)) = (unit(last), given[..given.len() - 1].parse::<u64>()) {
+            return Ok(now.saturating_sub(n * size));
+        }
+    }
+    let parts: Vec<u64> = given.split('-').filter_map(|part| part.parse().ok()).collect();
+    if let [year, month, day] = parts[..] {
+        if (1..=12).contains(&month) && (1..=31).contains(&day) {
+            // Days since 1970 of a date, by the civil calendar.
+            let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+            let era = y / 400;
+            let yoe = y - era * 400;
+            let doy = (153 * m + 2) / 5 + day - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            let days = era * 146_097 + doe - 719_468;
+            return Ok(days * 86_400_000);
+        }
+    }
+    Err(format!("`{given}` is no time: say 7d, 12h, 2w, or a day as 2026-11-01"))
+}
+
+/// The repositories a question goes to: this one, or with `everywhere`
+/// every one the person may use on the server this directory is connected to.
+fn asked_everywhere(
+    cli: &Cli,
+    method: &str,
+    params: &Value,
+    everywhere: bool,
+) -> Result<Vec<(String, Value)>, String> {
+    if !everywhere {
+        let answer: Value = daemon(cli)?.call(method, params.clone()).map_err(fail)?;
+        return Ok(vec![(String::new(), answer)]);
+    }
+    let root = root_of(cli)?;
+    let remote = Remote::load(&root).ok_or(
+        "--everywhere is for a directory connected to a server: it asks every repository you may use there",
+    )?;
+    let repos: Vec<String> =
+        Client::remote(&remote, false).map_err(fail)?.call("server.repos", json!({})).map_err(fail)?;
+    let mut answers = Vec::new();
+    for repo in repos {
+        let there = Remote { repo: repo.clone(), ..remote.clone() };
+        match Client::remote(&there, true).and_then(|mut client| client.call::<Value>(method, params.clone()))
+        {
+            Ok(answer) => answers.push((repo, answer)),
+            Err(e) => eprintln!("kito: {repo}: {e}"),
+        }
+    }
+    Ok(answers)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_search(
+    cli: &Cli,
+    words: &[String],
+    kinds: &[String],
+    since: &Option<String>,
+    until: &Option<String>,
+    who: &Option<String>,
+    place: &Option<String>,
+    outcome: &Option<String>,
+    limit: usize,
+    everywhere: bool,
+) -> Outcome {
+    let mut params = json!({ "q": words.join(" "), "kinds": kinds, "limit": limit });
+    if let Some(since) = since {
+        params["since_ms"] = json!(moment(since)?);
+    }
+    if let Some(until) = until {
+        params["until_ms"] = json!(moment(until)?);
+    }
+    for (key, value) in [("who", who), ("where", place), ("outcome", outcome)] {
+        if let Some(value) = value {
+            params[key] = json!(value);
+        }
+    }
+    let mut found: Vec<Value> = Vec::new();
+    for (repo, answer) in asked_everywhere(cli, "search", &params, everywhere)? {
+        for mut hit in answer.as_array().cloned().unwrap_or_default() {
+            if !repo.is_empty() {
+                hit["repo"] = json!(repo);
+            }
+            found.push(hit);
+        }
+    }
+    if everywhere {
+        found.sort_by_key(|hit| std::cmp::Reverse(hit["at_ms"].as_u64().unwrap_or(0)));
+        found.truncate(limit);
+    }
+    if cli.json {
+        print_json(&found);
+        return Ok(());
+    }
+    if found.is_empty() {
+        println!("Nothing found.");
+    }
+    for hit in &found {
+        let text = |key: &str| hit[key].as_str().unwrap_or_default();
+        let id = [text("id"), text("lane"), text("checkpoint")]
+            .into_iter()
+            .find(|id| !id.is_empty())
+            .unwrap_or("");
+        let when = hit["at_ms"]
+            .as_u64()
+            .map(utc)
+            .map(|at| at.chars().take(10).collect::<String>())
+            .unwrap_or_else(|| "          ".to_owned());
+        let by = match &hit["by"] {
+            Value::Array(all) => all.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+            other => other.as_str().unwrap_or_default().to_owned(),
+        };
+        let repo = if text("repo").is_empty() { String::new() } else { format!("{} · ", text("repo")) };
+        let outcome = match &hit["outcome"] {
+            Value::Array(all) => {
+                format!("  [{}]", all.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+            }
+            Value::String(one) => format!("  [{one}]"),
+            _ => String::new(),
+        };
+        println!(
+            "{:<8} {repo}{:<12} {when}  {by}: {}{outcome}",
+            text("kind"),
+            id,
+            text("title").lines().next().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn cmd_stats(cli: &Cli, since: &Option<String>, until: &Option<String>, everywhere: bool) -> Outcome {
+    let mut params = json!({});
+    if let Some(since) = since {
+        params["since_ms"] = json!(moment(since)?);
+    }
+    if let Some(until) = until {
+        params["until_ms"] = json!(moment(until)?);
+    }
+    let answers = asked_everywhere(cli, "stats", &params, everywhere)?;
+    if cli.json {
+        let all: serde_json::Map<String, Value> = answers
+            .into_iter()
+            .map(|(repo, answer)| (if repo.is_empty() { "this".to_owned() } else { repo }, answer))
+            .collect();
+        print_json(&Value::Object(all));
+        return Ok(());
+    }
+    let span = |ms: &Value| ms.as_u64().map(seconds).unwrap_or_else(|| "—".to_owned());
+    for (repo, stats) in &answers {
+        if !repo.is_empty() {
+            println!("== {repo}");
+        }
+        let flow = &stats["flow"];
+        let weeks = flow["weeks"].as_array().cloned().unwrap_or_default();
+        let sum = |key: &str| weeks.iter().map(|week| week[key].as_u64().unwrap_or(0)).sum::<u64>();
+        println!(
+            "Lanes: {} opened, {} integrated, {} given up; {} open now.",
+            sum("opened"),
+            sum("integrated"),
+            sum("given_up"),
+            flow["open_now"]
+        );
+        println!(
+            "From open to integrated: {} (median); waiting to go in: {}; to a first review: {}.",
+            span(&flow["median_open_to_integrated_ms"]),
+            span(&flow["median_waiting_ms"]),
+            span(&flow["median_to_first_review_ms"])
+        );
+        if let Some(from) = stats["kept_from_ms"].as_u64() {
+            println!("(Counted from {}, when Kito began keeping what happened.)", utc(from));
+        }
+        println!("\nBy assistant and model:");
+        for row in stats["assistants"].as_array().into_iter().flatten() {
+            let model = row["model"].as_str().map(|model| format!(" · {model}")).unwrap_or_default();
+            println!(
+                "  {}{model}: {} lanes, {} integrated ({:.0}%), {} conflicts, {} refused, {} held back, {} failed checks",
+                row["assistant"].as_str().unwrap_or("?"),
+                row["lanes"],
+                row["integrated"],
+                row["integration_rate"].as_f64().unwrap_or(0.0) * 100.0,
+                row["conflicts"],
+                row["refused"],
+                row["held"],
+                row["failed_checks"]
+            );
+        }
+        println!("\nWhere the code is busy:");
+        for file in stats["hotspots"]["files"].as_array().into_iter().flatten().take(8) {
+            println!(
+                "  {:<40} {} lanes, {} conflicts",
+                file["path"].as_str().unwrap_or(""),
+                file["lanes"],
+                file["conflicts"]
+            );
+        }
+        println!("\nReview:");
+        for row in stats["review"].as_array().into_iter().flatten() {
+            println!(
+                "  {}: {} approved, {} asked for changes, first look after {}",
+                row["who"].as_str().unwrap_or("?"),
+                row["approved"],
+                row["changes_requested"],
+                span(&row["median_ms"])
+            );
+        }
+        println!();
+    }
+    Ok(())
+}
+
 /// A task as a line of a list: `task#3  in a lane  Prices in cents  (for bob; lane/2)`.
 fn task_line(task: &Value) -> String {
     let state = match task["state"].as_str().unwrap_or("open") {
@@ -4590,6 +4849,10 @@ fn run() -> ExitCode {
         Cmd::Claude => cmd_claude(&cli),
         Cmd::Instructions { command } => cmd_instructions(&cli, command.as_ref()),
         Cmd::Task { command } => cmd_task(&cli, command.as_ref()),
+        Cmd::Search { words, kinds, since, until, who, place, outcome, limit, everywhere } => {
+            cmd_search(&cli, words, kinds, since, until, who, place, outcome, *limit, *everywhere)
+        }
+        Cmd::Stats { since, until, everywhere } => cmd_stats(&cli, since, until, *everywhere),
         Cmd::Members => cmd_members(&cli),
         Cmd::Grant { name, role } => cmd_grant(&cli, name, Some(role)),
         Cmd::Revoke { name } => cmd_grant(&cli, name, None),

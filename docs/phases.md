@@ -2605,6 +2605,35 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 33 · search and numbers — done
+
+The person asked to search what was done and to count it: per
+repository and across a server, on the command line, in the web client
+and for agents. Released as 0.34.0
+([ADR 0016](adr/0016-search-and-numbers.md), D-170).
+
+### What is there
+
+- `.kito/activity.jsonl`: every event but saves; `edit_held` for an
+  edit held back once.
+- `search`: reasons and their changes, lanes, tasks, comments, notes, by
+  words, kind, time, who, where and outcome.
+- `stats`: lane flow, per assistant and model, hotspots, review.
+- `kito search`, `kito stats` (`--everywhere` on a connected
+  directory); the MCP tool `search`.
+
+### How it was tested
+
+- `kitod` unit tests: the activity kept and read, a lane's story.
+- `kito-cli/tests/cli.rs`: a lane integrated for a task and one given
+  up, found by words, place, who and outcome, and counted.
+
+### Known limitations
+
+- **The numbers start with this version**: before, nothing was kept.
+- **The activity log is not pruned.**
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 32 · tasks — done
 
 Nothing in Kito said what needs doing before a lane was opened. The
