@@ -6,6 +6,9 @@ of a version are its section here.
 
 ## [0.39.1]
 
+The first release since 0.38.0: it carries 0.39.0 too (plugins of a
+server that work on their own, `git_sync`), which CHANGELOG.md describes.
+
 - **A way to sign in that is not set up is said so.** The server asks
   each sign-in plugin `sign-in ready` when it lists them, and `/-/sign-in`
   carries `ready` (and `why`): a client does not offer one that could
