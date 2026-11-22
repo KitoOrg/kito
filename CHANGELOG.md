@@ -4,7 +4,7 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
-## [Unreleased]
+## [0.37.0]
 
 - **The command line has Kito's look**: `kito --help` starts with the
   logo (three lanes that become one line, ending in a dot), the name and
