@@ -53,6 +53,12 @@ fn token_in(printed: &str) -> String {
 
 /// The plugin of the tests, installed for the user the server runs as.
 fn install_hello(dir: &Path, manifest: &str) {
+    install_as(dir, "hello", manifest);
+}
+
+/// The plugin of the tests under a name of its own: the same program, and
+/// the manifest given, which says that name.
+fn install_as(dir: &Path, plugin: &str, manifest: &str) {
     let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
     let built = Path::new(env!("CARGO_BIN_EXE_kito-server")).with_file_name("examples").join(&name);
     static BUILD: std::sync::Once = std::sync::Once::new();
@@ -65,10 +71,25 @@ fn install_hello(dir: &Path, manifest: &str) {
             assert!(status.success(), "building kito-hello");
         }
     });
-    let plugin = dir.join(".personal-config/plugins/hello");
-    fs::create_dir_all(&plugin).unwrap();
-    fs::copy(built, plugin.join(&name)).unwrap();
-    fs::write(plugin.join("kito-plugin.toml"), manifest).unwrap();
+    let installed = dir.join(".personal-config/plugins").join(plugin);
+    fs::create_dir_all(&installed).unwrap();
+    fs::copy(built, installed.join(format!("kito-{plugin}{}", std::env::consts::EXE_SUFFIX))).unwrap();
+    fs::write(installed.join("kito-plugin.toml"), manifest).unwrap();
+}
+
+/// Puts the plugin of the tests behind a script that waits `seconds`
+/// before it is the plugin, when it is run for `slow` (its first
+/// argument, or its first two): a plugin that takes its time.
+#[cfg(unix)]
+fn slow_hello(dir: &Path, slow: &str, seconds: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let installed = dir.join(".personal-config/plugins/hello");
+    fs::rename(installed.join("kito-hello"), installed.join("hello-itself")).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$1 $2\" in \"{slow}\"*) sleep {seconds};; esac\nexec \"$(dirname \"$0\")/hello-itself\" \"$@\"\n"
+    );
+    fs::write(installed.join("kito-hello"), script).unwrap();
+    fs::set_permissions(installed.join("kito-hello"), fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// A server with a repository, ada who may integrate and carol who may
@@ -78,6 +99,8 @@ struct Served {
     dir: PathBuf,
     child: Child,
     http: String,
+    /// Where it listens for clients.
+    clients: String,
     ada: String,
     carol: String,
 }
@@ -109,8 +132,9 @@ impl Served {
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let (mut line, mut second) = (String::new(), String::new());
+        let mut said = BufReader::new(child.stdout.take().unwrap());
+        said.read_line(&mut line).unwrap();
         // kito-server: http://127.0.0.1:<port>, <pages>
         let http = line
             .trim()
@@ -118,7 +142,38 @@ impl Served {
             .and_then(|rest| rest.split(',').next())
             .unwrap_or_else(|| panic!("{line:?}"))
             .to_owned();
-        Served { _tmp: tmp, dir, child, http, ada, carol }
+        // kito-server: listening on 127.0.0.1:<port>, ...
+        said.read_line(&mut second).unwrap();
+        let clients = second
+            .trim()
+            .strip_prefix("kito-server: listening on ")
+            .and_then(|rest| rest.split(',').next())
+            .unwrap_or_else(|| panic!("{second:?}"))
+            .to_owned();
+        Served { _tmp: tmp, dir, child, http, clients, ada, carol }
+    }
+
+    /// A session opened in a browser with a token: its cookie.
+    fn session(&self, token: &str) -> String {
+        let opened = self.request("POST", "/-/session", &[], Some(&json!({ "token": token })));
+        let value = opened
+            .head
+            .lines()
+            .find_map(|line| line.strip_prefix("set-cookie: kito_session="))
+            .unwrap_or_else(|| panic!("{}{}", opened.head, opened.body));
+        format!("kito_session={}", value.split(';').next().unwrap())
+    }
+
+    /// One of `/-/people`, asked as a page would with these headers, or
+    /// with a token.
+    fn people(&self, headers: &[(&str, &str)], method: &str, params: Value) -> Answer {
+        let call = json!({ "method": method, "params": params });
+        self.request("POST", "/-/people", headers, Some(&call))
+    }
+
+    /// Who the server says asks with these headers.
+    fn me(&self, headers: &[(&str, &str)]) -> Answer {
+        self.request("GET", "/-/me", headers, None)
     }
 
     fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&Value>) -> Answer {
@@ -157,6 +212,42 @@ impl Drop for Served {
         if let Ok(mut daemon) = kitod::client::Client::connect(&self.dir.join("repos/shop")) {
             let _ = daemon.call_value("shutdown", json!({}));
         }
+    }
+}
+
+/// A client's connection as it travels, in the clear: a line of JSON
+/// each way. What the server says when it ends one is read as it is.
+struct Wire {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+    asked: u64,
+}
+
+impl Wire {
+    /// Says hello with a token, about no repository: the connection, and
+    /// what the server answered.
+    fn open(address: &str, token: &str) -> (Wire, Value) {
+        let stream = TcpStream::connect(address).unwrap();
+        let mut wire = Wire { reader: BufReader::new(stream.try_clone().unwrap()), writer: stream, asked: 0 };
+        let greeting = wire.say(&json!({ "hello": { "version": 1, "token": token } }));
+        (wire, greeting)
+    }
+
+    /// Sends a line and reads one; `Null`: the server closed the connection.
+    fn say(&mut self, message: &Value) -> Value {
+        if writeln!(self.writer, "{message}").is_err() {
+            return Value::Null;
+        }
+        let mut line = String::new();
+        let _ = self.reader.read_line(&mut line);
+        serde_json::from_str(&line).unwrap_or(Value::Null)
+    }
+
+    /// Asks one thing: the line that came back, a result, an error, or
+    /// the end of the connection with why.
+    fn ask(&mut self, method: &str, params: Value) -> Value {
+        self.asked += 1;
+        self.say(&json!({ "jsonrpc": "2.0", "id": self.asked, "method": method, "params": params }))
     }
 }
 
@@ -378,15 +469,30 @@ fn pages_are_passed_on_to_the_plugin_that_serves_them() {
         wrote.body
     );
     // Of the server itself it is given nothing: its people, its
-    // repositories and its log are a person's to ask.
-    for method in ["server.people", "server.repos_all", "server.repo_add", "server.audit", "server.grant"] {
+    // repositories and its log are a person's to ask. So is how a person
+    // signs in: asked with nobody named, it would be the token of
+    // whoever is called as the plugin is.
+    let namesake = token_in(&ok(&served.dir, &["user", "add", "hello"]));
+    for method in [
+        "server.people",
+        "server.repos_all",
+        "server.repo_add",
+        "server.audit",
+        "server.grant",
+        "server.people_link",
+        "server.people_unlink",
+        "server.people_token",
+    ] {
         let asked = page(&format!("/ask/shop/{method}"), &[]);
         assert!(
             asked.body.starts_with("asked=HTTP/1.1 403") && asked.body.contains("is for a person"),
             "{method}: {}",
             asked.body
         );
+        assert!(!asked.body.contains("kito_"), "{method}: {}", asked.body);
     }
+    let theirs = format!("Bearer {namesake}");
+    assert_eq!(served.me(&[("Authorization", &theirs)]).json()["user"], "hello");
     // Who uses the repository is for a plugin that was given `admin`.
     let members = page("/ask/shop/server.members", &[]);
     assert!(
@@ -479,6 +585,11 @@ fn http_is_encrypted_with_the_server_s_certificate() {
     let _ = child.wait();
     assert!(nobody.contains("nobody is signed in"), "{nobody}");
     assert!(known.contains("\"user\":\"ada\""), "{known}");
+    // How a client connects here is said with it: the fingerprint the
+    // server is known by, which `kito-server fingerprint` prints.
+    let print = ok(&dir, &["fingerprint"]).trim().to_owned();
+    assert!(known.contains(&format!("\"fingerprint\":\"{print}\"")), "{known}");
+    assert!(known.contains("\"plain\":false") && known.contains("\"port\":\""), "{known}");
     let cookie = opened
         .lines()
         .find(|line| line.to_lowercase().starts_with("set-cookie: kito_session="))
@@ -616,6 +727,565 @@ fn somebody_signs_in_in_a_browser_as_who_a_plugin_says_they_are() {
     assert!(!fs::read_to_string(served.dir.join("sessions.toml")).unwrap().contains("bob"));
 }
 
+const LINKS: &str = r#"name = "hello"
+version = "0.6.1"
+api = 1
+permissions = ["sign_in", "server_events"]
+
+[sign_in]
+method = "hello"
+about = "Sign in with hello"
+
+[[server_event]]
+kinds = ["session_ended", "identity_linked", "identity_unlinked", "token_changed", "token_removed"]
+"#;
+
+/// The browser back from hello, where `login` signed in: what the server
+/// answers it, with the cookies it brings.
+fn back_from_hello(served: &Served, login: &str, cookies: &str) -> Answer {
+    let back = format!("/-/sign-in/hello/callback?code={login}&state=left-1");
+    served.request("GET", &back, &[("Cookie", cookies)], None)
+}
+
+/// Somebody signs in with hello in a browser: the id of their session.
+fn signed_in_with_hello(served: &Served, login: &str) -> String {
+    let signed = back_from_hello(served, login, "kito_sign_in=left-1");
+    let id = signed
+        .head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: kito_session="))
+        .unwrap_or_else(|| panic!("{}{}", signed.head, signed.body));
+    id.split(';').next().unwrap().to_owned()
+}
+
+/// What the audit log keeps, each line as `<who> <kind> <what>`; and
+/// everything under `audit/`, as it is on the disk.
+fn audited(dir: &Path) -> (Vec<String>, String) {
+    let lines = ok(dir, &["audit", "--limit", "200"])
+        .lines()
+        .map(|line| line.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        .collect();
+    let kept = fs::read_dir(dir.join("audit"))
+        .unwrap()
+        .map(|file| fs::read_to_string(file.unwrap().path()).unwrap_or_default())
+        .collect();
+    (lines, kept)
+}
+
+/// What the plugin of the tests was told so far, a line for each event.
+/// The plugins are told once whoever asked has their answer: waited for,
+/// until there are `at_least`.
+fn told(served: &Served, at_least: usize) -> Vec<String> {
+    let log = served.dir.join("plugins/hello/events.log");
+    let mut lines = Vec::new();
+    for _ in 0..800 {
+        lines = fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect();
+        if lines.len() >= at_least {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    lines
+}
+
+/// Every run of 64 hex digits in a text: what a file keeps of tokens, of
+/// sessions and of links.
+fn hashes_in(text: &str) -> Vec<String> {
+    let words = text.split(|c: char| !c.is_ascii_hexdigit());
+    words.filter(|word| word.len() == 64).map(str::to_owned).collect()
+}
+
+#[test]
+fn a_change_of_how_somebody_signs_in_ends_what_was_opened_before_it() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        // carol has a token; from now on she signs in with hello too.
+        let said = ok(dir, &["user", "link", "carol", "hello:carol"]);
+        assert!(said.contains("Whoever signs in as hello:carol is carol from now on."), "{said}");
+        assert!(said.contains("carol signs in with a token or as hello:carol."), "{said}");
+        let listed = ok(dir, &["user", "list"]);
+        assert!(listed.contains("carol [token, hello:carol] (member): shop (read)"), "{listed}");
+    });
+    let changed = "carol's token was changed: connect again with the new one";
+    let unknown = "this token is not one the server knows";
+
+    // Three sessions of hers: a browser's opened with her token, another
+    // browser's opened by signing in, and a command line's.
+    let tab = served.session(&served.carol);
+    let other = format!("kito_session={}", signed_in_with_hello(&served, "carol"));
+    let command_line = signed_in_with_hello(&served, "carol");
+    // And connections of clients: two opened with her token, one with a session.
+    let (mut with_token, greeting) = Wire::open(&served.clients, &served.carol);
+    assert_eq!(greeting["ok"]["user"], "carol", "{greeting}");
+    let (mut with_session, greeting) = Wire::open(&served.clients, &command_line);
+    assert_eq!(greeting["ok"]["user"], "carol", "{greeting}");
+    let remote = kitod::client::Remote {
+        server: Some(served.clients.clone()),
+        repo: "shop".to_owned(),
+        token: Some(served.carol.clone()),
+        plain: true,
+        ..Default::default()
+    };
+    let mut client = kitod::client::Client::remote(&remote, true).unwrap();
+    assert_eq!(with_token.ask("server.whoami", json!({}))["result"]["user"], "carol");
+    assert_eq!(with_session.ask("server.whoami", json!({}))["result"]["user"], "carol");
+    assert_eq!(client.call_value("server.whoami", json!({})).unwrap()["user"], "carol");
+
+    // She asks for a new token from the first browser: said this once.
+    let page = [("Cookie", tab.as_str()), ("X-Kito", "1")];
+    let renewed = served.people(&page, "server.people_token", json!({}));
+    assert_eq!(renewed.status, 200, "{}", renewed.body);
+    let new = renewed.json()["token"].as_str().unwrap_or_else(|| panic!("{}", renewed.body)).to_owned();
+    assert_eq!(renewed.json(), json!({ "user": "carol", "token": new }));
+    assert!(new.starts_with("kito_") && new.len() == 5 + 64 && new != served.carol, "{new}");
+
+    // At once: the browser she asked from goes on, her other sessions ended.
+    assert_eq!(served.me(&[("Cookie", &tab)]).json()["user"], "carol");
+    assert_eq!(served.me(&[("Cookie", &other)]).status, 401);
+    let as_command_line = format!("Bearer {command_line}");
+    assert_eq!(served.me(&[("Authorization", &as_command_line)]).status, 401);
+    // What was opened with the token she had is refused at its next
+    // request and told why, and so is what was opened with a session
+    // that ended. Nothing more is answered there.
+    assert_eq!(with_token.ask("server.whoami", json!({})), json!({ "error": changed }));
+    assert_eq!(with_token.ask("server.whoami", json!({})), Value::Null);
+    let ended = json!({ "error": "this session ended: sign in again (`kito sign-in`)" });
+    assert_eq!(with_session.ask("server.whoami", json!({})), ended);
+    assert!(client.call_value("server.whoami", json!({})).is_err());
+    // The token she had opens nothing more; the new one does.
+    assert_eq!(Wire::open(&served.clients, &served.carol).1, json!({ "error": unknown }));
+    let as_before = format!("Bearer {}", served.carol);
+    assert_eq!(served.me(&[("Authorization", &as_before)]).status, 401);
+    let opening = json!({ "token": served.carol });
+    assert_eq!(served.request("POST", "/-/session", &[], Some(&opening)).status, 401);
+    let (mut mine, greeting) = Wire::open(&served.clients, &new);
+    assert_eq!(greeting["ok"]["user"], "carol", "{greeting}");
+    let (mut beside, _) = Wire::open(&served.clients, &new);
+
+    // The connection that asks for its own new token is told it, and
+    // goes on; one opened beside it with the same token does not. It was
+    // asked through no session: the browser's ended with the others.
+    let again = mine.ask("server.people_token", json!({ "user": "carol" }));
+    let newer = again["result"]["token"].as_str().unwrap_or_else(|| panic!("{again}")).to_owned();
+    assert!(newer.starts_with("kito_") && newer != new && newer != served.carol, "{again}");
+    assert_eq!(mine.ask("server.whoami", json!({}))["result"]["user"], "carol");
+    assert_eq!(beside.ask("server.whoami", json!({})), json!({ "error": changed }));
+    assert_eq!(served.me(&[("Cookie", &tab)]).status, 401);
+
+    // An identity unlinked ends her sessions too: one of them may have
+    // been opened with it. Her token is hers still, and what it opened.
+    let signed = format!("kito_session={}", signed_in_with_hello(&served, "carol"));
+    let how = served.me(&[("Cookie", &signed)]).json()["signs_in"].clone();
+    assert_eq!(how, json!({ "token": true, "logins": ["hello:carol"] }));
+    let unlinked = mine.ask("server.people_unlink", json!({ "method": "hello" }));
+    assert_eq!(unlinked["result"], json!({ "user": "carol", "token": true, "logins": [] }), "{unlinked}");
+    assert_eq!(served.me(&[("Cookie", &signed)]).status, 401);
+    assert_eq!(mine.ask("server.whoami", json!({}))["result"]["user"], "carol");
+    let nobody = back_from_hello(&served, "carol", "kito_sign_in=left-1");
+    assert_eq!(nobody.status, 403, "{}", nobody.body);
+    assert!(nobody.body.contains("hello:carol is nobody on this server"), "{}", nobody.body);
+
+    // Never nothing: her token is all she signs in with now.
+    let no = mine.ask("server.people_token", json!({ "remove": true }));
+    let why = no["error"]["message"].as_str().unwrap_or_else(|| panic!("{no}"));
+    assert_eq!(why, "carol would have no way to sign in: link an identity to them first");
+    assert_eq!(mine.ask("server.whoami", json!({}))["result"]["user"], "carol");
+
+    // With an identity again, she takes her token away from a browser:
+    // the session she asks through goes on, and what the token opened is
+    // refused at its next request. (The plugins are told of a change
+    // once it is answered: what the server's machine does now comes
+    // after what they were to hear before.)
+    assert_eq!(told(&served, 8).len(), 8);
+    ok(&served.dir, &["user", "link", "carol", "hello:carol"]);
+    let last = format!("kito_session={}", signed_in_with_hello(&served, "carol"));
+    let page = [("Cookie", last.as_str()), ("X-Kito", "1")];
+    let removed = served.people(&page, "server.people_token", json!({ "remove": true }));
+    assert_eq!(removed.status, 200, "{}", removed.body);
+    assert_eq!(removed.json(), json!({ "user": "carol", "token": null }));
+    let how = served.me(&[("Cookie", &last)]).json()["signs_in"].clone();
+    assert_eq!(how, json!({ "token": false, "logins": ["hello:carol"] }));
+    let gone = "carol has no token any more: sign in instead (`kito sign-in <method>`)";
+    assert_eq!(mine.ask("server.whoami", json!({})), json!({ "error": gone }));
+    assert_eq!(Wire::open(&served.clients, &newer).1, json!({ "error": unknown }));
+    let listed = ok(&served.dir, &["user", "list"]);
+    assert!(listed.contains("carol [hello:carol] (member): shop (read)"), "{listed}");
+    // Her identity is all she signs in with now: it stays.
+    let no = served.people(&page, "server.people_unlink", json!({ "method": "hello" }));
+    assert_eq!(no.status, 403, "{}", no.body);
+    assert!(no.body.contains("carol would have no way to sign in: give them a token first"), "{}", no.body);
+
+    // A first token ends nothing: there was none to open anything with.
+    // Asked through `/-/api` too, the session it comes through is kept.
+    let second = format!("kito_session={}", signed_in_with_hello(&served, "carol"));
+    let call = json!({ "method": "server.people_token" });
+    let first = served.request("POST", "/-/api/shop", &page, Some(&call));
+    assert_eq!(first.status, 200, "{}", first.body);
+    let first = first.json()["token"].as_str().unwrap().to_owned();
+    assert_eq!(served.me(&[("Cookie", &last)]).json()["user"], "carol");
+    assert_eq!(served.me(&[("Cookie", &second)]).json()["user"], "carol");
+    assert_eq!(Wire::open(&served.clients, &first).1["ok"]["user"], "carol");
+
+    // The plugins that listen were told each change, then each session
+    // it ended.
+    assert_eq!(
+        told(&served, 11),
+        [
+            "identity_linked carol: hello:carol",
+            "token_changed carol",
+            "session_ended carol",
+            "session_ended carol",
+            "token_changed carol",
+            "session_ended carol",
+            "identity_unlinked carol: hello:carol",
+            "session_ended carol",
+            "identity_linked carol: hello:carol",
+            "token_removed carol",
+            "token_changed carol, who had none",
+        ]
+    );
+    // And the log keeps who did what to whom, never a token or a session.
+    let (lines, kept) = audited(&served.dir);
+    for line in [
+        "the server's machine identity_linked carol: hello:carol",
+        "carol token_changed carol",
+        "carol identity_unlinked carol: hello:carol",
+        "carol token_removed carol",
+        "carol token_changed carol, who had none",
+    ] {
+        assert!(lines.iter().any(|kept| kept == line), "no `{line}` in {lines:#?}");
+    }
+    for secret in [&served.carol, &new, &newer, &first, &command_line] {
+        assert!(!kept.contains(secret.as_str()), "a token in the audit log");
+    }
+    assert!(!kept.contains("kito_") && !kept.contains("kitos_"), "{kept}");
+}
+
+#[test]
+fn somebody_links_an_account_of_their_own_by_signing_in_to_it() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        ok(dir, &["user", "add", "bob", "--identity", "hello:bob"]);
+    });
+    // How somebody signs in is said to them, never the token itself; and
+    // how a client connects here, to whoever is signed in: it is no secret.
+    let as_carol = format!("Bearer {}", served.carol);
+    let me = served.me(&[("Authorization", &as_carol)]).json();
+    assert_eq!(me["signs_in"], json!({ "token": true, "logins": [] }));
+    let port = served.clients.rsplit(':').next().unwrap();
+    assert_eq!(me["clients"], json!({ "port": port, "plain": true, "fingerprint": null }));
+    assert_eq!(me["admin"], false);
+
+    // An account is linked by somebody signed in in this browser: not by
+    // nobody, and not by whoever holds a token.
+    let holder = [("Authorization", as_carol.as_str())];
+    for headers in [&[][..], &holder[..]] {
+        let refused = served.request("GET", "/-/sign-in/hello?link=1", headers, None);
+        assert_eq!(refused.status, 401, "{}", refused.body);
+        assert!(refused.body.contains("nobody is signed in: sign in first"), "{}", refused.body);
+        assert!(!refused.head.contains("set-cookie"), "{}", refused.head);
+    }
+
+    // carol, signed in, is sent to the provider as for signing in. What
+    // is kept for the way back says it is a link, with a value made for
+    // this link and no other: the server keeps what it hashes to, with
+    // the session the link was asked from.
+    let tab = served.session(&served.carol);
+    let sessions = || fs::read_to_string(served.dir.join("sessions.toml")).unwrap();
+    let before = sessions();
+    let leave = |session: &str| -> String {
+        let left = served.request("GET", "/-/sign-in/hello?link=1", &[("Cookie", session)], None);
+        assert_eq!(left.status, 302, "{}", left.body);
+        let to = "location: https://hello.example/authorize?state=left-1&redirect_uri=http://";
+        assert!(left.head.contains(to), "{}", left.head);
+        let kept = left
+            .head
+            .lines()
+            .find_map(|line| line.strip_prefix("set-cookie: "))
+            .unwrap_or_else(|| panic!("{}", left.head));
+        assert!(kept.contains("; path=/-/sign-in; httponly; samesite=lax; max-age=600"), "{kept}");
+        kept.split(';').next().unwrap().to_owned()
+    };
+    let value_of = |kept: &str| -> String {
+        let value = kept.strip_prefix("kito_sign_in=left-1:").unwrap_or_else(|| panic!("{kept}"));
+        assert!(value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()), "{kept}");
+        value.to_owned()
+    };
+    let signs_in = |bearer: &str| served.me(&[("Authorization", bearer)]).json()["signs_in"].clone();
+    let waits_no_more =
+        "Nothing was linked: no link waits for this browser: it was used already, it is more \
+                         than ten minutes old, or whoever asked for it is no longer signed in here.";
+    let refused = |no: Answer, why: &str| {
+        assert_eq!(no.status, 403, "{}", no.body);
+        assert!(no.head.contains("content-type: text/html"), "{}", no.head);
+        assert!(no.body.contains(why) && !no.body.contains("http-equiv"), "{}", no.body);
+        assert!(!no.head.contains("kito_session=") && no.head.contains("set-cookie: kito_sign_in=; "));
+    };
+    // A link asked again is the one that waits: the one before is forgotten.
+    let (forgotten, kept) = (leave(&tab), leave(&tab));
+    let mut values = vec![value_of(&forgotten), value_of(&kept)];
+    assert_ne!(values[0], values[1]);
+    refused(back_from_hello(&served, "carol", &forgotten), waits_no_more);
+
+    // What the server keeps brings nobody back: not what a session's
+    // token hashes to, which is in `sessions.toml` and in every backup,
+    // and not what the link's value does. Whoever reads the disk and
+    // signs in to an account of their own is nobody's link.
+    let waiting = sessions();
+    assert!(waiting.contains(".link]") && !waiting.contains(&values[1]), "{waiting}");
+    let on_disk = hashes_in(&waiting);
+    assert!(on_disk.len() >= 2 && !tab.contains(&values[1]), "{waiting}");
+    for kept in on_disk {
+        refused(back_from_hello(&served, "mallory", &format!("kito_sign_in=left-1:{kept}")), waits_no_more);
+    }
+    assert_eq!(signs_in(&as_carol), json!({ "token": true, "logins": [] }));
+    assert_eq!(sessions(), waiting, "a value nobody waits for changed what waits");
+
+    // An account that is another person's stays theirs: a page says so
+    // in words, with a way back, and nothing changed. The value was used
+    // all the same: it brings a browser back once, whatever follows.
+    let said = "<p>Nothing was linked: hello:bob is bob already. <a href=\"/\">Go back</a>.</p>";
+    refused(back_from_hello(&served, "bob", &kept), said);
+    assert_eq!(signs_in(&as_carol), json!({ "token": true, "logins": [] }));
+    assert_eq!(sessions(), before);
+    refused(back_from_hello(&served, "carol", &kept), waits_no_more);
+    // So does one whose owner said no at the provider.
+    let kept = leave(&tab);
+    values.push(value_of(&kept));
+    refused(back_from_hello(&served, "refuse", &kept), "Nothing was linked: they said no at hello.");
+
+    // Her own is attached to who she is. The way back starts on the
+    // provider's site, so the session's cookie is not with it; no session
+    // is opened, and the page goes on to the server's.
+    let kept = leave(&tab);
+    values.push(value_of(&kept));
+    let linked = back_from_hello(&served, "carol", &kept);
+    assert_eq!(linked.status, 200, "{}", linked.body);
+    assert!(linked.body.contains("<meta http-equiv=\"refresh\" content=\"0;url=/\">"), "{}", linked.body);
+    let said = "<p>Whoever signs in as hello:carol is carol from now on. <a href=\"/\">Go on</a>.</p>";
+    assert!(linked.body.contains(said), "{}", linked.body);
+    assert!(!linked.head.contains("kito_session="), "{}", linked.head);
+    assert!(linked.head.contains("set-cookie: kito_sign_in=; "), "{}", linked.head);
+    assert_eq!(sessions(), before);
+    assert_eq!(signs_in(&as_carol), json!({ "token": true, "logins": ["hello:carol"] }));
+    let config = fs::read_to_string(served.dir.join("server.toml")).unwrap();
+    assert!(config.contains("identities = [\"hello:id-carol\"]"), "{config}");
+    // Once, and not twice.
+    refused(back_from_hello(&served, "carol", &kept), waits_no_more);
+    // The plugins that listen hear of it once she has her answer.
+    assert_eq!(told(&served, 1), ["identity_linked carol: hello:carol"]);
+    // From then on whoever signs in with it is her.
+    let hers = format!("Bearer {}", signed_in_with_hello(&served, "carol"));
+    assert_eq!(served.me(&[("Authorization", &hers)]).json()["user"], "carol");
+
+    // Linked again, it is hers already: nothing changes, and she goes
+    // on. Another account of the same way is one too many.
+    let kept = leave(&tab);
+    let again = back_from_hello(&served, "carol", &format!("{kept}; {tab}"));
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert!(again.body.contains("hello:carol is carol already. <a href=\"/\">Go on</a>."), "{}", again.body);
+    let said = "Nothing was linked: carol signs in with hello:carol already, and a person has one identity \
+                of each way: unlink it first.";
+    refused(back_from_hello(&served, "carla", &leave(&tab)), said);
+    assert_eq!(signs_in(&as_carol), json!({ "token": true, "logins": ["hello:carol"] }));
+
+    // A link is for whoever asked for it, while they are signed in: not
+    // for another session of the browser, and not once theirs has ended.
+    let as_ada = format!("Bearer {}", served.ada);
+    let ada = served.session(&served.ada);
+    let said = "Nothing was linked: whoever asked for this link is no longer signed in here.";
+    refused(back_from_hello(&served, "ada", &format!("{}; {tab}", leave(&ada))), said);
+    let kept = leave(&ada);
+    values.push(value_of(&kept));
+    assert_eq!(served.request("DELETE", "/-/session", &[("Cookie", &ada)], None).status, 200);
+    refused(back_from_hello(&served, "ada", &kept), waits_no_more);
+    assert_eq!(signs_in(&as_ada), json!({ "token": true, "logins": [] }));
+    // And none begins for a session that has ended.
+    let nobody = served.request("GET", "/-/sign-in/hello?link=1", &[("Cookie", &ada)], None);
+    assert_eq!(nobody.status, 401, "{}", nobody.body);
+
+    // Who comes back is who left, for a link as for signing in; and
+    // without `link=1` the flow is what it was.
+    let stranger = back_from_hello(&served, "carol", "kito_sign_in=another:0000");
+    assert_eq!(stranger.status, 403, "{}", stranger.body);
+    assert!(stranger.body.contains("this sign-in did not start in this browser"), "{}", stranger.body);
+    for path in ["/-/sign-in/hello", "/-/sign-in/hello?link=0", "/-/sign-in/hello?other=1"] {
+        let left = served.request("GET", path, &[("Cookie", &tab)], None);
+        assert!(left.head.contains("set-cookie: kito_sign_in=left-1; path=/-/sign-in"), "{}", left.head);
+    }
+
+    // The admins see how each person signs in; the plugins that listen
+    // were told of the link, and the log keeps who linked what.
+    ok(&served.dir, &["user", "role", "ada", "admin"]);
+    let people = served.people(&[("Authorization", &as_ada)], "server.people", json!({})).json();
+    let how = |name: &str| {
+        let them = people.as_array().unwrap().iter().find(|them| them["user"] == name).unwrap();
+        (them["token"].clone(), them["logins"].clone())
+    };
+    assert_eq!(how("carol"), (json!(true), json!(["hello:carol"])));
+    assert_eq!(how("bob"), (json!(false), json!(["hello:bob"])));
+    assert_eq!(how("ada"), (json!(true), json!([])));
+    assert_eq!(told(&served, 2), ["identity_linked carol: hello:carol", "session_ended ada"]);
+    let (lines, audit) = audited(&served.dir);
+    let line = "carol identity_linked carol: hello:carol";
+    assert!(lines.iter().any(|kept| kept == line), "no `{line}` in {lines:#?}");
+    // No value a link was given is anywhere on the server: not with the
+    // sessions, not in its configuration, not in its log.
+    let config = fs::read_to_string(served.dir.join("server.toml")).unwrap();
+    for value in &values {
+        assert!(!sessions().contains(value) && !config.contains(value) && !audit.contains(value));
+    }
+}
+
+#[test]
+fn admins_change_how_a_member_signs_in_and_owners_how_anybody_does() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        ok(dir, &["user", "role", "ada", "admin"]);
+        ok(dir, &["user", "add", "bob", "--identity", "hello:bob"]);
+    });
+    let rose = token_in(&ok(&served.dir, &["user", "add", "rose", "--role", "admin"]));
+    let (as_ada, as_rose) = (format!("Bearer {}", served.ada), format!("Bearer {rose}"));
+    let ask = |who: &str, method: &str, params: Value| {
+        served.people(&[("Authorization", who)], &format!("server.people_{method}"), params)
+    };
+    let refused = |answer: Answer, status: u16, why: &str| {
+        assert_eq!(answer.status, status, "{}", answer.body);
+        assert!(answer.body.contains(why), "{}", answer.body);
+    };
+
+    // An admin attaches an identity to a member, who keeps their token.
+    let linked = ask(&as_ada, "link", json!({ "user": "carol", "identity": "hello:carol" }));
+    assert_eq!(linked.status, 200, "{}", linked.body);
+    assert_eq!(linked.json(), json!({ "user": "carol", "token": true, "logins": ["hello:carol"] }));
+    // Theirs already: nothing changes.
+    let again = ask(&as_ada, "link", json!({ "user": "carol", "identity": "hello:carol" }));
+    assert_eq!(again.json(), json!({ "user": "carol", "token": true, "logins": ["hello:carol"] }));
+    // One identity is one person's, a person has one of each way, and
+    // the plugin is asked who a login is.
+    let link = |identity: &str| ask(&as_ada, "link", json!({ "user": "carol", "identity": identity }));
+    refused(link("hello:bob"), 403, "hello:bob is bob already");
+    refused(link("hello:carla"), 403, "carol signs in with hello:carol already");
+    refused(link("hello:nobody"), 403, "hello:nobody: hello knows nobody by that name");
+    refused(link("github:carol"), 403, "no way to sign in with `github`: it has hello");
+    refused(ask(&as_ada, "link", json!({ "user": "carol" })), 400, "missing parameter `identity`");
+    refused(
+        ask(&as_ada, "link", json!({ "user": "dan", "identity": "hello:dan" })),
+        403,
+        "dan is not a user of this server",
+    );
+
+    // Never nothing: bob signs in with hello, and with nothing else.
+    let unlink_bob = || ask(&as_ada, "unlink", json!({ "user": "bob", "method": "hello" }));
+    refused(unlink_bob(), 403, "bob would have no way to sign in: give them a token first");
+    refused(
+        ask(&as_ada, "token", json!({ "user": "bob", "remove": true })),
+        403,
+        "bob has no token: there is nothing to take away",
+    );
+    // A first token ends nothing: the session he has goes on.
+    let session = format!("kito_session={}", signed_in_with_hello(&served, "bob"));
+    let given = ask(&as_ada, "token", json!({ "user": "bob" }));
+    assert_eq!(given.status, 200, "{}", given.body);
+    let bob = given.json()["token"].as_str().unwrap().to_owned();
+    assert_eq!(given.json(), json!({ "user": "bob", "token": bob }));
+    assert_eq!(served.me(&[("Cookie", &session)]).json()["user"], "bob");
+    let as_bob = format!("Bearer {bob}");
+    let how = served.me(&[("Authorization", &as_bob)]).json()["signs_in"].clone();
+    assert_eq!(how, json!({ "token": true, "logins": ["hello:bob"] }));
+    // Now his identity can go: the session, which it may have opened,
+    // ends; the token is his still.
+    let unlinked = unlink_bob();
+    assert_eq!(unlinked.status, 200, "{}", unlinked.body);
+    assert_eq!(unlinked.json(), json!({ "user": "bob", "token": true, "logins": [] }));
+    assert_eq!(served.me(&[("Cookie", &session)]).status, 401);
+    assert_eq!(served.me(&[("Authorization", &as_bob)]).json()["user"], "bob");
+    refused(unlink_bob(), 403, "bob has no identity of `hello`: there is nothing to unlink");
+    refused(
+        ask(&as_ada, "token", json!({ "user": "bob", "remove": true })),
+        403,
+        "bob would have no way to sign in: link an identity to them first",
+    );
+    // carol has both: her token is taken away, and stops at once.
+    let removed = ask(&as_ada, "token", json!({ "user": "carol", "remove": true }));
+    assert_eq!(removed.json(), json!({ "user": "carol", "token": null }), "{}", removed.body);
+    let as_carol = format!("Bearer {}", served.carol);
+    assert_eq!(served.me(&[("Authorization", &as_carol)]).status, 401);
+
+    // A member changes nobody else, and is told no more than that; their
+    // own token and identities are theirs, but naming a login proves
+    // nothing: nobody links themselves by it.
+    let members = "only an admin of this server may manage its people: bob is a member";
+    refused(ask(&as_bob, "token", json!({ "user": "carol" })), 403, members);
+    refused(ask(&as_bob, "token", json!({ "user": "nobody", "remove": true })), 403, members);
+    refused(ask(&as_bob, "unlink", json!({ "user": "carol", "method": "hello" })), 403, members);
+    refused(ask(&as_bob, "link", json!({ "user": "carol", "identity": "hello:bob" })), 403, members);
+    let by_name = "naming a login proves nothing: bob links an account of their own by signing in to it";
+    refused(ask(&as_bob, "link", json!({ "identity": "hello:bob" })), 403, by_name);
+    refused(ask(&as_bob, "link", json!({ "user": "bob", "identity": "hello:bob" })), 403, by_name);
+    refused(
+        ask(&as_bob, "link", json!({ "user": "bob", "identity": "hello:bob" })),
+        403,
+        "or an admin links it",
+    );
+    let how = served.me(&[("Authorization", &as_bob)]).json()["signs_in"].clone();
+    assert_eq!(how, json!({ "token": true, "logins": [] }));
+
+    // An admin does not change an admin or an owner, as for their role;
+    // what is her own she does change, but not by naming a login.
+    let owners = "rose is an admin: only an owner changes them";
+    refused(ask(&as_ada, "token", json!({ "user": "rose" })), 403, owners);
+    refused(ask(&as_ada, "token", json!({ "user": "rose", "remove": true })), 403, owners);
+    refused(ask(&as_ada, "unlink", json!({ "user": "rose", "method": "hello" })), 403, owners);
+    refused(ask(&as_ada, "link", json!({ "user": "rose", "identity": "hello:rose" })), 403, owners);
+    refused(
+        ask(&as_ada, "link", json!({ "user": "ada", "identity": "hello:ada" })),
+        403,
+        "or an owner links it",
+    );
+    assert_eq!(served.me(&[("Authorization", &as_rose)]).json()["user"], "rose");
+    let own = ask(&as_ada, "token", json!({ "user": "ada" }));
+    assert_eq!(own.status, 200, "{}", own.body);
+    let as_ada = format!("Bearer {}", own.json()["token"].as_str().unwrap());
+    // An owner changes anybody, themselves by name too.
+    ok(&served.dir, &["user", "role", "ada", "owner"]);
+    let ask = |method: &str, params: Value| {
+        served.people(&[("Authorization", &as_ada)], &format!("server.people_{method}"), params)
+    };
+    let linked = ask("link", json!({ "user": "rose", "identity": "hello:rose" }));
+    assert_eq!(linked.json(), json!({ "user": "rose", "token": true, "logins": ["hello:rose"] }));
+    let linked = ask("link", json!({ "identity": "hello:ada" }));
+    assert_eq!(linked.json(), json!({ "user": "ada", "token": true, "logins": ["hello:ada"] }));
+    let taken = ask("token", json!({ "user": "rose", "remove": true }));
+    assert_eq!(taken.json(), json!({ "user": "rose", "token": null }), "{}", taken.body);
+    assert_eq!(served.me(&[("Authorization", &as_rose)]).status, 401);
+
+    // What is not a name, or not a yes or a no, is a request that is wrong.
+    refused(ask("token", json!({ "user": 5 })), 400, "`user` is the name of a person");
+    refused(ask("token", json!({ "user": "bob", "remove": "yes" })), 400, "`remove` is true or false");
+    refused(ask("unlink", json!({ "user": "bob" })), 400, "missing parameter `method`");
+    assert_eq!(served.me(&[("Authorization", &as_bob)]).json()["user"], "bob");
+
+    // Who did what to whom is kept, and never a token.
+    let (lines, kept) = audited(&served.dir);
+    for line in [
+        "ada identity_linked carol: hello:carol",
+        "ada token_changed bob, who had none",
+        "ada identity_unlinked bob: hello:bob",
+        "ada token_removed carol",
+        "ada token_changed ada",
+        "ada identity_linked rose: hello:rose",
+        "ada identity_linked ada: hello:ada",
+        "ada token_removed rose",
+    ] {
+        assert!(lines.iter().any(|kept| kept == line), "no `{line}` in {lines:#?}");
+    }
+    assert!(!kept.contains("kito_") && !kept.contains("kitos_"), "{kept}");
+}
+
 const FROM_REGISTRY: &str = r#"name = "hello"
 version = "0.9.0"
 description = "Says what it is told"
@@ -667,7 +1337,7 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
         registry_with_hello(dir);
         let said = ok(dir, &["user", "role", "ada", "admin"]);
         assert!(said.contains("ada is an admin"), "{said}");
-        assert!(ok(dir, &["user", "list"]).contains("ada (admin): every repository"));
+        assert!(ok(dir, &["user", "list"]).contains("ada [token] (admin): every repository"));
     });
     let session = |token: &str| {
         let opened = served.request("POST", "/-/session", &[], Some(&json!({ "token": token })));
@@ -768,4 +1438,489 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
     // An administrator who is one no longer is refused at once.
     ok(&served.dir, &["user", "role", "ada", "member"]);
     assert_eq!(served.request("GET", "/-/admin/plugins", &page, None).status, 403);
+}
+
+/// A git repository served as plain files over HTTP on this machine, as
+/// a host that knows nothing of git serves one. It answers nothing until
+/// it is opened: a clone from it takes as long as a test wants.
+struct SlowGit {
+    address: String,
+    asked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    open: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SlowGit {
+    /// A repository with one commit, made under `dir`, and served.
+    fn start(dir: &Path) -> SlowGit {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let git = |at: &Path, args: &[&str]| {
+            let done = Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args(["-c", "user.name=ada", "-c", "user.email=ada@example.com"])
+                .args(args)
+                .output()
+                .expect("these tests use git");
+            assert!(done.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&done.stderr));
+        };
+        let (work, bare) = (dir.join("elsewhere"), dir.join("elsewhere.git"));
+        fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "--quiet"]);
+        fs::write(work.join("README.md"), "# elsewhere\n").unwrap();
+        git(&work, &["add", "README.md"]);
+        git(&work, &["commit", "--quiet", "-m", "first"]);
+        git(dir, &["clone", "--quiet", "--bare", "elsewhere", "elsewhere.git"]);
+        // What a host that serves it as files needs to be there.
+        git(&bare, &["update-server-info"]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (asked, open) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (was_asked, opened) = (asked.clone(), open.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let (bare, was_asked, opened) = (bare.clone(), was_asked.clone(), opened.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let (mut first, mut line) = (String::new(), String::new());
+                    let _ = reader.read_line(&mut first);
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 && !line.trim().is_empty() {
+                        line.clear();
+                    }
+                    was_asked.store(true, Ordering::SeqCst);
+                    while !opened.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    // The file asked for, under the repository and nowhere else.
+                    let path = first.split(' ').nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
+                    let file = bare.join(path.trim_start_matches('/'));
+                    let bytes = Some(file)
+                        .filter(|file| !path.contains("..") && file.is_file())
+                        .and_then(|file| fs::read(file).ok());
+                    let head = match &bytes {
+                        Some(bytes) => format!("200 OK\r\nContent-Length: {}", bytes.len()),
+                        None => "404 Not Found\r\nContent-Length: 0".to_owned(),
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {head}\r\nConnection: close\r\n\r\n");
+                    let _ = stream.write_all(&bytes.unwrap_or_default());
+                });
+            }
+        });
+        SlowGit { address, asked, open }
+    }
+
+    /// Waits until somebody clones it: they asked, and are not answered yet.
+    fn asked(&self) {
+        for _ in 0..3000 {
+            if self.asked.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("nobody cloned it");
+    }
+
+    /// From here on it answers.
+    fn open(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_change_that_takes_its_time_does_not_bring_back_a_token_taken_away_meanwhile() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        ok(dir, &["user", "role", "ada", "admin"]);
+        // bob signs in with hello, and has a token too: the one that leaked.
+        ok(dir, &["user", "add", "bob", "--identity", "hello:bob"]);
+    });
+    let olga = token_in(&ok(&served.dir, &["user", "add", "olga", "--role", "owner"]));
+    let leaked = token_in(&ok(&served.dir, &["user", "token", "bob"]));
+    let (as_ada, as_olga) = (format!("Bearer {}", served.ada), format!("Bearer {olga}"));
+    let as_bob = format!("Bearer {leaked}");
+    assert_eq!(served.me(&[("Authorization", &as_bob)]).json()["user"], "bob");
+
+    let elsewhere = SlowGit::start(served.dir.parent().unwrap());
+    let from = format!("http://{}/", elsewhere.address);
+    let added = std::thread::scope(|scope| {
+        // ada adds a repository from a git address: a clone, which takes its time.
+        let adding = scope.spawn(|| {
+            let slow = json!({ "name": "slow", "from": from });
+            served.people(&[("Authorization", &as_ada)], "server.repo_add", slow)
+        });
+        elsewhere.asked();
+        // Meanwhile the owner takes bob's token away, and is told it is gone;
+        // and makes carol an admin.
+        let taken = json!({ "user": "bob", "remove": true });
+        let taken = served.people(&[("Authorization", &as_olga)], "server.people_token", taken);
+        assert_eq!(taken.json(), json!({ "user": "bob", "token": null }), "{}", taken.body);
+        assert_eq!(served.me(&[("Authorization", &as_bob)]).status, 401);
+        let made = json!({ "user": "carol", "role": "admin" });
+        assert_eq!(served.people(&[("Authorization", &as_olga)], "server.people_role", made).status, 200);
+        // The clone ends, and ada is given what it made.
+        elsewhere.open();
+        adding.join().unwrap()
+    });
+    assert_eq!((added.status, added.json()), (200, json!({ "name": "slow" })), "{}", added.body);
+    assert!(served.dir.join("repos/slow/README.md").is_file());
+
+    // What she is given is written on the server as it is by then: the
+    // token that was taken away is nobody's still, and carol is an admin.
+    assert_eq!(served.me(&[("Authorization", &as_bob)]).status, 401, "the token taken away works again");
+    let unknown = json!({ "error": "this token is not one the server knows" });
+    assert_eq!(Wire::open(&served.clients, &leaked).1, unknown);
+    let people = served.people(&[("Authorization", &as_olga)], "server.people", json!({})).json();
+    let of =
+        |name: &str| people.as_array().unwrap().iter().find(|them| them["user"] == name).unwrap().clone();
+    assert_eq!(
+        (of("bob")["token"].clone(), of("bob")["logins"].clone()),
+        (json!(false), json!(["hello:bob"]))
+    );
+    assert_eq!(of("carol")["role"], "admin");
+    assert_eq!(of("ada")["access"]["slow"], "maintain");
+    if let Ok(mut daemon) = kitod::client::Client::connect(&served.dir.join("repos/slow")) {
+        let _ = daemon.call_value("shutdown", json!({}));
+    }
+}
+
+#[test]
+fn people_who_change_their_tokens_at_once_each_end_with_the_token_they_were_answered() {
+    let served = Served::start(|_| {});
+    // Each on a connection of their own, which goes on with each new token.
+    let changing = |first: &str| -> Vec<String> {
+        let (mut wire, greeting) = Wire::open(&served.clients, first);
+        assert!(greeting["ok"].is_object(), "{greeting}");
+        let mut answered = Vec::new();
+        for _ in 0..30 {
+            let answer = wire.ask("server.people_token", json!({}));
+            answered
+                .push(answer["result"]["token"].as_str().unwrap_or_else(|| panic!("{answer}")).to_owned());
+        }
+        answered
+    };
+    let (ada, carol) = std::thread::scope(|scope| {
+        let (ada, carol) = (scope.spawn(|| changing(&served.ada)), scope.spawn(|| changing(&served.carol)));
+        (ada.join().unwrap(), carol.join().unwrap())
+    });
+    for (name, first, answered) in [("ada", &served.ada, &ada), ("carol", &served.carol, &carol)] {
+        // The last each was answered is theirs; nothing they replaced is anybody's.
+        let (last, replaced) = answered.split_last().unwrap();
+        let bearer = format!("Bearer {last}");
+        assert_eq!(served.me(&[("Authorization", &bearer)]).json()["user"], name);
+        assert_eq!(Wire::open(&served.clients, last).1["ok"]["user"], name);
+        for old in replaced.iter().chain([first]) {
+            let bearer = format!("Bearer {old}");
+            assert_eq!(served.me(&[("Authorization", &bearer)]).status, 401, "a token {name} replaced works");
+        }
+    }
+}
+
+#[test]
+fn what_cannot_be_checked_is_refused_on_the_clients_port() {
+    let aged = |path: &Path| {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+    };
+    let served = Served::start(|dir| {
+        // What a server stopped in the middle of a write left behind, a
+        // while ago; and what somebody is writing just now.
+        for left in ["server.toml.4242-7.new", "server.toml.4242-8.new"] {
+            fs::write(dir.join(left), "left behind\n").unwrap();
+        }
+        aged(&dir.join("server.toml.4242-7.new"));
+    });
+    // Swept when the server starts, once it is old.
+    assert!(!served.dir.join("server.toml.4242-7.new").exists());
+    assert!(served.dir.join("server.toml.4242-8.new").exists());
+
+    let (mut open, greeting) = Wire::open(&served.clients, &served.carol);
+    assert_eq!(greeting["ok"]["user"], "carol", "{greeting}");
+    assert_eq!(open.ask("server.whoami", json!({}))["result"]["user"], "carol");
+    // The configuration cannot be read: nobody is held to what it was.
+    let (config, away) = (served.dir.join("server.toml"), served.dir.join("server.toml.away"));
+    fs::rename(&config, &away).unwrap();
+    let unreadable = json!({ "error": "the server's configuration cannot be read just now: try again" });
+    // An open connection is not answered on what it knew...
+    assert_eq!(open.ask("server.whoami", json!({})), unreadable);
+    assert_eq!(open.ask("server.whoami", json!({})), Value::Null);
+    // ...and a new one is not let in on what was read when the server
+    // started, with a token or to sign in.
+    assert_eq!(Wire::open(&served.clients, &served.carol).1, unreadable);
+    let stream = TcpStream::connect(&served.clients).unwrap();
+    let mut wire = Wire { reader: BufReader::new(stream.try_clone().unwrap()), writer: stream, asked: 0 };
+    assert_eq!(wire.say(&json!({ "sign_in": { "version": 1 } })), unreadable);
+    // The same for one that is there and is no configuration.
+    fs::write(&config, "users = 5\n").unwrap();
+    assert_eq!(Wire::open(&served.clients, &served.carol).1, unreadable);
+    let bearer = format!("Bearer {}", served.carol);
+    assert_eq!(served.me(&[("Authorization", &bearer)]).status, 500);
+    // Readable again, it is what everybody is held to.
+    fs::rename(&away, &config).unwrap();
+    assert_eq!(Wire::open(&served.clients, &served.carol).1["ok"]["user"], "carol");
+    assert_eq!(served.me(&[("Authorization", &bearer)]).json()["user"], "carol");
+}
+
+#[test]
+fn a_sign_out_that_could_not_be_made_is_said() {
+    let served = Served::start(|_| {});
+    let tab = served.session(&served.carol);
+    // Something holds what the server keeps, and does not let go: a lock
+    // written again before each try, for it not to be old enough to be
+    // taken over.
+    let lock = served.dir.join(".lock");
+    let held = || fs::write(&lock, "somebody else").unwrap();
+    held();
+    let ended = served.request("DELETE", "/-/session", &[("Cookie", &tab)], None);
+    assert_eq!(ended.status, 500, "{}", ended.body);
+    assert!(ended.body.contains("held by something that does not finish"), "{}", ended.body);
+    // The browser keeps its cookie: the session goes on, and it is told so.
+    assert!(!ended.head.contains("set-cookie"), "{}", ended.head);
+    // Nobody is signed in or removed meanwhile, and that is said too.
+    held();
+    let opening = json!({ "token": served.ada });
+    let refused = served.request("POST", "/-/session", &[], Some(&opening));
+    assert_eq!(refused.status, 500, "{}", refused.body);
+    held();
+    let gone = server(&served.dir, &["user", "remove", "carol"]).output().unwrap();
+    assert!(!gone.status.success());
+    let said = String::from_utf8_lossy(&gone.stderr).into_owned();
+    assert!(said.contains("held by something that does not finish: nothing was changed"), "{said}");
+    fs::remove_file(&lock).unwrap();
+    assert_eq!(served.me(&[("Cookie", &tab)]).json()["user"], "carol");
+
+    // Let go, the session ends, and the browser forgets it.
+    let ended = served.request("DELETE", "/-/session", &[("Cookie", &tab)], None);
+    assert_eq!(ended.status, 200, "{}", ended.body);
+    assert!(ended.head.contains("set-cookie: kito_session=;"), "{}", ended.head);
+    assert_eq!(served.me(&[("Cookie", &tab)]).status, 401);
+}
+
+const HALLO: &str = r#"name = "hallo"
+version = "0.1.0"
+api = 1
+permissions = ["sign_in"]
+
+[sign_in]
+method = "hallo"
+about = "Sign in with hallo"
+"#;
+
+#[test]
+fn an_identity_of_a_way_the_server_offers_no_more_is_no_way_to_sign_in() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        install_as(dir, "hallo", HALLO);
+        ok(dir, &["plugin", "enable", "hello"]);
+        ok(dir, &["plugin", "enable", "hallo"]);
+        ok(dir, &["user", "role", "ada", "admin"]);
+        // carol has a token and signs in with hallo; bob signs in with
+        // hello or with hallo, and has no token.
+        ok(dir, &["user", "link", "carol", "hallo:carol"]);
+        ok(dir, &["user", "add", "bob", "--identity", "hello:bob"]);
+        ok(dir, &["user", "link", "bob", "hallo:bob"]);
+    });
+    let (as_ada, as_carol) = (format!("Bearer {}", served.ada), format!("Bearer {}", served.carol));
+    let ask = |who: &str, method: &str, params: Value| {
+        served.people(&[("Authorization", who)], &format!("server.people_{method}"), params)
+    };
+    // The plugin that signs people in with hallo is disabled: whoever
+    // has an identity of that way does not sign in with it.
+    ok(&served.dir, &["plugin", "disable", "hallo", "--no-cleanup"]);
+    let no_more = "and this server offers that way no more (no plugin enabled here signs people in with it)";
+
+    // carol's token is all she signs in with: it stays, whoever asks.
+    let hers = format!(
+        "carol would have no way to sign in: hallo:carol is all they would have, {no_more}: link \
+                        an identity to them first"
+    );
+    for (who, params) in
+        [(&as_carol, json!({ "remove": true })), (&as_ada, json!({ "user": "carol", "remove": true }))]
+    {
+        let no = ask(who, "token", params);
+        assert_eq!(no.status, 403, "{}", no.body);
+        assert!(no.body.contains(&hers), "{}", no.body);
+    }
+    let no = server(&served.dir, &["user", "token", "carol", "--remove"]).output().unwrap();
+    assert!(!no.status.success());
+    assert!(String::from_utf8_lossy(&no.stderr).contains(&hers), "{}", String::from_utf8_lossy(&no.stderr));
+    assert_eq!(served.me(&[("Authorization", &as_carol)]).json()["user"], "carol");
+
+    // bob's identity of hello is all he signs in with: it stays. The one
+    // of hallo may go: it signs nobody in.
+    let his = format!(
+        "bob would have no way to sign in: hallo:bob is all they would have, {no_more}: give them \
+                       a token first"
+    );
+    let no = ask(&as_ada, "unlink", json!({ "user": "bob", "method": "hello" }));
+    assert_eq!(no.status, 403, "{}", no.body);
+    assert!(no.body.contains(&his), "{}", no.body);
+    let no = server(&served.dir, &["user", "unlink", "bob", "hello"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&no.stderr).contains(&his), "{}", String::from_utf8_lossy(&no.stderr));
+    let gone = ask(&as_ada, "unlink", json!({ "user": "bob", "method": "hallo" }));
+    assert_eq!(
+        gone.json(),
+        json!({ "user": "bob", "token": false, "logins": ["hello:bob"] }),
+        "{}",
+        gone.body
+    );
+
+    // Enabled again, hallo is a way to sign in: carol's token can go.
+    ok(&served.dir, &["plugin", "enable", "hallo"]);
+    let removed = ask(&as_carol, "token", json!({ "remove": true }));
+    assert_eq!(removed.json(), json!({ "user": "carol", "token": null }), "{}", removed.body);
+}
+
+#[cfg(unix)]
+#[test]
+fn who_may_link_by_name_is_asked_again_once_the_plugin_has_answered() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        ok(dir, &["user", "role", "ada", "admin"]);
+        // The plugin takes its time to say who a login is.
+        slow_hello(dir, "sign-in lookup", 3);
+    });
+    let olga = token_in(&ok(&served.dir, &["user", "add", "olga", "--role", "owner"]));
+    let (as_ada, as_olga, as_carol) =
+        (format!("Bearer {}", served.ada), format!("Bearer {olga}"), format!("Bearer {}", served.carol));
+    let refused = std::thread::scope(|scope| {
+        // ada, an admin, links an account to carol, a member...
+        let linking = scope.spawn(|| {
+            let link = json!({ "user": "carol", "identity": "hello:carol" });
+            served.people(&[("Authorization", &as_ada)], "server.people_link", link)
+        });
+        // ...who is made an owner while the plugin is asked who that is.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let made = json!({ "user": "carol", "role": "owner" });
+        let made = served.people(&[("Authorization", &as_olga)], "server.people_role", made);
+        assert_eq!(made.status, 200, "{}", made.body);
+        linking.join().unwrap()
+    });
+    // An admin attaches nothing to an owner: asked where the link is made.
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert!(refused.body.contains("carol is an owner: only an owner changes them"), "{}", refused.body);
+    let how = served.me(&[("Authorization", &as_carol)]).json()["signs_in"].clone();
+    assert_eq!(how, json!({ "token": true, "logins": [] }));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_plugin_that_is_slow_holds_no_token_back() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        // The plugin takes its time to hear what happened.
+        slow_hello(dir, "server-event", 5);
+    });
+    let log = served.dir.join("plugins/hello/events.log");
+    let tab = served.session(&served.carol);
+    let _other = served.session(&served.carol);
+    let asked = std::time::Instant::now();
+    let renewed = served.people(&[("Cookie", &tab), ("X-Kito", "1")], "server.people_token", json!({}));
+    let took = asked.elapsed();
+    assert_eq!(renewed.status, 200, "{}", renewed.body);
+    let new = renewed.json()["token"].as_str().unwrap().to_owned();
+    // The token is told before a plugin has heard of it; what happened is
+    // kept by then, and the token works.
+    assert!(took < std::time::Duration::from_secs(4), "the token waited {took:?} for a plugin");
+    assert!(!log.exists(), "a plugin was told before the answer");
+    let (lines, _) = audited(&served.dir);
+    for line in ["carol token_changed carol", "carol session_ended carol"] {
+        assert!(lines.iter().any(|kept| kept == line), "no `{line}` in {lines:#?}");
+    }
+    let bearer = format!("Bearer {new}");
+    assert_eq!(served.me(&[("Authorization", &bearer)]).json()["user"], "carol");
+    // The plugin hears of it all the same: the change, then the session it ended.
+    assert_eq!(told(&served, 2), ["token_changed carol", "session_ended carol"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_server_that_serves_one_client_tells_the_plugins_before_it_leaves() {
+    let served = Served::start(|dir| {
+        install_hello(dir, LINKS);
+        ok(dir, &["plugin", "enable", "hello"]);
+        slow_hello(dir, "server-event", 1);
+    });
+    // As SSH runs it: one client on its standard input, known by the name
+    // it came as, and gone when the client is.
+    let mut child = server(&served.dir, &["stdio", "--as", "carol"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut say = |message: Value| -> Value {
+        writeln!(input, "{message}").unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap_or(Value::Null)
+    };
+    assert_eq!(say(json!({ "hello": { "version": 1 } }))["ok"]["user"], "carol");
+    let asked = json!({ "jsonrpc": "2.0", "id": 1, "method": "server.people_token", "params": {} });
+    let answer = say(asked);
+    assert!(answer["result"]["token"].as_str().is_some_and(|token| token.starts_with("kito_")), "{answer}");
+    // She has her token while the plugin has heard nothing yet.
+    let log = served.dir.join("plugins/hello/events.log");
+    assert!(!log.exists(), "a plugin was told before the answer");
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    // The server left once the plugin had: nothing is waited for here.
+    assert_eq!(fs::read_to_string(&log).unwrap_or_default(), "token_changed carol\n");
+}
+
+#[test]
+fn served_securely_the_sign_in_cookie_is_one_only_this_host_sets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap().join("server");
+    ok(tmp.path(), &["init", dir.to_str().unwrap()]);
+    install_hello(&dir, SIGNS);
+    ok(&dir, &["plugin", "enable", "hello"]);
+    ok(&dir, &["user", "add", "bob", "--identity", "hello:bob"]);
+    let mut child = server(&dir, &["serve", "--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: ").and_then(|rest| rest.split(",").next()).unwrap().to_owned();
+    assert!(address.starts_with("https://127.0.0.1:"), "{line}");
+    let curl = |args: &[&str]| {
+        let out = Command::new("curl")
+            .args(["--silent", "--insecure", "--include", "--max-time", "20"])
+            .args(args)
+            .output();
+        let out = out.expect("these tests ask over HTTPS with curl");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let set = |answer: &str, name: &str| -> Option<String> {
+        let line =
+            answer.lines().find(|line| line.to_lowercase().starts_with(&format!("set-cookie: {name}=")));
+        line.and_then(|line| line.split_once(": ")).map(|(_, value)| value.trim().to_owned())
+    };
+    let left = curl(&[&format!("{address}/-/sign-in/hello")]);
+    let back = format!("{address}/-/sign-in/hello/callback?code=bob&state=left-1");
+    // Brought back under the name it has in the clear, it is not the one that left.
+    let planted = curl(&["--cookie", "kito_sign_in=left-1", &back]);
+    let signed = curl(&["--cookie", "__Host-kito_sign_in=left-1", &back]);
+    let _ = child.kill();
+    let _ = child.wait();
+    // `__Host-`: with `Secure`, for every path and with no `Domain`, as a browser wants it.
+    assert_eq!(
+        set(&left, "__host-kito_sign_in").as_deref(),
+        Some("__Host-kito_sign_in=left-1; Path=/; HttpOnly; SameSite=Lax; Max-Age=600; Secure"),
+        "{left}"
+    );
+    assert!(set(&left, "kito_sign_in").is_none(), "{left}");
+    assert!(planted.contains("this sign-in did not start in this browser"), "{planted}");
+    assert!(signed.contains("Signed in as bob."), "{signed}");
+    // Forgotten under the name it was set with.
+    assert_eq!(
+        set(&signed, "__host-kito_sign_in").as_deref(),
+        Some("__Host-kito_sign_in=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"),
+        "{signed}"
+    );
 }

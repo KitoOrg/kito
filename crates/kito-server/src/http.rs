@@ -11,7 +11,8 @@
 //! token, or for whoever a plugin that signs people in says they are
 //! (`/-/sign-in/<method>`).
 
-use crate::state::{identity_of, Role, Server, ENV_SERVER_DIR, SESSION_PREFIX};
+use crate::session::Came;
+use crate::state::{hash_of, identity_of, Role, Server, ENV_SERVER_DIR, LINK_SECONDS, SESSION_PREFIX};
 use axum::body::Body;
 use axum::extract::{Path as Segment, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -32,8 +33,36 @@ use std::sync::Arc;
 /// The cookie of a session.
 const COOKIE: &str = "kito_session";
 /// The cookie of somebody on their way to sign in and back: what the
-/// plugin handed out when they left, for ten minutes.
+/// plugin handed out when they left, for ten minutes. Served securely it
+/// has the `__Host-` prefix, which a browser takes only from this host
+/// itself, with `Secure`, for every path and with no `Domain`: a host
+/// beside this one under the same domain cannot plant one.
 const SIGNING_IN: &str = "kito_sign_in";
+const SIGNING_IN_SECURELY: &str = "__Host-kito_sign_in";
+
+/// The name of the sign-in cookie, as it is set, read and forgotten.
+fn signing_in(secure: bool) -> &'static str {
+    match secure {
+        true => SIGNING_IN_SECURELY,
+        false => SIGNING_IN,
+    }
+}
+
+/// The line that sets the sign-in cookie, or forgets it (`seconds`: 0).
+/// Lax: the way back starts on the provider's site.
+fn signing_in_line(secure: bool, value: &str, seconds: u64) -> String {
+    let name = signing_in(secure);
+    match secure {
+        true => format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={seconds}; Secure"),
+        false => format!("{name}={value}; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age={seconds}"),
+    }
+}
+
+/// `true` for a cookie that is the server's own: its session's, and what
+/// it keeps for a sign-in. A plugin is not passed them on, and sets none.
+fn own_cookie(name: &str) -> bool {
+    [COOKIE, SIGNING_IN, SIGNING_IN_SECURELY].contains(&name.trim())
+}
 /// In the environment of a plugin that serves pages: where to listen, and
 /// what the server says with every request it passes on.
 pub const ENV_PAGES_LISTEN: &str = "KITO_PAGES_LISTEN";
@@ -125,6 +154,14 @@ struct Who {
     name: String,
     user: crate::state::User,
     by_cookie: bool,
+    /// What they came with: a token of their own, or a session's.
+    came: Came,
+}
+
+impl Who {
+    fn asker(&self) -> crate::session::Asker<'_> {
+        crate::session::Asker { name: &self.name, user: &self.user, came: &self.came }
+    }
 }
 
 impl Http {
@@ -140,16 +177,17 @@ impl Http {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
         if let Some(token) = bearer {
-            let (name, user) = server.user_of(token.trim())?;
+            let token = token.trim();
+            let (name, user) = server.user_of(token)?;
             server.saw(&name);
-            return Some(Who { name, user, by_cookie: false });
+            return Some(Who { name, user, by_cookie: false, came: Came::with(token) });
         }
         // A session and nothing else: the token an administrator handed
         // out is not something a browser keeps.
         let id = cookie(headers, COOKIE).filter(|id| id.starts_with(SESSION_PREFIX))?;
         let (name, user) = server.user_of(id)?;
         server.saw(&name);
-        Some(Who { name, user, by_cookie: true })
+        Some(Who { name, user, by_cookie: true, came: Came::with(id) })
     }
 
     /// Where the provider sends the browser back to: this server, as the
@@ -166,7 +204,7 @@ impl Http {
     }
 }
 
-/// `/-/me`: who is asking, and what they may use.
+/// `/-/me`: who is asking, what they may use, and how they sign in.
 async fn me(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
     let server = match http.server() {
         Ok(server) => server,
@@ -187,6 +225,11 @@ async fn me(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
         "repos": repos,
         "admin": who.user.is_admin(),
         "role": who.user.server_role.word(),
+        // Whether they have a token, never the token; and who they sign in as.
+        "signs_in": { "token": who.user.has_token(), "logins": who.user.logins },
+        // How a client connects here, for a `kito connect` line: no secret,
+        // and so for anybody signed in, not for admins alone.
+        "clients": crate::session::clients(&server),
         // What runs on this server: pages show what belongs to each.
         "plugins": server.running().iter().map(|(found, _)| found.manifest.name.clone()).collect::<Vec<_>>(),
     }))
@@ -247,6 +290,8 @@ async fn admin_change(
         Ok(who) => who,
         Err((status, why)) => return said(status, why),
     };
+    // An admin still when the change is made: installing takes a while.
+    server.only_while(crate::session::still(&who.name, &who.came, crate::state::ServerRole::Admin));
     let settle = http.clone();
     let done = tokio::task::spawn_blocking(move || {
         let done = crate::admin::change(&mut server, &who.name, &ask);
@@ -262,7 +307,8 @@ async fn admin_change(
 }
 
 /// `POST /-/people`: the server's people, asked as whoever is signed in
-/// (ADR 0014): `server.people`, `server.people_add`, `_remove`, `_role`.
+/// (ADR 0014): `server.people`, `server.people_add`, `_remove`, `_role`;
+/// and how each signs in (ADR 0006, amended): `_link`, `_unlink`, `_token`.
 async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): Json<Call>) -> Response {
     let server = match http.server() {
         Ok(server) => server,
@@ -282,7 +328,7 @@ async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): J
         );
     }
     let asked = tokio::task::spawn_blocking(move || {
-        crate::session::people(&server, &who.name, &who.user, None, None, &call.method, &call.params)
+        crate::session::people(&server, &who.asker(), None, None, &call.method, &call.params)
     })
     .await;
     match asked {
@@ -353,8 +399,21 @@ async fn open_session(State(http): State<Arc<Http>>, Json(opening): Json<Opening
         Ok(server) => server,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    // The same answer for no token and for a wrong one.
-    let Some((name, _)) = server.user_of(opening.token.trim()) else {
+    // The same answer for no token and for a wrong one; and for one that
+    // was theirs when it was looked at and is not when the session is
+    // written (changed meanwhile).
+    let token = opening.token.trim();
+    let theirs = |now: &Server| now.user_of(token).map(|(name, _)| name);
+    let opened = match theirs(&server) {
+        Some(name) => {
+            match server.open_session(&name, |now| theirs(now).is_some_and(|still| still == name)) {
+                Ok(id) => id.map(|id| (name, id)),
+                Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            }
+        }
+        None => None,
+    };
+    let Some((name, id)) = opened else {
         crate::audit::record(
             &server.dir,
             "token_refused",
@@ -371,21 +430,25 @@ async fn open_session(State(http): State<Arc<Http>>, Json(opening): Json<Opening
         None,
         &format!("{name}, in a browser, with a token"),
     );
-    let id = match server.open_session(&name) {
-        Ok(id) => id,
-        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    };
     let seconds = server.config.sign_in.days * 24 * 3600;
     let headers =
         [(header::SET_COOKIE, http.cookie_line(&id, seconds)), (header::CACHE_CONTROL, "no-store".into())];
     (headers, Json(json!({ "user": name }))).into_response()
 }
 
-/// `DELETE /-/session`: the session ends.
+/// `DELETE /-/session`: the session ends. When it could not be ended that
+/// is said, and the browser keeps its cookie: a session that goes on is
+/// not one its browser has forgotten.
 async fn close_session(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
-    if let (Some(id), Ok(server)) = (cookie(&headers, COOKIE).map(str::to_owned), http.server()) {
+    if let Some(id) = cookie(&headers, COOKIE).map(str::to_owned) {
+        let dir = http.dir.clone();
         // The plugins that listen are told, which may take them a moment.
-        let _ = tokio::task::spawn_blocking(move || server.end_session(&id)).await;
+        let ended = tokio::task::spawn_blocking(move || Server::open(&dir)?.end_session(&id)).await;
+        match ended {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return said(StatusCode::INTERNAL_SERVER_ERROR, &why),
+            Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
     }
     ([(header::SET_COOKIE, http.cookie_line("", 0))], Json(json!({}))).into_response()
 }
@@ -420,55 +483,165 @@ async fn ways(State(http): State<Arc<Http>>) -> Response {
     }
 }
 
+/// Text as a page shows it: nothing of it is read as markup.
+fn escaped(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A small page for the person who comes back from a provider: what
+/// happened, and a link to the pages of the server. `at_once`: the
+/// browser goes there by itself.
+fn page(title: &str, happened: &str, go: &str, at_once: bool) -> axum::response::Html<String> {
+    let refresh = if at_once { "<meta http-equiv=\"refresh\" content=\"0;url=/\">" } else { "" };
+    axum::response::Html(format!(
+        "<!doctype html><meta charset=\"utf-8\">{refresh}<title>{title}</title><p>{} <a href=\"/\">{go}</a>.</p>",
+        escaped(happened)
+    ))
+}
+
 /// `GET /-/sign-in/<method>`: sends the browser where the plugin says the
 /// person signs in. What the plugin handed out for the way back is kept
 /// in a cookie of this browser, so that the one who comes back is the
 /// one who left.
+///
+/// With `?link=1`, from somebody who is signed in in this browser: the
+/// account they sign in to is attached to who they are here, and no
+/// session opens (ADR 0006, amended). For the way back the same cookie
+/// carries, after the state, a value made for this link and no other.
+/// The server keeps what it hashes to, with the session the link was
+/// asked from: what is on its disk brings nobody back, and no page reads
+/// or writes the cookie.
 async fn begin_sign_in(
     State(http): State<Arc<Http>>,
     Segment(method): Segment<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let server = match http.server() {
         Ok(server) => server,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
+    let nobody = "nobody is signed in: sign in first, then link an account to who you are";
+    let linking = pairs(query.as_deref().unwrap_or_default()).get("link").is_some_and(|link| link == "1");
+    let session = match linking {
+        false => None,
+        // The session of this browser and nothing else, as for a page.
+        true => {
+            let session = cookie(&headers, COOKIE)
+                .filter(|id| id.starts_with(SESSION_PREFIX))
+                .filter(|id| server.user_of(id).is_some());
+            match session {
+                Some(id) => Some(id.to_owned()),
+                None => return said(StatusCode::UNAUTHORIZED, nobody),
+            }
+        }
+    };
     let Some(redirect) = http.callback(&headers, &method) else {
         return said(StatusCode::BAD_REQUEST, "the request does not say which host it is for");
     };
     let told = json!({ "kind": "browser", "redirect": redirect });
-    let begun = tokio::task::spawn_blocking(move || server.sign_in_step(&method, &["begin"], &told)).await;
-    let begun = match begun {
+    let begun = tokio::task::spawn_blocking(move || -> Result<(String, String), (StatusCode, String)> {
+        let begun =
+            server.sign_in_step(&method, &["begin"], &told).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        if let Some(why) = begun["refused"].as_str() {
+            return Err((StatusCode::FORBIDDEN, why.to_owned()));
+        }
+        // What goes in a cookie as it is, and nothing else.
+        let plain = |state: &&str| {
+            !state.is_empty()
+                && state.len() <= 512
+                && state.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
+        };
+        let (Some(open), Some(state)) = (begun["open"].as_str(), begun["state"].as_str().filter(plain))
+        else {
+            return Err((StatusCode::BAD_GATEWAY, "the plugin did not say where to sign in".to_owned()));
+        };
+        // The link begins once the plugin has said where to go: nothing
+        // waits for a browser that was sent nowhere.
+        let kept = match session {
+            None => state.to_owned(),
+            Some(session) => {
+                let value =
+                    server.begin_link(&session).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                let value = value.ok_or_else(|| (StatusCode::UNAUTHORIZED, nobody.to_owned()))?;
+                format!("{state}:{value}")
+            }
+        };
+        Ok((open.to_owned(), kept))
+    })
+    .await;
+    let (open, kept) = match begun {
         Ok(Ok(begun)) => begun,
-        Ok(Err(e)) => return said(StatusCode::NOT_FOUND, &e),
+        Ok(Err((status, why))) => return said(status, &why),
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    if let Some(why) = begun["refused"].as_str() {
-        return said(StatusCode::FORBIDDEN, why);
-    }
-    // What goes in a cookie as it is, and nothing else.
-    let plain = |state: &&str| {
-        !state.is_empty()
-            && state.len() <= 512
-            && state.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
-    };
-    let (Some(open), Some(state)) = (begun["open"].as_str(), begun["state"].as_str().filter(plain)) else {
-        return said(StatusCode::BAD_GATEWAY, "the plugin did not say where to sign in");
-    };
-    let secure = if http.secure { "; Secure" } else { "" };
-    // Lax: the way back starts on the provider's site.
-    let kept = format!("{SIGNING_IN}={state}; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age=600{secure}");
     let headers = [
-        (header::LOCATION, open.to_owned()),
-        (header::SET_COOKIE, kept),
+        (header::LOCATION, open),
+        (header::SET_COOKIE, signing_in_line(http.secure, &kept, LINK_SECONDS)),
         (header::CACHE_CONTROL, "no-store".to_owned()),
     ];
     (StatusCode::FOUND, headers).into_response()
 }
 
+/// Attaches the account somebody just signed in to, to who they are here:
+/// the person whose session the link was asked from. `value` is what the
+/// browser brought back for the link, and `sent` what the session it
+/// sent, if it sent one, hashes to. Answers what to tell them; `Err`: why
+/// nothing was linked.
+fn link_account(
+    server: &Server,
+    method: &str,
+    told: &Value,
+    value: &str,
+    sent: Option<String>,
+) -> Result<String, (StatusCode, String)> {
+    let refused = |why: String| (StatusCode::FORBIDDEN, why);
+    let failed = |why: String| (StatusCode::INTERNAL_SERVER_ERROR, why);
+    let gone = "whoever asked for this link is no longer signed in here";
+    // Looked up before anything else, and taken out as it is: a value
+    // brings somebody back once, whatever follows.
+    let (name, session) = server.take_link(value).map_err(failed)?.ok_or_else(|| {
+        refused(
+            "no link waits for this browser: it was used already, it is more than ten minutes old, or \
+             whoever asked for it is no longer signed in here"
+                .to_owned(),
+        )
+    })?;
+    // The way back starts on the provider's site, and the session's
+    // cookie may not come with it: when it does, it is that session.
+    if sent.is_some_and(|sent| sent != session) {
+        return Err(refused(gone.to_owned()));
+    }
+    let answer = server.sign_in_step(method, &["finish"], told).map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let identity = identity_of(method, &answer).map_err(refused)?;
+    // The plugin took its time: whether they are signed in still is asked
+    // where the link is made, on the server as it is then.
+    let mut now = Server::open(&server.dir).map_err(failed)?;
+    let linked = now
+        .change(|change| match change.session_user(&session).as_deref() == Some(name.as_str()) {
+            true => change.link(&name, &identity),
+            false => Err(gone.to_owned()),
+        })
+        .map_err(refused)?;
+    let written = identity.written();
+    match linked {
+        true => {
+            // Kept now, and told once the page is on its way.
+            let what = format!("{name}: {written}");
+            let event = json!({ "user": name, "identity": identity.key(), "by": name, "what": what });
+            now.tell_after(vec![("identity_linked", event)]);
+            Ok(format!("Whoever signs in as {written} is {name} from now on."))
+        }
+        // Theirs already: nothing to change, and nothing to refuse.
+        false => Ok(format!("{written} is {name} already.")),
+    }
+}
+
 /// `GET /-/sign-in/<method>/callback`: the browser is back from the
 /// provider. The plugin says who that is; if the server has such a
-/// person, a session opens for them.
+/// person, a session opens for them. Back from a link (`?link=1` when
+/// they left), the account is attached to who asked instead, and they
+/// are told so, or why not, in a page.
 async fn finish_sign_in(
     State(http): State<Arc<Http>>,
     Segment(method): Segment<String>,
@@ -480,8 +653,15 @@ async fn finish_sign_in(
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
     let query = pairs(query.as_deref().unwrap_or_default());
-    let left_with = cookie(&headers, SIGNING_IN).filter(|state| !state.is_empty());
-    let Some(state) = left_with.filter(|state| query.get("state").map(String::as_str) == Some(state)) else {
+    // What was kept when they left: the plugin's state and, for a link,
+    // the value that was made for it.
+    let left_with = cookie(&headers, signing_in(http.secure)).map(|kept| match kept.split_once(':') {
+        Some((state, value)) => (state, Some(value.to_owned())),
+        None => (kept, None),
+    });
+    let came_back = left_with
+        .filter(|(state, _)| !state.is_empty() && query.get("state").map(String::as_str) == Some(*state));
+    let Some((state, link)) = came_back else {
         let again = format!("this sign-in did not start in this browser: start again at /-/sign-in/{method}");
         return said(StatusCode::FORBIDDEN, &again);
     };
@@ -489,37 +669,59 @@ async fn finish_sign_in(
         return said(StatusCode::BAD_REQUEST, "the request does not say which host it is for");
     };
     let told = json!({ "kind": "browser", "state": state, "query": query, "redirect": redirect });
-    let opened =
-        tokio::task::spawn_blocking(move || -> Result<(String, String, u64), (StatusCode, String)> {
-            let answer =
-                server.sign_in_step(&method, &["finish"], &told).map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
-            let identity = identity_of(&method, &answer).map_err(|why| (StatusCode::FORBIDDEN, why))?;
-            let name = server.signed_in(&identity).map_err(|why| (StatusCode::FORBIDDEN, why))?;
-            let token = server.open_session(&name).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            Ok((token, name, server.config.sign_in.days * 24 * 3600))
-        })
-        .await;
-    let secure = if http.secure { "; Secure" } else { "" };
-    let forget = format!("{SIGNING_IN}=; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
-    let mut response = match opened {
-        Ok(Ok((token, name, seconds))) => {
-            // A page, and not a redirect: the session's cookie is for
-            // requests that start on this site, and one that follows a
-            // redirect from the provider's does not. The page is where
-            // the next one starts.
-            let name = name.replace('&', "&amp;").replace('<', "&lt;");
-            let page = format!(
-                "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=/\">\
-                 <title>Signed in</title><p>Signed in as {name}. <a href=\"/\">Go on</a>.</p>"
-            );
-            let mut response = axum::response::Html(page).into_response();
-            if let Ok(value) = HeaderValue::from_str(&http.cookie_line(&token, seconds)) {
-                response.headers_mut().append(header::SET_COOKIE, value);
+    let forget = signing_in_line(http.secure, "", 0);
+    let mut response = match link {
+        Some(value) => {
+            let sent = cookie(&headers, COOKIE).map(hash_of);
+            let linked =
+                tokio::task::spawn_blocking(move || link_account(&server, &method, &told, &value, sent))
+                    .await;
+            match linked {
+                Ok(Ok(happened)) => page("Linked", &happened, "Go on", true).into_response(),
+                // A page, not JSON: a person reads it.
+                Ok(Err((status, why))) => {
+                    let happened = format!("Nothing was linked: {why}.");
+                    (status, page("Not linked", &happened, "Go back", false)).into_response()
+                }
+                Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
-            response
         }
-        Ok(Err((status, why))) => said(status, &why),
-        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        None => {
+            let opened = tokio::task::spawn_blocking(
+                move || -> Result<(String, String, u64), (StatusCode, String)> {
+                    let answer = server
+                        .sign_in_step(&method, &["finish"], &told)
+                        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+                    let identity =
+                        identity_of(&method, &answer).map_err(|why| (StatusCode::FORBIDDEN, why))?;
+                    let name = server.signed_in(&identity).map_err(|why| (StatusCode::FORBIDDEN, why))?;
+                    // Theirs still when the session is written: not
+                    // unlinked while the provider was asked.
+                    let token = server
+                        .open_session(&name, |now| now.signs_in_as(&identity, &name))
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+                        .ok_or_else(|| (StatusCode::FORBIDDEN, Server::nobody(&identity)))?;
+                    Ok((token, name, server.config.sign_in.days * 24 * 3600))
+                },
+            )
+            .await;
+            match opened {
+                Ok(Ok((token, name, seconds))) => {
+                    // A page, and not a redirect: the session's cookie is for
+                    // requests that start on this site, and one that follows a
+                    // redirect from the provider's does not. The page is where
+                    // the next one starts.
+                    let mut response =
+                        page("Signed in", &format!("Signed in as {name}."), "Go on", true).into_response();
+                    if let Ok(value) = HeaderValue::from_str(&http.cookie_line(&token, seconds)) {
+                        response.headers_mut().append(header::SET_COOKIE, value);
+                    }
+                    response
+                }
+                Ok(Err((status, why))) => said(status, &why),
+                Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
+        }
     };
     if let Ok(value) = HeaderValue::from_str(&forget) {
         response.headers_mut().append(header::SET_COOKIE, value);
@@ -563,7 +765,8 @@ async fn api(
         let user = crate::state::User { server_role: crate::state::ServerRole::Admin, ..Default::default() };
         let (dir, method, place) = (server.dir.clone(), call.method.clone(), repo.clone());
         let asked = tokio::task::spawn_blocking(move || {
-            crate::session::ask(&server, &name, &user, &repo, &call.method, call.params, Some(&given))
+            let itself = crate::session::Asker { name: &name, user: &user, came: &Came::Otherwise };
+            crate::session::ask(&server, &itself, &repo, &call.method, call.params, Some(&given))
         })
         .await;
         crate::audit::request(&dir, &who, Some(&place), &method, matches!(asked, Ok(Ok(_))));
@@ -592,15 +795,7 @@ async fn api(
     let (dir, person, method, place) =
         (server.dir.clone(), who.name.clone(), call.method.clone(), repo.clone());
     let asked = tokio::task::spawn_blocking(move || {
-        crate::session::ask(
-            &server,
-            &who.name,
-            &who.user,
-            &repo,
-            &call.method,
-            call.params,
-            within.as_deref(),
-        )
+        crate::session::ask(&server, &who.asker(), &repo, &call.method, call.params, within.as_deref())
     })
     .await;
     crate::audit::request(&dir, &person, Some(&place), &method, matches!(asked, Ok(Ok(_))));
@@ -668,7 +863,7 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|line| line.split(';'))
         .map(str::trim)
-        .filter(|pair| !pair.is_empty() && pair.split('=').next() != Some(COOKIE))
+        .filter(|pair| !pair.is_empty() && !own_cookie(pair.split('=').next().unwrap_or_default()))
         .map(str::to_owned)
         .collect();
     parts.headers.remove(header::COOKIE);
@@ -691,13 +886,14 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
     match http.client.request(Request::from_parts(parts, body)).await {
         Ok(response) => {
             let (mut parts, body) = response.into_parts();
-            // A plugin sets no session of the server.
+            // A plugin sets no session of the server, and nothing the
+            // server keeps for a sign-in.
             let theirs: Vec<HeaderValue> = parts
                 .headers
                 .get_all(header::SET_COOKIE)
                 .iter()
                 .filter(|value| {
-                    !value.to_str().is_ok_and(|line| line.trim_start().starts_with(&format!("{COOKIE}=")))
+                    !value.to_str().is_ok_and(|line| own_cookie(line.split('=').next().unwrap_or_default()))
                 })
                 .cloned()
                 .collect();
@@ -994,4 +1190,46 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         });
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sign_in_cookie_is_named_for_how_the_server_is_served() {
+        // In the clear: the name it always had, for the paths of signing in.
+        assert_eq!(
+            signing_in_line(false, "left-1", 600),
+            "kito_sign_in=left-1; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age=600"
+        );
+        // Served securely: `__Host-`, which a browser takes only with
+        // `Secure`, for every path, and with no `Domain`.
+        let line = signing_in_line(true, "left-1:5f0e", 600);
+        assert_eq!(
+            line,
+            "__Host-kito_sign_in=left-1:5f0e; Path=/; HttpOnly; SameSite=Lax; Max-Age=600; Secure"
+        );
+        assert!(!line.to_lowercase().contains("domain"), "{line}");
+        // Forgotten under the name it was set with, and with what it was set with.
+        assert_eq!(
+            signing_in_line(true, "", 0),
+            "__Host-kito_sign_in=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+        );
+        assert_eq!(
+            signing_in_line(false, "", 0),
+            "kito_sign_in=; Path=/-/sign-in; HttpOnly; SameSite=Lax; Max-Age=0"
+        );
+        // And read under it: one planted under the other name is not it.
+        let mut headers = HeaderMap::new();
+        let sent = "kito_sign_in=planted; __Host-kito_sign_in=left-1:5f0e; theme=dark";
+        headers.insert(header::COOKIE, HeaderValue::from_static(sent));
+        assert_eq!(cookie(&headers, signing_in(true)), Some("left-1:5f0e"));
+        assert_eq!(cookie(&headers, signing_in(false)), Some("planted"));
+        // Neither is a plugin's to be sent or to set, nor is the session's.
+        for own in ["kito_sign_in", "__Host-kito_sign_in", " kito_session"] {
+            assert!(own_cookie(own), "{own}");
+        }
+        assert!(!own_cookie("theme") && !own_cookie("kito_sign_in_2"));
+    }
 }

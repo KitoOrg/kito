@@ -44,37 +44,92 @@ fn dir_of(server: &Path) -> PathBuf {
     server.join(DIR)
 }
 
-/// One writer at a time, across the processes of the server: a lock file,
-/// taken over when it is older than a few seconds (its writer died).
-struct Lock(PathBuf);
+/// One writer at a time, across the processes of the server: a lock file
+/// that says whose it is. Its holder removes it, and nobody else. One
+/// older than a few seconds is taken over (its writer died, and a crash
+/// must not block the server for ever); a holder it was taken from finds
+/// out before it writes (`held`), and leaves the file to whoever has it.
+pub(crate) struct Lock {
+    path: PathBuf,
+    /// What this holder wrote in the file: no other holder's says the same.
+    mine: String,
+}
+
+/// How long a lock is waited for before it is given up, how long between
+/// two tries, and how old one is when it is taken over. The tries are
+/// close together: whoever writes over and over lets go for a moment
+/// each time, and whoever waits is to find that moment.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Lock {
-    fn take(dir: &Path) -> Option<Lock> {
+    /// `None`: somebody else holds it, and went on holding it.
+    pub(crate) fn take(dir: &Path) -> Option<Lock> {
+        use std::io::Write as _;
         let path = dir.join(".lock");
-        for _ in 0..400 {
+        let mine = holder();
+        let asked = std::time::Instant::now();
+        loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Some(Lock(path)),
+                Ok(mut file) => {
+                    if file.write_all(mine.as_bytes()).is_ok() {
+                        return Some(Lock { path, mine });
+                    }
+                    // A lock that does not say whose it is, is nobody's.
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+                Err(_) if asked.elapsed() >= LOCK_WAIT => return None,
                 Err(_) => {
-                    let stale = std::fs::metadata(&path)
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .and_then(|at| at.elapsed().ok())
-                        .is_some_and(|age| age > std::time::Duration::from_secs(5));
-                    if stale {
-                        let _ = std::fs::remove_file(&path);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    // Taken over when it is old, if it is still the one
+                    // that was looked at: another that waited may have
+                    // taken it over just now.
+                    let taken_over = stale(&path).is_some_and(|theirs| {
+                        std::fs::read_to_string(&path).is_ok_and(|now| now == theirs)
+                            && std::fs::remove_file(&path).is_ok()
+                    });
+                    if !taken_over {
+                        std::thread::sleep(LOCK_PAUSE);
                     }
                 }
             }
         }
-        None
+    }
+
+    /// `true` while the lock is this holder's. One held for longer than a
+    /// writer is given was taken over: whoever held it writes nothing more.
+    pub(crate) fn held(&self) -> bool {
+        std::fs::read_to_string(&self.path).is_ok_and(|said| said == self.mine)
+    }
+}
+
+/// What a lock says when it is older than a writer is given: whose it was.
+fn stale(path: &Path) -> Option<String> {
+    let said = std::fs::read_to_string(path).ok()?;
+    let age = std::fs::metadata(path).and_then(|meta| meta.modified()).ok()?.elapsed().ok()?;
+    (age > LOCK_STALE).then_some(said)
+}
+
+/// What a holder writes in its lock: a value no other holder has.
+fn holder() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TAKEN: AtomicU64 = AtomicU64::new(0);
+    let mut bytes = [0u8; 16];
+    match getrandom::getrandom(&mut bytes) {
+        Ok(()) => hex(&bytes),
+        // No randomness: this process, this moment and how many it took.
+        Err(_) => format!("{}-{}-{}", std::process::id(), now_ms(), TAKEN.fetch_add(1, Ordering::Relaxed)),
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        // Another's, once it was taken over: theirs to remove.
+        if self.held() {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -125,7 +180,14 @@ fn append(server: &Path, file: &str, mut entry: Value) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let Some(_lock) = Lock::take(&dir) else { return };
+    let Some(_lock) = Lock::take(&dir) else {
+        // Said where whoever runs the server reads: a line the log does
+        // not have is not passed over in silence.
+        eprintln!(
+            "kito-server: the audit log is held by something that does not finish: not written: {entry}"
+        );
+        return;
+    };
     let path = dir.join(file);
     let prev = last_hash(&path);
     entry["prev"] = json!(prev);

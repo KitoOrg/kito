@@ -669,7 +669,10 @@ shop is connected to `shop` on kito.example.com:7421 as bob.
 
 The session lasts thirty days (`[sign_in] days` in `server.toml`);
 `kito sign-in` gets another. A browser goes to `/-/sign-in/github` and
-comes back with a session cookie. Tokens stay for scripts and agents.
+comes back with a session cookie. Tokens stay for scripts and agents,
+and a person may have both: `kito-server user link` attaches an account
+to somebody who has a token, `user token` gives a token to somebody who
+signs in (see "The rules of a team").
 `scripts/demo-phase20.sh` shows a server and its plugin at work.
 
 A server says which of its plugins run in the directories connected to
@@ -993,6 +996,38 @@ kito people                  # admins: everybody on the server
 kito people add carol        # prints the token once
 kito people role carol admin # owners
 ```
+
+A person signs in with a token, with the accounts a plugin knows them by
+(`user add --identity`), or with both, and that can be changed; what
+would leave them with no way to sign in is refused.
+
+```bash
+kito-server --dir /srv/kito user link bob github:bob   # he keeps his token
+kito-server --dir /srv/kito user unlink bob github
+kito-server --dir /srv/kito user token bob             # a new one, printed once
+kito-server --dir /srv/kito user token bob --remove    # sign-in only
+kito-server --dir /srv/kito user list                  # bob [token, github:bob] (member): ...
+```
+
+From a connected directory, whoever may change a person does the same
+(an admin for a member, an owner for anybody), and everybody does it for
+themselves:
+
+```bash
+kito people link bob github:bob   # admins
+kito people unlink bob github
+kito people token bob             # prints the new token once
+kito people token                 # your own: this directory goes on with it
+kito people token --remove        # your own, taken away
+kito people unlink github         # your own
+```
+
+An account of your own is linked by signing in to it, from the server's
+pages (`/-/sign-in/github?link=1`): naming a login proves nothing. A new
+token in place of one, a token taken away and an identity unlinked end
+the person's other sessions at once, and the connections that were
+opened with the old token; the other directories connected with it are
+connected again with the new one (`kito connect`).
 
 A server written before 0.29 is read as it was meant: each repository a
 person had (`*`: every repository it has then) with the role they had in

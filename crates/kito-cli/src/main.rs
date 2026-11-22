@@ -327,6 +327,38 @@ enum PeopleCmd {
     Remove { name: String },
     /// Change a person's role on the server: member, admin, owner
     Role { name: String, role: String },
+    /// Attach an identity to a person: whoever signs in as it is them
+    ///
+    /// They keep their token. For whoever may change the person; an
+    /// account of your own is linked by signing in to it, in the server's
+    /// pages.
+    Link {
+        name: String,
+        /// Who they are for a way to sign in, as <method>:<login>
+        #[arg(value_name = "METHOD:LOGIN")]
+        identity: String,
+    },
+    /// Detach an identity of a way to sign in: yours, or a person's
+    ///
+    /// `kito people unlink github` is your own; `kito people unlink bob
+    /// github` is bob's. Their other sessions end.
+    #[command(override_usage = "kito people unlink [NAME] <METHOD>")]
+    Unlink {
+        /// The person, then the way to sign in; the way alone: your own
+        #[arg(value_name = "[NAME] METHOD", num_args = 1..=2, required = true)]
+        given: Vec<String>,
+    },
+    /// A new token, printed once: yours, or a person's
+    ///
+    /// The one before stops working at once. Your own is written in this
+    /// directory when it connects with a token.
+    Token {
+        /// The person (default: yourself)
+        name: Option<String>,
+        /// Take the token away instead: sign-in only from then on
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,9 +478,11 @@ enum Cmd {
     ///
     /// The server this directory is connected to. Without `now`, they are listed.
     Backup { what: Option<String> },
-    /// The people of the server (admins)
+    /// The people of the server (admins), and how each signs in
     ///
-    /// The server this directory is connected to.
+    /// The server this directory is connected to. Anybody gets a new
+    /// token of their own (`kito people token`) and unlinks an identity
+    /// of their own.
     People {
         #[command(subcommand)]
         command: Option<PeopleCmd>,
@@ -3488,6 +3522,9 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
     std::fs::create_dir_all(&dir).map_err(fail)?;
     remote.save(&dir).map_err(fail)?;
     let dir = dir.canonical().map_err(fail)?;
+    // Connected again, with a new token for one: the daemon it had holds
+    // what it was started with, and the one started now has this.
+    let _ = stop_daemon(&dir);
     // The main lane's files come first, so that the directory is the
     // project; then what Claude Code needs, added to what the project has.
     let main: Result<Value, String> = Client::connect_or_start(&dir)
@@ -3928,7 +3965,20 @@ fn cmd_grant(cli: &Cli, name: &str, role: Option<&String>) -> Outcome {
     Ok(())
 }
 
-/// `kito people`: the server's people, for its admins.
+/// What a session's token starts with, as the server makes them: told
+/// apart from the token of a person.
+const SESSION_PREFIX: &str = "kitos_";
+
+/// How a person signs in, as the server said it (`token`, `logins`): with
+/// a token, as who a way to sign in says they are, or both.
+fn signs_in(said: &Value) -> Vec<String> {
+    let token = (said["token"] == true).then(|| "with a token".to_owned());
+    let logins = said["logins"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    token.into_iter().chain(logins.map(|login| format!("as {login}"))).collect()
+}
+
+/// `kito people`: the server's people, for its admins; and how one signs
+/// in oneself, for anybody.
 fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
     let (remote, mut client) = server_here(cli, false)?;
     let said: Value = match command {
@@ -3940,6 +3990,20 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
         Some(PeopleCmd::Remove { name }) => client.call("server.people_remove", json!({ "user": name })),
         Some(PeopleCmd::Role { name, role }) => {
             client.call("server.people_role", json!({ "user": name, "role": role }))
+        }
+        Some(PeopleCmd::Link { name, identity }) => {
+            client.call("server.people_link", json!({ "user": name, "identity": identity }))
+        }
+        Some(PeopleCmd::Unlink { given }) => {
+            // The way to sign in is said last; nobody before it: oneself.
+            let (name, method) = match given.as_slice() {
+                [name, method] => (Some(name), Some(method)),
+                given => (None, given.first()),
+            };
+            client.call("server.people_unlink", json!({ "user": name, "method": method }))
+        }
+        Some(PeopleCmd::Token { name, remove }) => {
+            return people_token(cli, remote, client, name.as_deref(), *remove)
         }
     }
     .map_err(fail)?;
@@ -3963,8 +4027,13 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
                     (false, true) => format!("every repository; given {}", access.join(", ")),
                     (false, false) => access.join(", "),
                 };
+                // A server that does not say how they sign in is not guessed at.
+                let how = match person.get("token") {
+                    Some(_) => format!("; signs in {}", signs_in(person).join(" or ")),
+                    None => String::new(),
+                };
                 println!(
-                    "{:<16} {:<7} {access}",
+                    "{:<16} {:<7} {access}{how}",
                     person["user"].as_str().unwrap_or("?"),
                     person["role"].as_str().unwrap_or("?")
                 );
@@ -3983,6 +4052,109 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
         Some(PeopleCmd::Role { name, role }) => {
             println!("{name} is {role} on {} from their next connection.", remote.place())
         }
+        Some(PeopleCmd::Link { name, identity }) => {
+            println!("Whoever signs in to {} as {identity} is {name}.", remote.place());
+            println!("{name} signs in {}.", signs_in(&said).join(" or "));
+        }
+        Some(PeopleCmd::Unlink { given }) => {
+            let person = said["user"].as_str().unwrap_or("?");
+            let method = given.last().map(String::as_str).unwrap_or("?");
+            // Asked for oneself, it came through a session or a token of
+            // one's own, which goes on.
+            let ended = match given.len() {
+                1 => "their other sessions ended",
+                _ => "their sessions ended",
+            };
+            println!("{person} no longer signs in to {} with {method}: {ended}.", remote.place());
+            println!("{person} signs in {}.", signs_in(&said).join(" or "));
+        }
+        Some(PeopleCmd::Token { .. }) => {}
+    }
+    Ok(())
+}
+
+/// `kito people token [<name>] [--remove]`: a new token, or none. A new
+/// one of the person's own is written in this directory when a token is
+/// what it connects with, so that it keeps working; it is printed either
+/// way, this once.
+fn people_token(
+    cli: &Cli,
+    mut remote: Remote,
+    mut client: Client,
+    name: Option<&str>,
+    remove: bool,
+) -> Outcome {
+    let root = root_of(cli)?;
+    // Whether the person named is who asks: asked before the token
+    // changes, of a connection that may have been opened with it.
+    let own = match name {
+        None => true,
+        Some(name) => client.call::<Value>("server.whoami", json!({})).map_err(fail)?["user"] == name,
+    };
+    let mut said: Value =
+        client.call("server.people_token", json!({ "user": name, "remove": remove })).map_err(fail)?;
+    let person = said["user"].as_str().unwrap_or("?").to_owned();
+    let token = said["token"].as_str().map(str::to_owned);
+    // What this directory connects with: a person's token, or a session
+    // (which goes on as it is) or SSH.
+    let held = remote.token.as_deref().filter(|_| remote.server.is_some() && remote.sign_in.is_none());
+    let by_token = held.is_some_and(|held| !held.starts_with(SESSION_PREFIX));
+    let kept = match (&token, own && by_token) {
+        (Some(token), true) => {
+            remote.token = Some(token.clone());
+            let kept = remote.save(&root).map_err(fail);
+            // The directory's daemon holds the token it started with: the
+            // next command starts one that has this one.
+            let _ = stop_daemon(&root);
+            Some(kept)
+        }
+        _ => None,
+    };
+    if cli.json {
+        if own && token.is_some() {
+            said["kept_here"] = json!(matches!(kept, Some(Ok(()))));
+        }
+        print_json(&said);
+        return Ok(());
+    }
+    let place = remote.place();
+    let Some(token) = token else {
+        let connected = "what was connected with the token no longer works";
+        match own {
+            true => println!("You have no token on {place} any more: you sign in instead."),
+            false => println!("{person} has no token on {place} any more: they sign in instead."),
+        }
+        match own {
+            true => println!("Your other sessions ended, and {connected}."),
+            false => println!("Their sessions ended, and {connected}."),
+        }
+        if own && by_token {
+            println!("This directory was connected with it: `kito sign-in <method>` connects it again.");
+        }
+        return Ok(());
+    };
+    match own {
+        true => println!("Your new token on {place}, shown this once:\n{token}"),
+        false => println!("{person}'s new token on {place}, shown this once:\n{token}"),
+    }
+    // Who else needs it, in a line.
+    match (own, kept) {
+        (true, Some(Ok(()))) => println!(
+            "This directory has it. The other directories connected with the one you had need it too: `kito \
+             connect` them again with it."
+        ),
+        (true, Some(Err(why))) => println!(
+            "It could not be written in this directory ({why}): `kito connect` it again with it, and the \
+             other directories connected with the one you had."
+        ),
+        (true, None) => println!(
+            "This directory goes on as it is connected. The directories connected with a token you had need \
+             this one: `kito connect` them again with it."
+        ),
+        (false, _) => println!(
+            "A token they had no longer works, and their sessions ended: the directories connected with it \
+             need this one (`kito connect` them again with it)."
+        ),
     }
     Ok(())
 }

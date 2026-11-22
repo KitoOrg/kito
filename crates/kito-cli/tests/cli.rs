@@ -2504,6 +2504,216 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     assert!(ok(&shop, &["repos"]).contains("shop"));
 }
 
+#[test]
+fn how_people_sign_in_is_changed_from_a_connected_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let serverdir = base.join("server");
+    let server = |args: &[&str]| {
+        let mut command = Command::new(kito_server());
+        command
+            .arg("--dir")
+            .arg(&serverdir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".server-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    };
+    let run = |args: &[&str]| -> String {
+        let out = server(args).output().unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let token_in = |printed: &str| {
+        printed.lines().find(|line| line.starts_with("kito_")).expect(printed).trim().to_owned()
+    };
+    let src = base.join("src-repo");
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.py"), SHOP_PY).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-q", "-m", "start"]);
+    run(&["init", serverdir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let plugin = hello_plugin(&base, SIGNS);
+    run(&["plugin", "add", "--path", plugin.to_str().unwrap()]);
+    run(&["plugin", "enable", "hello"]);
+    let ada = token_in(&run(&["user", "add", "ada", "--role", "admin"]));
+    let bob = token_in(&run(&["user", "add", "bob", "--repo", "shop:write"]));
+    run(&["user", "add", "carol", "--identity", "hello:carol", "--repo", "shop:read"]);
+    struct Serving(std::process::Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        server(&["serve", "--listen", "127.0.0.1:0"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(serving.0.stdout.take().unwrap()), &mut line)
+        .unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap().to_owned();
+    // Who signed in at the provider that does not exist: a file says.
+    let at_hello = serverdir.join("plugins/hello/sign-in");
+    fs::create_dir_all(at_hello.parent().unwrap()).unwrap();
+    let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    let kept_in = |dir: &Path| fs::read_to_string(dir.join(".kito/remote.toml")).unwrap();
+    let unknown = "this token is not one the server knows";
+
+    ok(&base, &["connect", &address, "shop", "ada-dir", "--token", &ada]);
+    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob]);
+    ok(&base, &["connect", &address, "shop", "bob-desk", "--token", &bob]);
+    let (adadir, bobdir, bobdesk) = (base.join("ada-dir"), base.join("bob-dir"), base.join("bob-desk"));
+
+    // The admins see how each person signs in, never with what.
+    let people = |dir: &Path| -> Vec<String> {
+        let listed = ok(dir, &["people"]);
+        listed.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect()
+    };
+    assert_eq!(
+        people(&adadir),
+        [
+            "ada admin every repository; signs in with a token",
+            "bob member shop (write); signs in with a token",
+            "carol member shop (read); signs in as hello:carol",
+        ]
+    );
+
+    // Bob gets a new token of his own: said this once, and written where
+    // this directory keeps the one it connects with, so that it goes on,
+    // its daemon too.
+    ok(&bobdir, &["status"]);
+    let said = ok(&bobdir, &["people", "token"]);
+    let new = token_in(&said);
+    assert!(said.contains("Your new token on") && said.contains(", shown this once:"), "{said}");
+    let others = "This directory has it. The other directories connected with the one you had need it too: \
+                  `kito connect` them again with it.";
+    assert!(said.contains(others), "{said}");
+    assert!(new != bob && kept_in(&bobdir).contains(&format!("token = \"{new}\"")), "{}", kept_in(&bobdir));
+    assert!(!kept_in(&bobdir).contains(&bob));
+    assert!(ok(&bobdir, &["repos"]).contains("shop"));
+    ok(&bobdir, &["status"]);
+    assert!(ok(&bobdir, &["lanes"]).contains("No open lanes"));
+    // His other directory has the one before, which stopped at once, for
+    // its daemon too. Connected again with the new one, it goes on.
+    let refused = kito(&bobdesk, &["repos"]);
+    assert!(!refused.status.success() && errors(&refused).contains(unknown), "{}", errors(&refused));
+    assert!(errors(&kito(&bobdesk, &["lanes"])).contains(unknown));
+    let again = ok(&base, &["connect", &address, "shop", "bob-desk", "--token", &new]);
+    assert!(again.contains("as bob.") && again.contains("The main lane is in it (1 file)"), "{again}");
+    assert!(ok(&bobdesk, &["lanes"]).contains("No open lanes"));
+    // For a program, with whether this directory has it; and by his own
+    // name he is himself.
+    let said = json(&bobdir, &["--json", "people", "token"]);
+    let newer = said["token"].as_str().unwrap().to_owned();
+    assert_eq!(said, serde_json::json!({ "user": "bob", "token": newer, "kept_here": true }));
+    assert!(kept_in(&bobdir).contains(&newer) && !kept_in(&bobdir).contains(&new));
+    let said = ok(&bobdir, &["people", "token", "bob"]);
+    assert!(said.contains("Your new token on") && said.contains("This directory has it."), "{said}");
+    assert!(kept_in(&bobdir).contains(&token_in(&said)) && ok(&bobdir, &["repos"]).contains("shop"));
+
+    // Nobody else's is his to change; a token is all he signs in with;
+    // and a login named proves nothing.
+    let no = |dir: &Path, args: &[&str]| -> String {
+        let out = kito(dir, args);
+        assert!(!out.status.success(), "kito {args:?} should have failed");
+        errors(&out)
+    };
+    let said = no(&bobdir, &["people", "token", "carol"]);
+    assert!(said.contains("only an admin of this server may manage its people: bob is a member"), "{said}");
+    let said = no(&bobdir, &["people", "token", "--remove"]);
+    assert!(said.contains("bob would have no way to sign in: link an identity to them first"), "{said}");
+    let said = no(&bobdir, &["people", "unlink", "hello"]);
+    assert!(said.contains("bob has no identity of `hello`: there is nothing to unlink"), "{said}");
+    let said = no(&bobdir, &["people", "link", "bob", "hello:bob"]);
+    assert!(said.contains("naming a login proves nothing: bob links an account of their own"), "{said}");
+    assert!(ok(&bobdir, &["repos"]).contains("shop"));
+
+    // An admin attaches an identity to him: he keeps his token. He takes
+    // it away himself, with the way to sign in alone; she does by his name.
+    let said = ok(&adadir, &["people", "link", "bob", "hello:bob"]);
+    assert!(said.contains("Whoever signs in to") && said.contains("as hello:bob is bob."), "{said}");
+    assert!(said.contains("bob signs in with a token or as hello:bob."), "{said}");
+    assert!(people(&adadir)
+        .contains(&"bob member shop (write); signs in with a token or as hello:bob".to_owned()));
+    let said = ok(&bobdir, &["people", "unlink", "hello"]);
+    assert!(said.contains("bob no longer signs in to") && said.contains("with hello: their other sessions"));
+    assert!(said.contains("bob signs in with a token."), "{said}");
+    ok(&adadir, &["people", "link", "bob", "hello:bob"]);
+    let said = ok(&adadir, &["people", "unlink", "bob", "hello"]);
+    assert!(said.contains("with hello: their sessions ended.\nbob signs in with a token."), "{said}");
+    let said = no(&adadir, &["people", "unlink", "carol", "hello"]);
+    assert!(said.contains("carol would have no way to sign in: give them a token first"), "{said}");
+
+    // She gives him a new token: it is said to her, once, and the
+    // directory of his that had the one before is refused.
+    let said = ok(&adadir, &["people", "token", "bob"]);
+    assert!(said.contains("bob's new token on") && said.contains(", shown this once:"), "{said}");
+    assert!(said.contains("A token they had no longer works, and their sessions ended"), "{said}");
+    let given = token_in(&said);
+    assert!(errors(&kito(&bobdir, &["repos"])).contains(unknown));
+    assert!(!kept_in(&adadir).contains(&given) && ok(&adadir, &["repos"]).contains("shop"));
+    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &given]);
+
+    // With an identity too, he takes his token away from the directory
+    // that connects with it, which is told how to go on: by signing in.
+    ok(&adadir, &["people", "link", "bob", "hello:bob"]);
+    let said = ok(&bobdir, &["people", "token", "--remove"]);
+    assert!(said.contains("You have no token on") && said.contains("you sign in instead."), "{said}");
+    let how = "This directory was connected with it: `kito sign-in <method>` connects it again.";
+    assert!(said.contains(how), "{said}");
+    assert!(errors(&kito(&bobdir, &["repos"])).contains(unknown));
+    fs::write(&at_hello, "bob").unwrap();
+    assert!(ok(&bobdir, &["sign-in", "hello"]).contains("as bob: the session lasts 30 days."));
+    assert!(ok(&bobdir, &["repos"]).contains("shop"));
+    assert!(people(&adadir).contains(&"bob member shop (write); signs in as hello:bob".to_owned()));
+
+    // carol signs in: her directory holds a session, and goes on as it
+    // is. The token she asks for is said to her, for somewhere else.
+    fs::write(&at_hello, "carol").unwrap();
+    ok(&base, &["connect", &address, "shop", "carol-dir", "--sign-in", "hello"]);
+    let caroldir = base.join("carol-dir");
+    let session = kept_in(&caroldir);
+    assert!(session.contains("token = \"kitos_") && session.contains("sign_in = \"hello\""), "{session}");
+    let said = ok(&caroldir, &["people", "token"]);
+    let hers = token_in(&said);
+    assert!(said.contains("Your new token on"), "{said}");
+    assert!(said.contains("This directory goes on as it is connected."), "{said}");
+    assert_eq!(kept_in(&caroldir), session);
+    assert!(ok(&caroldir, &["repos"]).contains("shop"));
+    ok(&base, &["connect", &address, "shop", "carol-desk", "--token", &hers]);
+    let caroldesk = base.join("carol-desk");
+    assert!(ok(&caroldesk, &["repos"]).contains("shop"));
+    // She takes it away again: sign-in only. What it connected stops,
+    // the session she asked through does not; and her identity stays.
+    let said = ok(&caroldir, &["people", "token", "--remove"]);
+    assert!(
+        said.contains("You have no token on") && said.contains("any more: you sign in instead."),
+        "{said}"
+    );
+    assert!(!said.contains("This directory was connected with it"), "{said}");
+    assert!(errors(&kito(&caroldesk, &["repos"])).contains(unknown));
+    assert!(ok(&caroldir, &["repos"]).contains("shop"));
+    let said = no(&caroldir, &["people", "unlink", "hello"]);
+    assert!(said.contains("carol would have no way to sign in: give them a token first"), "{said}");
+
+    for dir in [&adadir, &bobdir, &bobdesk, &caroldir, &caroldesk] {
+        ok(dir, &["daemon", "stop"]);
+    }
+    drop(serving);
+    ok(&serverdir.join("repos/shop"), &["daemon", "stop"]);
+}
+
 const FOR_CLIENTS: &str = r#"name = "hello"
 version = "0.7.0"
 description = "Says what it is told"

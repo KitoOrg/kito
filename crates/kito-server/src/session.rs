@@ -1,7 +1,7 @@
 //! A client's session: who it is, which repository it is about, and its
 //! requests passed on to that repository's daemon.
 
-use crate::state::{FirstFiles, Role, Server, User};
+use crate::state::{hash_of, FirstFiles, Role, Server, User};
 use kitod::client::{Client, ClientError, PROTOCOL};
 use kitod::rpc::{self, Request, Response};
 use serde_json::{json, Value};
@@ -124,19 +124,135 @@ const MAINTAIN: &[&str] = &["protect", "configure"];
 /// The code of "there is no such repository for this person".
 pub const NO_SUCH_REPO: i64 = -32023;
 
+/// What a connection was opened with, or a request came with, kept as
+/// what it hashes to. It is looked at again before each request, and
+/// where a change is made: a token that is no longer the person's, and a
+/// session that ended, stop there (ADR 0006, amended).
+#[derive(Clone)]
+pub enum Came {
+    /// With a person's token.
+    Token(String),
+    /// With the token of a session.
+    Session(String),
+    /// With neither: something else said who they are (SSH, or the
+    /// secret of a plugin that asks as itself).
+    Otherwise,
+}
+
+impl Came {
+    /// What somebody came with, by the token they gave.
+    pub fn with(token: &str) -> Came {
+        match token.starts_with(crate::state::SESSION_PREFIX) {
+            true => Came::Session(hash_of(token)),
+            false => Came::Token(hash_of(token)),
+        }
+    }
+
+    /// Why what they came with is no longer `name`'s, by the server as it
+    /// is; `None`: it is theirs still.
+    pub fn no_longer(&self, now: &Server, name: &str) -> Option<String> {
+        let Some(them) = now.config.users.get(name) else {
+            return Some(format!("{name} is no longer a user of this server"));
+        };
+        match self {
+            Came::Token(hash) if them.token != *hash => Some(match them.has_token() {
+                true => format!("{name}'s token was changed: connect again with the new one"),
+                false => format!("{name} has no token any more: sign in instead (`kito sign-in <method>`)"),
+            }),
+            Came::Session(hash) if now.session_user(hash).as_deref() != Some(name) => {
+                Some("this session ended: sign in again (`kito sign-in`)".to_owned())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether somebody may still ask for a change, by the server as it is
+/// when the change is made (`Server::only_while`): what they came with is
+/// theirs still, and they are at least `least` on the server. A request
+/// that took its time, cloning or asking a plugin, changes nothing for
+/// somebody who was removed or made less meanwhile.
+pub fn still(
+    name: &str,
+    came: &Came,
+    least: crate::state::ServerRole,
+) -> impl Fn(&Server) -> Result<(), String> + Send + Sync + 'static {
+    let (name, came) = (name.to_owned(), came.clone());
+    move |now: &Server| {
+        if let Some(why) = came.no_longer(now, &name) {
+            return Err(why);
+        }
+        let role = now.config.users.get(&name).map(|them| them.server_role).unwrap_or_default();
+        match role >= least {
+            true => Ok(()),
+            false => {
+                Err(format!("{name} is no longer an {} of this server: nothing was changed", least.word()))
+            }
+        }
+    }
+}
+
+/// Who asks: their name, what the server had of them when the request
+/// began, and what the request came with.
+pub struct Asker<'a> {
+    pub name: &'a str,
+    pub user: &'a User,
+    pub came: &'a Came,
+}
+
+impl Asker<'_> {
+    /// The session the request came through, as what its token hashes to;
+    /// none: it came with a person's token, or through SSH.
+    fn session(&self) -> Option<&str> {
+        match self.came {
+            Came::Session(hash) => Some(hash),
+            _ => None,
+        }
+    }
+
+    /// What whoever asks is on the server by the configuration as it was
+    /// just read: an admin, an owner. Asked where a change is made, with
+    /// the lock held: what the request came with may have been taken away
+    /// since it began, and what they are may have changed.
+    fn standing(&self, now: &Server) -> Result<(bool, bool), No> {
+        use crate::state::ServerRole;
+        if let Some(why) = self.came.no_longer(now, self.name) {
+            return Err(No(rpc::REFUSED, why));
+        }
+        let them = now.config.users.get(self.name);
+        Ok((them.is_some_and(User::is_admin), them.is_some_and(|them| them.server_role == ServerRole::Owner)))
+    }
+}
+
+/// Why a request is not answered: its code, and what is wrong. What the
+/// server's state refuses (a `String`) is a refusal.
+pub struct No(i64, String);
+
+impl From<String> for No {
+    fn from(why: String) -> No {
+        No(rpc::REFUSED, why)
+    }
+}
+
+impl From<No> for (i64, String) {
+    fn from(no: No) -> (i64, String) {
+        (no.0, no.1)
+    }
+}
+
 /// Asks a repository's daemon one thing as a person: what their role
 /// allows, and, with `within`, of that only what needs one of these
 /// permissions (the pages of a server ask within what their plugin was
 /// given). The answer is the daemon's.
 pub fn ask(
     server: &Server,
-    name: &str,
-    user: &User,
+    who: &Asker,
     repo: &str,
     method: &str,
     params: Value,
     within: Option<&[kitod::plugins::Permission]>,
 ) -> Result<Value, (i64, String)> {
+    let (name, user) = (who.name, who.user);
     // The same answer for one that is not there and one that is not theirs.
     let resolved = server.resolve(repo);
     let repo = resolved.as_str();
@@ -145,7 +261,7 @@ pub fn ask(
     })?;
     let role = user.role_in(repo).unwrap_or(Role::Read);
     if PEOPLE.contains(&method) {
-        return people(server, name, user, Some(repo), Some(role), method, &params);
+        return people(server, who, Some(repo), Some(role), method, &params);
     }
     if MAINTAIN.contains(&method) && role < Role::Maintain {
         return Err((
@@ -275,10 +391,15 @@ fn sign_in(server: &Server, asked: &Value, reader: &mut dyn BufRead, writer: &mu
             Ok(identity) => identity,
             Err(why) => return refuse(writer, &why),
         };
-        // People added while this one was signing in count.
-        let now = Server::open(&server.dir);
-        let server = now.as_ref().unwrap_or(server);
-        let opened = server.signed_in(&identity).and_then(|name| Ok((server.open_session(&name)?, name)));
+        // People added while this one was signing in count; and nobody
+        // is signed in on what was read before, when it cannot be read.
+        let Ok(now) = Server::open(&server.dir) else { return refuse(writer, crate::state::UNREADABLE) };
+        let server = &now;
+        let opened = server.signed_in(&identity).and_then(|name| {
+            // Theirs still when the session is written: not unlinked meanwhile.
+            let token = server.open_session(&name, |now| now.signs_in_as(&identity, &name))?;
+            token.map(|token| (token, name)).ok_or_else(|| Server::nobody(&identity))
+        });
         return match opened {
             Ok((token, name)) => {
                 let days = server.config.sign_in.days;
@@ -299,6 +420,11 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
     let refuse = |writer: &mut dyn Write, reason: &str| {
         let _ = send(writer, &json!({ "error": reason }));
     };
+    // The server as it is now: people and repositories added since it
+    // started count for a connection made now. When what is on the disk
+    // cannot be read, nobody is let in on what was read before.
+    let Ok(now) = Server::open(&server.dir) else { return refuse(writer, crate::state::UNREADABLE) };
+    let server = &now;
     let hello: Value = serde_json::from_str(&first).unwrap_or(Value::Null);
     if let Some(asked) = hello.get("sign_in") {
         return sign_in(server, asked, reader, writer);
@@ -312,9 +438,10 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
     if hello.get("version").and_then(Value::as_u64) != Some(PROTOCOL) {
         return refuse(writer, &format!("this server speaks version {PROTOCOL} of the protocol"));
     }
-    let Some((name, mut user)) =
-        known.or_else(|| hello.get("token").and_then(Value::as_str).and_then(|token| server.user_of(token)))
-    else {
+    // The token counts when nothing else said who they are.
+    let token = hello.get("token").and_then(Value::as_str).filter(|_| known.is_none());
+    let mut came = token.map_or(Came::Otherwise, Came::with);
+    let Some((name, mut user)) = known.or_else(|| token.and_then(|token| server.user_of(token))) else {
         // The same answer for no token and for a wrong one; a session
         // says what it is by how it starts, and how to get another.
         let session = hello.get("token").and_then(Value::as_str);
@@ -372,21 +499,26 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
             continue;
         }
         // What the person may do now, not when they connected: one
-        // removed, or whose repository was taken away, is stopped at once.
-        if let Ok(now) = Server::open(&server.dir) {
-            match now.config.users.get(&name) {
-                Some(them) => user = them.clone(),
-                None => return refuse(writer, &format!("{name} is no longer a user of this server")),
-            }
-            if let Some((repo, _)) = &repo {
-                role = user.role_in(repo);
-                if role.is_none() {
-                    return refuse(writer, &format!("{name} may no longer use `{repo}`"));
-                }
-            }
-            person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
-            now.saw(&name);
+        // removed, or whose repository was taken away, is stopped at once,
+        // and so is a connection opened with what is no longer theirs.
+        // What cannot be checked is refused: no request is answered on
+        // what was read before.
+        let Ok(now) = Server::open(&server.dir) else { return refuse(writer, crate::state::UNREADABLE) };
+        let server = &now;
+        if let Some(why) = came.no_longer(server, &name) {
+            return refuse(writer, &why);
         }
+        if let Some(them) = server.config.users.get(&name) {
+            user = them.clone();
+        }
+        if let Some((repo, _)) = &repo {
+            role = user.role_in(repo);
+            if role.is_none() {
+                return refuse(writer, &format!("{name} may no longer use `{repo}`"));
+            }
+        }
+        person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
+        server.saw(&name);
         let parsed = serde_json::from_str::<Request>(&line);
         let asked = parsed.as_ref().map(|request| request.method.clone()).unwrap_or_default();
         let response = match parsed {
@@ -411,9 +543,6 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                         (name.as_str(), repo.as_ref().map(|(repo, _)| repo.as_str()), role.map(Role::word));
                     let answer = match (text("plugin"), text("ask"), who) {
                         (Some(plugin), Some(ask), (user, Some(repo), Some(role))) => {
-                            // People and plugins changed since this client connected count.
-                            let now = Server::open(&server.dir);
-                            let server = now.as_ref().unwrap_or(server);
                             let params = request.params.get("params").cloned().unwrap_or(Value::Null);
                             server
                                 .answer(plugin, ask, &params, (user, repo, role))
@@ -432,8 +561,19 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                 // Who may use the server's repositories, and as what (ADR 0014).
                 method if method.starts_with("server.") && PEOPLE.contains(&method) => {
                     let here = repo.as_ref().map(|(repo, _)| repo.as_str());
-                    match people(server, &name, &user, here, role, method, &request.params) {
-                        Ok(value) => Response::ok(request.id, value),
+                    let who = Asker { name: &name, user: &user, came: &came };
+                    match people(server, &who, here, role, method, &request.params) {
+                        Ok(value) => {
+                            // Their own new token: the connection that
+                            // asked for it goes on, opened with it now.
+                            let own = method == "server.people_token" && value["user"] == name.as_str();
+                            if let (Came::Token(hash), true, Some(new)) =
+                                (&mut came, own, value["token"].as_str())
+                            {
+                                *hash = hash_of(new);
+                            }
+                            Response::ok(request.id, value)
+                        }
                         Err((code, why)) => Response::err(request.id, code, why),
                     }
                 }
@@ -551,7 +691,6 @@ fn note_settings(server: &Server, name: &str, repo: &str, method: &str, params: 
     }
 }
 
-/// The server's people, asked from a connected directory.
 /// Why a plugin that asks as itself (ADR 0020) may not ask `method`, when
 /// it may not. What is asked of the server itself (its people, its
 /// repositories, its log, its backups) is a person's to ask: a plugin is
@@ -593,20 +732,44 @@ const PEOPLE: &[&str] = &[
     "server.people_add",
     "server.people_remove",
     "server.people_role",
+    // How a person signs in (ADR 0006, amended).
+    "server.people_link",
+    "server.people_unlink",
+    "server.people_token",
 ];
 
-/// Answers one of `PEOPLE`, as `name` with what they may do: `here` the
-/// repository of the session, `role` theirs in it.
+/// How a client connects to this server: the port it listens on, whether
+/// it encrypts, and the fingerprint its certificate is known by (none
+/// when it does not encrypt, or when an authority vouches for it). None
+/// of it is a secret: it is what a `kito connect` line is written with.
+pub fn clients(server: &Server) -> Value {
+    let (port, plain) = match SERVING.get() {
+        Some((bound, plain)) => (Some(bound.port().to_string()), *plain),
+        None => (server.config.listen.rsplit_once(':').map(|(_, port)| port.to_owned()), false),
+    };
+    let by_fingerprint = !plain && !crate::tls::from_authority(&server.dir);
+    let fingerprint = by_fingerprint.then(|| crate::tls::fingerprint(&server.dir).ok()).flatten();
+    json!({ "port": port, "plain": plain, "fingerprint": fingerprint })
+}
+
+/// The server's people and repositories, asked from a connected
+/// directory or from a page: answers one of `PEOPLE`, as whoever asks
+/// with what they may do. `here` is the repository of the session, `role`
+/// theirs in it.
+///
+/// What changes the configuration is made as one change (`Server::change`):
+/// who asks, what they are and what they ask about are checked there, on
+/// the configuration as it is on the disk then.
 pub fn people(
     server: &Server,
-    name: &str,
-    user: &User,
+    who: &Asker,
     here: Option<&str>,
     role: Option<Role>,
     method: &str,
     params: &Value,
 ) -> Result<Value, (i64, String)> {
     use crate::state::ServerRole;
+    let (name, user) = (who.name, who.user);
     let refused = |why: String| (rpc::REFUSED, why);
     let text = |key: &str| {
         params
@@ -618,6 +781,19 @@ pub fn people(
     let mut now = Server::open(&server.dir).map_err(|e| (rpc::INTERNAL_ERROR, e))?;
     let admin = user.is_admin();
     let owner = user.server_role == ServerRole::Owner;
+    // And what changes while this is answered: nothing is changed for
+    // somebody who, when the change is made, may no longer ask for it.
+    let least = match method {
+        "server.repo_unarchive" | "server.repo_delete" => ServerRole::Owner,
+        // Theirs to ask whatever they are on the server: what else they
+        // must be is checked where each of these is made.
+        "server.settings_history" | "server.members" | "server.grant" => ServerRole::Member,
+        "server.people_link" | "server.people_unlink" | "server.people_token" => ServerRole::Member,
+        _ => ServerRole::Admin,
+    };
+    now.only_while(still(name, who.came, least));
+    let admins_manage = format!("only an admin of this server may manage its people: {name} is a member");
+    let owners_name = "only an owner of this server names its admins and owners";
     match method {
         "server.settings_history" => {
             let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
@@ -664,7 +840,21 @@ pub fn people(
                 Some(word) => Some(Role::of_word(word).map_err(|why| (rpc::INVALID_PARAMS, why))?),
                 None => None,
             };
-            let changed = now.grant(person, repo, given).map_err(refused)?;
+            let changed = now.change(|change| -> Result<bool, No> {
+                // Theirs to say still, by what they may do here now.
+                who.standing(change)?;
+                let theirs = change.config.users.get(name).and_then(|them| them.role_in(repo));
+                if theirs < Some(Role::Maintain) {
+                    return Err(No(
+                        rpc::REFUSED,
+                        format!(
+                            "only a maintainer of `{repo}` may say who uses it: {name} may {}",
+                            theirs.map(Role::word).unwrap_or("nothing")
+                        ),
+                    ));
+                }
+                Ok(change.grant(person, repo, given)?)
+            })?;
             let what = match given {
                 Some(given) => format!("{person} may {} in {repo}", given.word()),
                 None => format!("{person} may no longer use {repo}"),
@@ -674,9 +864,11 @@ pub fn people(
             }
             Ok(json!({ "user": person, "repo": repo, "role": given.map(Role::word), "changed": changed }))
         }
-        _ if !admin => {
-            Err(refused(format!("only an admin of this server may manage its people: {name} is a member")))
+        // How a person signs in: their own to change, whatever their role.
+        "server.people_link" | "server.people_unlink" | "server.people_token" => {
+            change_sign_in(&mut now, who, method, params)
         }
+        _ if !admin => Err(refused(admins_manage)),
         // The server's repositories (ADR 0018), for admins; restoring and
         // deleting for owners.
         "server.repos_all" => {
@@ -728,7 +920,9 @@ pub fn people(
                     }
                 }
             };
-            // Whoever adds it maintains it.
+            // Whoever adds it maintains it: given once it is there, to
+            // whoever is an admin still (`only_while`), however long the
+            // clone took.
             let _ = now.grant(name, &repo, Some(Role::Maintain));
             now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{with}") }));
             Ok(json!({ "name": repo }))
@@ -883,7 +1077,7 @@ pub fn people(
                 .map(|(person, them)| {
                     let access: serde_json::Map<String, Value> =
                         them.access.iter().map(|(repo, role)| (repo.clone(), json!(role.word()))).collect();
-                    json!({ "user": person, "email": them.email, "role": them.server_role.word(), "access": access, "logins": them.logins, "seen_ms": now.seen(person) })
+                    json!({ "user": person, "email": them.email, "role": them.server_role.word(), "access": access, "token": them.has_token(), "logins": them.logins, "seen_ms": now.seen(person) })
                 })
                 .collect();
             Ok(json!(people))
@@ -895,41 +1089,66 @@ pub fn people(
                 None => ServerRole::Member,
             };
             if given >= ServerRole::Admin && !owner {
-                return Err(refused("only an owner of this server names its admins and owners".to_owned()));
+                return Err(refused(owners_name.to_owned()));
             }
+            // The plugin is asked first: it may take its time, and nothing
+            // waits for it with the configuration held.
             let identity = match params.get("identity").and_then(Value::as_str) {
                 Some(identity) => Some(now.look_up(identity).map_err(refused)?),
                 None => None,
             };
             let email = params.get("email").and_then(Value::as_str).map(str::to_owned);
-            let token = now.add_user(person, email, &[], given, identity.as_ref()).map_err(refused)?;
-            now.tell("user_added", json!({ "user": person, "role": given.word(), "by": name, "what": format!("{person} ({})", given.word()) }));
+            let token = now.change(|change| -> Result<Option<String>, No> {
+                let (admin, owner) = who.standing(change)?;
+                if !admin {
+                    return Err(No(rpc::REFUSED, admins_manage.clone()));
+                }
+                if given >= ServerRole::Admin && !owner {
+                    return Err(No(rpc::REFUSED, owners_name.to_owned()));
+                }
+                Ok(change.add_user(person, email, &[], given, identity.as_ref())?)
+            })?;
+            // Kept now, and told once the answer is on its way: it has
+            // their token, which is said this once.
+            let what = format!("{person} ({})", given.word());
+            let added = json!({ "user": person, "role": given.word(), "by": name, "what": what });
+            now.tell_after(vec![("user_added", added)]);
             // What they connect with: the port the server listens on, its certificate.
-            let (port, plain) = match SERVING.get() {
-                Some((bound, plain)) => (Some(bound.port().to_string()), *plain),
-                None => (now.config.listen.rsplit_once(':').map(|(_, port)| port.to_owned()), false),
-            };
+            let how = clients(&now);
             Ok(
-                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": (!plain && !crate::tls::from_authority(&now.dir)).then(|| crate::tls::fingerprint(&now.dir).ok()).flatten(), "plain": plain, "port": port }),
+                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": how["fingerprint"], "plain": how["plain"], "port": how["port"] }),
             )
         }
         "server.people_remove" | "server.people_role" => {
             let person = text("user")?;
-            let theirs = now.config.users.get(person).map(|them| them.server_role);
-            let theirs = theirs.ok_or_else(|| refused(format!("{person} is not a user of this server")))?;
-            if theirs >= ServerRole::Admin && !owner {
-                return Err(refused(format!("{person} is an {}: only an owner changes them", theirs.word())));
-            }
-            if method == "server.people_remove" {
-                now.remove_user(person).map_err(refused)?;
+            let given = match method {
+                "server.people_remove" => None,
+                _ => Some(ServerRole::of_word(text("role")?).map_err(|why| (rpc::INVALID_PARAMS, why))?),
+            };
+            now.change(|change| -> Result<(), No> {
+                // Who asks, and who they change, as both are now.
+                let (admin, owner) = who.standing(change)?;
+                if !admin {
+                    return Err(No(rpc::REFUSED, admins_manage.clone()));
+                }
+                let theirs = change.config.users.get(person).map(|them| them.server_role);
+                let theirs = theirs.ok_or_else(|| format!("{person} is not a user of this server"))?;
+                if theirs >= ServerRole::Admin && !owner {
+                    let why = format!("{person} is an {}: only an owner changes them", theirs.word());
+                    return Err(No(rpc::REFUSED, why));
+                }
+                match given {
+                    None => Ok(change.remove_user(person)?),
+                    Some(given) if given >= ServerRole::Admin && !owner => {
+                        Err(No(rpc::REFUSED, owners_name.to_owned()))
+                    }
+                    Some(given) => Ok(change.set_server_role(person, given)?),
+                }
+            })?;
+            let Some(given) = given else {
                 now.tell("user_removed", json!({ "user": person, "by": name, "what": person }));
                 return Ok(json!({ "user": person, "removed": true }));
-            }
-            let given = ServerRole::of_word(text("role")?).map_err(|why| (rpc::INVALID_PARAMS, why))?;
-            if given >= ServerRole::Admin && !owner {
-                return Err(refused("only an owner of this server names its admins and owners".to_owned()));
-            }
-            now.set_server_role(person, given).map_err(refused)?;
+            };
             now.tell("role_changed", json!({ "user": person, "server_role": given.word(), "by": name, "what": format!("{person}: {}", given.word()) }));
             Ok(json!({ "user": person, "role": given.word() }))
         }
@@ -938,6 +1157,140 @@ pub fn people(
             format!("`{method}` is not something a client can ask through the server"),
         )),
     }
+}
+
+/// Changes how a person signs in (ADR 0006, amended): an identity attached
+/// (`server.people_link`) or taken away (`server.people_unlink`), a new
+/// token or none (`server.people_token`). Nobody named: whoever asks.
+///
+/// A new token of one's own, taking one's own away and unlinking one's own
+/// identity are anybody's to ask. The rest is for whoever may change the
+/// person, as for their role: an admin for a member, an owner for
+/// anybody. That holds for linking oneself too: a login named proves
+/// nothing, and a person attaches an account of their own by signing in
+/// to it (`/-/sign-in/<method>?link=1`).
+fn change_sign_in(
+    now: &mut Server,
+    who: &Asker,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
+    use crate::state::ServerRole;
+    let name = who.name;
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
+    };
+    let person = match params.get("user") {
+        None | Some(Value::Null) => name,
+        Some(Value::String(person)) => person.as_str(),
+        Some(_) => return Err((rpc::INVALID_PARAMS, "`user` is the name of a person".to_owned())),
+    };
+    let own = person == name;
+    let by_signing_in = |other: &str| {
+        No(
+            rpc::REFUSED,
+            format!(
+                "naming a login proves nothing: {name} links an account of their own by signing in to it (in \
+                 a browser, `/-/sign-in/<method>?link=1` at the server's web address), or {other} links it for \
+                 them"
+            ),
+        )
+    };
+    // Whether they may, by the server as it is: what they came with is
+    // theirs still, and they may change that person. Asked where each
+    // change is made, on what was just read; and once before anything
+    // else, so that whoever may not is told that and no more, and no
+    // plugin is asked for them.
+    let may = |now: &Server| -> Result<(), No> {
+        let (admin, owner) = who.standing(now)?;
+        if own && method != "server.people_link" {
+            return Ok(());
+        }
+        if !admin {
+            return Err(match own {
+                true => by_signing_in("an admin"),
+                false => No(
+                    rpc::REFUSED,
+                    format!("only an admin of this server may manage its people: {name} is a member"),
+                ),
+            });
+        }
+        let theirs = now.config.users.get(person).map(|them| them.server_role);
+        let theirs = theirs.ok_or_else(|| format!("{person} is not a user of this server"))?;
+        match theirs >= ServerRole::Admin && !owner {
+            true if own => Err(by_signing_in("an owner")),
+            true => {
+                Err(No(rpc::REFUSED, format!("{person} is an {}: only an owner changes them", theirs.word())))
+            }
+            false => Ok(()),
+        }
+    };
+    may(now)?;
+    // What happened is kept before the answer, and told to the plugins
+    // once the answer is on its way (`tell_after`): the change, then each
+    // session it ended. A plugin that is slow holds no token back.
+    match method {
+        "server.people_link" => {
+            let identity = now.look_up(text("identity")?).map_err(|why| (rpc::REFUSED, why))?;
+            // The plugin took its time: who may is asked again, where the
+            // link is made.
+            let linked = now.change(|change| -> Result<bool, No> {
+                may(change)?;
+                Ok(change.link(person, &identity)?)
+            })?;
+            if linked {
+                let what = format!("{person}: {}", identity.written());
+                let event = json!({ "user": person, "identity": identity.key(), "by": name, "what": what });
+                now.tell_after(vec![("identity_linked", event)]);
+            }
+        }
+        "server.people_unlink" => {
+            let way = text("method")?;
+            let (login, ended) = now.change(|change| -> Result<(String, usize), No> {
+                may(change)?;
+                Ok(change.unlink(person, way, who.session())?)
+            })?;
+            let event = json!({ "user": person, "by": name, "what": format!("{person}: {login}") });
+            now.tell_after(Server::with_sessions_ended(("identity_unlinked", event), person, ended));
+        }
+        _ => {
+            let remove = match params.get("remove") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(remove)) => *remove,
+                Some(_) => return Err((rpc::INVALID_PARAMS, "`remove` is true or false".to_owned())),
+            };
+            if !remove {
+                let (token, replaced, ended) = now.change(|change| -> Result<(String, bool, usize), No> {
+                    may(change)?;
+                    Ok(change.change_token(person, who.session())?)
+                })?;
+                let what = match replaced {
+                    true => person.to_owned(),
+                    false => format!("{person}, who had none"),
+                };
+                let event = json!({ "user": person, "replaced": replaced, "by": name, "what": what });
+                now.tell_after(Server::with_sessions_ended(("token_changed", event), person, ended));
+                // Said this once, to whoever asked: the server keeps what it hashes to.
+                return Ok(json!({ "user": person, "token": token }));
+            }
+            let ended = now.change(|change| -> Result<usize, No> {
+                may(change)?;
+                Ok(change.remove_token(person, who.session())?)
+            })?;
+            let event = json!({ "user": person, "by": name, "what": person });
+            now.tell_after(Server::with_sessions_ended(("token_removed", event), person, ended));
+            return Ok(json!({ "user": person, "token": null }));
+        }
+    }
+    let them = now.config.users.get(person);
+    Ok(json!({
+        "user": person,
+        "token": them.is_some_and(User::has_token),
+        "logins": them.map(|them| them.logins.clone()).unwrap_or_default(),
+    }))
 }
 
 /// Whether a request gives a new repository files to start with.
@@ -1049,13 +1402,13 @@ fn serve_client(server: &Server, stream: TcpStream, tls: Option<Arc<rustls::Serv
     }
 }
 
-/// Listens for clients, each served on a thread of its own. Connections
-/// are encrypted with the server's certificate; `plain`: they are not,
-/// and the server listens on this machine only.
 /// Where this process serves clients, and whether it encrypts: what a
 /// person added from a page connects to.
 static SERVING: std::sync::OnceLock<(std::net::SocketAddr, bool)> = std::sync::OnceLock::new();
 
+/// Listens for clients, each served on a thread of its own. Connections
+/// are encrypted with the server's certificate; `plain`: they are not,
+/// and the server listens on this machine only.
 pub fn serve(server: Server, listen: Option<&str>, plain: bool) -> Result<(), String> {
     let address = listen.unwrap_or(&server.config.listen).to_owned();
     let listener = TcpListener::bind(&address).map_err(|e| format!("{address}: {e}"))?;
@@ -1085,14 +1438,158 @@ pub fn serve(server: Server, listen: Option<&str>, plain: bool) -> Result<(), St
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let (server, tls) = (server.clone(), tls.clone());
-        std::thread::spawn(move || {
-            // People and repositories added since the server started
-            // count for a connection made now.
-            match Server::open(&server.dir) {
-                Ok(now) => serve_client(&now, stream, tls),
-                Err(_) => serve_client(&server, stream, tls),
-            }
-        });
+        // Each connection reads the server as it is when it says hello
+        // (`run`): what was read when this started is only where it is.
+        std::thread::spawn(move || serve_client(&server, stream, tls));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ServerRole;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// One of `PEOPLE`, asked as a request of whoever holds `token` is
+    /// answered: who that is by the server as it is, then what they ask.
+    fn asks(dir: &Path, token: &str, method: &str, params: Value) -> Result<Value, String> {
+        let server = Server::open(dir)?;
+        let (name, user) = server.user_of(token).ok_or("this token is not one the server knows")?;
+        let came = Came::with(token);
+        let who = Asker { name: &name, user: &user, came: &came };
+        people(&server, &who, None, None, method, &params).map_err(|(_, why)| why)
+    }
+
+    fn token_in(answer: &Value) -> String {
+        answer["token"].as_str().unwrap_or_else(|| panic!("no token in {answer}")).to_owned()
+    }
+
+    #[test]
+    fn what_an_admin_took_away_is_not_brought_back_by_whoever_asks_for_tokens_in_a_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = Server::init(dir.path()).unwrap();
+        let ada = server.add_user("ada", None, &[], ServerRole::Owner, None).unwrap().unwrap();
+        // bob asks for a new token over and over: each request reads the
+        // server, and writes it. The token he holds is the last he was told.
+        let (stop, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let (holds, given) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicUsize::new(0)));
+        let looping = {
+            let (dir, stop, asked) = (dir.path().to_owned(), stop.clone(), asked.clone());
+            let (holds, given) = (holds.clone(), given.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let with = holds.lock().unwrap().clone();
+                    if let Ok(answer) = asks(&dir, &with, "server.people_token", json!({})) {
+                        given.fetch_add(1, Ordering::SeqCst);
+                        let mut holds = holds.lock().unwrap();
+                        // Unless he was added again meanwhile, with another.
+                        if *holds == with {
+                            *holds = token_in(&answer);
+                        }
+                    }
+                    asked.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        // Whatever he had asked when a change was made has been answered by then.
+        let later = || {
+            let at = asked.load(Ordering::SeqCst);
+            while asked.load(Ordering::SeqCst) < at + 2 {
+                std::thread::yield_now();
+            }
+        };
+        let role = || {
+            let now = Server::open(dir.path()).unwrap();
+            now.config.users.get("bob").map(|bob| bob.server_role)
+        };
+        let as_ada = |method: &str, params: Value| asks(dir.path(), &ada, method, params).unwrap();
+        for round in 0..300 {
+            let added = as_ada("server.people_add", json!({ "user": "bob", "role": "admin" }));
+            *holds.lock().unwrap() = token_in(&added);
+            later();
+            assert_eq!(role(), Some(ServerRole::Admin), "round {round}");
+            // Made a member, he stays one, however he writes.
+            as_ada("server.people_role", json!({ "user": "bob", "role": "member" }));
+            later();
+            assert_eq!(role(), Some(ServerRole::Member), "round {round}: he is an admin again");
+            // Removed, he stays removed.
+            as_ada("server.people_remove", json!({ "user": "bob" }));
+            later();
+            assert_eq!(role(), None, "round {round}: he is back");
+        }
+        stop.store(true, Ordering::SeqCst);
+        looping.join().unwrap();
+        // He did write all along: a new token in every round, at the least.
+        assert!(given.load(Ordering::SeqCst) >= 300, "{} tokens", given.load(Ordering::SeqCst));
+        crate::state::told();
+    }
+
+    #[test]
+    fn a_request_changes_nothing_once_what_it_came_with_is_no_longer_theirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = Server::init(dir.path()).unwrap();
+        let bob = server.add_user("bob", None, &[], ServerRole::Admin, None).unwrap().unwrap();
+        let carol = server.add_user("carol", None, &[], ServerRole::Member, None).unwrap().unwrap();
+        // A request of bob's has begun: who he is, and what he may, were read.
+        let began = Server::open(dir.path()).unwrap();
+        let (name, user) = began.user_of(&bob).unwrap();
+        let came = Came::with(&bob);
+        let who = Asker { name: &name, user: &user, came: &came };
+        let asks = |method: &str, params: Value| people(&began, &who, None, None, method, &params);
+        let everything = [
+            ("server.people_token", json!({})),
+            ("server.people_token", json!({ "remove": true })),
+            ("server.people_unlink", json!({ "method": "hello" })),
+            ("server.people_token", json!({ "user": "carol" })),
+            ("server.people_role", json!({ "user": "carol", "role": "admin" })),
+            ("server.people_remove", json!({ "user": "carol" })),
+            ("server.people_add", json!({ "user": "dave" })),
+        ];
+
+        // Meanwhile he is made a member: what is an admin's to ask is no longer his.
+        server.set_server_role("bob", ServerRole::Member).unwrap();
+        let members = "only an admin of this server may manage its people: bob is a member";
+        let no_longer = "bob is no longer an admin of this server: nothing was changed";
+        for (method, params) in &everything[3..] {
+            let (code, why) = asks(method, params.clone()).unwrap_err();
+            assert_eq!(code, rpc::REFUSED, "{method}: {why}");
+            assert!(why == members || why == no_longer, "{method}: {why}");
+        }
+
+        // And his token is replaced, as one that leaked is: the request
+        // that came with it gets no token of its own, and changes nothing.
+        let (new, _, _) = server.change_token("bob", None).unwrap();
+        let changed = "bob's token was changed: connect again with the new one";
+        for (method, params) in &everything {
+            let refused = asks(method, params.clone()).unwrap_err();
+            assert_eq!(refused, (rpc::REFUSED, changed.to_owned()), "{method}");
+        }
+        let after = Server::open(dir.path()).unwrap();
+        assert_eq!(after.user_of(&new).map(|(name, _)| name).as_deref(), Some("bob"));
+        assert_eq!(after.user_of(&carol).map(|(name, _)| name).as_deref(), Some("carol"));
+        assert_eq!(after.config.users.len(), 2);
+        assert_eq!(after.config.users["carol"].server_role, ServerRole::Member);
+
+        // Removed, he is nobody: so is what he had asked.
+        server.remove_user("bob").unwrap();
+        let (_, why) = asks("server.people_token", json!({})).unwrap_err();
+        assert_eq!(why, "bob is no longer a user of this server");
+        assert!(!Server::open(dir.path()).unwrap().config.users.contains_key("bob"));
+
+        // What is an owner's to ask is for whoever is an owner still when
+        // it is done: carol was one when she asked.
+        server.set_server_role("carol", ServerRole::Owner).unwrap();
+        let began = Server::open(dir.path()).unwrap();
+        let (name, user) = began.user_of(&carol).unwrap();
+        let came = Came::with(&carol);
+        let who = Asker { name: &name, user: &user, came: &came };
+        server.set_server_role("carol", ServerRole::Admin).unwrap();
+        let gone = json!({ "name": "shop", "confirm": "shop" });
+        let (_, why) = people(&began, &who, None, None, "server.repo_delete", &gone).unwrap_err();
+        assert_eq!(why, "carol is no longer an owner of this server: nothing was changed");
+        crate::state::told();
+    }
 }

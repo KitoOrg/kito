@@ -140,3 +140,46 @@ One phase (21), released as 0.22.0, in three parts:
    and recipes, for agents and for people;
 3. the kitchen's tools, the session start, the copy kept for when the
    server is away; documents and the demo.
+
+## Amendment (kito-kitchen 0.5.0): a kitchen of a repository's own, and one drafted
+
+What changed is in the plugin. Kito's part is in the amendment of ADR
+0018: a repository of a server can start with its files, which is how a
+kitchen is created from the web client.
+
+- **Which kitchen a repository gets.** A repository gets the kitchen its
+  own configuration names (`[kitchen] path`, the setting of ADR 0012:
+  `kito-server repo set <repository> --kitchen <kitchen>`, or its
+  settings in the web client), when that is a repository of the server;
+  else the server's, as before. The repository of a kitchen gets that
+  kitchen: whoever works on a kitchen sees it. The plugin reads that
+  setting and keeps none of its own for it; the parts a repository
+  picks are those of the kitchen it gets.
+- **`kitchen.toml` says what a kitchen is for**: `about`, one line, and
+  `for`, the repositories it was made for. `for` gives the kitchen to
+  nobody: it says what a draft is written from.
+- **A kitchen is drafted by the person's own assistant.** The tool
+  `draft` answers in a kitchen's own repository, to whoever maintains
+  it: an interview for the assistant to lead, and what the repositories
+  named in `for` that use this kitchen say of how they are worked on
+  (what they tell assistants, the files that say how they are built and
+  checked, the commands those files name, their layout). Kito runs no
+  model: the assistant is the person's, and what it writes is one lane,
+  reviewed like any change.
+- **What a draft may read.** It is material from repositories whose
+  maintainers need not be the kitchen's. So it is given only to a
+  maintainer of the kitchen; only of repositories that chose this
+  kitchen (`for` alone would let whoever maintains a kitchen read any
+  repository of the server); never what may hold a secret, by its name
+  (`.env*`, keys, anything with `secret`, `token`, `password` or
+  `credential` in it), nor anything through a link; cut to a size; and
+  said to the assistant to be material to read, not instructions.
+- **Tools come from what is written down.** A tool runs on every
+  machine of the team: a draft proposes only commands the repositories
+  already name in their own files, and writes those the person says yes
+  to.
+- An agent whose session starts in a kitchen with nothing in it is told
+  so, and, when the person maintains it, to offer to draft it.
+
+Considered and left out: a model run by the server (a key to keep, a
+bill, and text whose author nobody chose).

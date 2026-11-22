@@ -1846,3 +1846,41 @@ amended). It is refused them by name, before the person's rules are
 looked at, rather than given a lesser role: a role would let it through
 again the day a request is added for that role. What it may know of a
 repository's people comes with `admin`, which an administrator gives.
+
+### D-180 · How a person signs in is theirs to change, except by naming a login
+A person added with a token could not sign in with an identity later,
+nor the other way, without being removed and added again
+([ADR 0006](adr/0006-server-plugins.md), amended). A token and
+identities are kept side by side, never neither. Each person renews or
+takes away their own token and unlinks their own identity: whoever holds
+what they sign in with is them already. Linking is the one change that
+lets somebody in for good, so it takes the provider's word (signing in
+to the account, `?link=1`) or somebody who could change the person
+anyway, never a login typed by the person. What takes something away
+ends every other session of the person rather than the ones opened with
+it: a session does not say what it was opened with, and a guess that is
+wrong leaves a stolen one alive. A connection of a client is told apart
+instead, by remembering what it was opened with: one comparison at each
+request, where the person is looked at again already. A link is known
+by a value the browser alone has, kept on the server as what it hashes
+to and used once, rather than by what its session hashes to: that is
+the key of the sessions' file, and whoever reads the disk or a backup
+has it.
+
+### D-181 · A change of the server's configuration is made alone, on what is on the disk
+Whatever wrote `server.toml` wrote back what it had read when its
+request began, so that a change made in between was undone: a token
+taken away, a person removed, a role lost
+([ADR 0014](adr/0014-roles.md), amended). A lock alone does not mend
+that: the old copy is still written, one writer after the other. So a
+change is made under the lock on the file read again, and what it
+checks it checks there, who asks included. Reading again rather than
+merging what two writers meant: a change is small and says what it
+changes, and a merge of two configurations would have to guess. One
+lock for the configuration and the sessions rather than one each: what
+matters most changes both, and two locks need an order every writer
+must keep. What is slow stays outside the lock and is checked again
+inside it, so that the lock is held for a read and a write and no
+longer. What a writer remembers of the file it read is a net under
+this, not the way it works: it turns a writer nobody converted into a
+refusal instead of a change lost without a word.

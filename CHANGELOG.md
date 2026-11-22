@@ -4,6 +4,87 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.3]
+
+How a person signs in can be changed
+([ADR 0006](docs/adr/0006-server-plugins.md), amended): a token,
+identities, or both, never nothing.
+
+- **On the server's machine**: `kito-server user link <name>
+  <method:login>` attaches an identity to somebody who has a token,
+  `user unlink <name> <method>` detaches it, `user token <name>` gives a
+  new token (printed once; the old one stops at once) and `user token
+  <name> --remove` takes it away. `user list` says how each person signs
+  in: `[token, github:bob]`.
+- **From a connected directory**: `kito people link <name>
+  <method:login>`, `kito people unlink [<name>] <method>` and `kito
+  people token [<name>] [--remove]`, for whoever may change the person
+  (an admin for a member, an owner for anybody). With no name it is
+  oneself, whatever one's role: a new token of one's own is written in
+  the directory when a token is what it connects with, and printed once.
+  `kito people` says how each person signs in.
+- **Requests**: `server.people_link`, `server.people_unlink` and
+  `server.people_token`, through a client's connection and `POST
+  /-/people`; `server.people` says `token: true|false` for each person.
+  A plugin that asks as itself is refused them.
+- **An account of one's own is linked by signing in to it**: `GET
+  /-/sign-in/<method>?link=1` from a browser that is signed in attaches
+  the account to who is signed in, and opens no session. Nobody links
+  themselves by naming a login. The browser brings back a value made
+  for that link, which works once, for ten minutes, while its session
+  lasts; the server keeps only what it hashes to, so nothing on its
+  disk or in a backup brings anybody back.
+- **What a change ends**: a new token in place of one, a token taken
+  away and an identity unlinked end, at once, the person's other
+  sessions and the connections of clients opened with a token that is no
+  longer theirs (`bob's token was changed: connect again with the new
+  one`). A connection opened with a session now ends with its session.
+  The sessions end first and the configuration is written after: when
+  the sessions cannot be ended, nothing changes.
+- **An identity counts while the server offers its way**: with the
+  plugin that signs people in with `github` disabled, somebody whose
+  only identity is of `github` keeps their token.
+- **`/-/me`** says `signs_in: { token, logins }`, and `clients: { port,
+  plain, fingerprint }`: how a client connects, for a `kito connect`
+  line.
+- New in the audit log and for the plugins that listen:
+  `identity_linked`, `identity_unlinked`, `token_changed`,
+  `token_removed`. They are kept in the log before whoever asked is
+  answered, and told to the plugins after: a plugin that is slow holds
+  no token back, a new person's (`user_added`) included.
+- `kito connect` on a directory that is connected already starts its
+  daemon again: a directory is given a new token that way.
+
+Found while this was reviewed, and fixed for everything that writes the
+server's configuration, not only for signing in
+([ADR 0014](docs/adr/0014-roles.md), amended):
+
+- **A change of the server's configuration is made alone, on what is on
+  the disk at that moment.** Whatever wrote `server.toml` wrote the copy
+  it had read when its request began, and undid what was changed in
+  between: a repository added from a git address could bring back a
+  token taken away during the clone, and two changes at the same moment
+  lost one. Every change now takes a lock, reads the file again, checks
+  and changes that, and writes it; nothing slow is done under the lock.
+  Who asked is looked at again there: a request that took its time
+  changes nothing for somebody who was removed, came with what is no
+  longer theirs, or is no longer the admin or the owner it needs.
+- **What cannot be checked is refused**: when `server.toml` cannot be
+  read, the port of the clients answers `the server's configuration
+  cannot be read just now: try again`, to an open connection and to a
+  new one, instead of going on with what it knew.
+- **What could not be done is said**: a sign-out that could not be made
+  is answered as such, and the browser keeps its cookie; a person is
+  not removed while their sessions could not be ended. A lock is
+  removed by its holder only.
+- **A person has at most 64 sessions**: one more ends their oldest.
+- Served securely, the cookie kept on the way to a provider and back is
+  `__Host-kito_sign_in`, which only this host sets; in the clear it is
+  `kito_sign_in` as before. The server's own cookies are not passed on
+  to a plugin's pages.
+- A server that starts sweeps what one stopped in the middle of a write
+  left beside `server.toml`.
+
 ## [0.39.2]
 
 - **A plugin that asks as itself is nobody on the server.** Since 0.39.0

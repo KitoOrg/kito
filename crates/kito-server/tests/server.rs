@@ -214,8 +214,8 @@ fn people_repositories_and_tokens() {
     );
     let users = ok(&world.dir, &["user", "list"]);
     assert!(
-        users.contains("ada <ada@example.com> (member): shop (integrate), site (integrate)")
-            && users.contains("bob (member): shop (integrate)"),
+        users.contains("ada <ada@example.com> [token] (member): shop (integrate), site (integrate)")
+            && users.contains("bob [token] (member): shop (integrate)"),
         "{users}"
     );
     // The history of the git repository came along.
@@ -676,11 +676,160 @@ fn a_person_has_a_role_in_each_repository_and_one_on_the_server() {
     let list = ok(&world.dir, &["user", "list"]);
     assert!(
         list.contains(
-            "ada <ada@example.com> (admin): every repository; given shop (integrate), site (integrate)"
+            "ada <ada@example.com> [token] (admin): every repository; given shop (integrate), site (integrate)"
         ),
         "{list}"
     );
-    assert!(list.contains("dave (member): no repository"), "{list}");
+    assert!(list.contains("dave [token] (member): no repository"), "{list}");
+}
+
+#[test]
+fn a_token_is_changed_by_its_person_and_by_whoever_may_change_them() {
+    let mut world = World::new();
+    let erin = token_in(&ok(&world.dir, &["user", "add", "erin", "--role", "admin"]));
+    let rose = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
+    let olga = token_in(&ok(&world.dir, &["user", "add", "olga", "--role", "owner"]));
+    let address = world.serve();
+    let unknown = "this token is not one the server knows";
+    let said = |asked: Result<Value, ClientError>| asked.unwrap_err().to_string();
+    let token_of = |answer: &Value| answer["token"].as_str().unwrap_or_else(|| panic!("{answer}")).to_owned();
+
+    // Everybody was added with a token: the admins see who has one, never which.
+    let mut admin = connect(&address, &erin, "shop");
+    let people = admin.call_value("server.people", json!({})).unwrap();
+    let all = people.as_array().unwrap();
+    assert!(all.iter().all(|them| them["token"] == true && them["logins"] == json!([])), "{people}");
+    assert!(!people.to_string().contains("kito_"), "{people}");
+
+    // An admin gives a member a new token, said this once: the one bob
+    // had stops at once, for the connection he has open and for the next.
+    let mut open = connect(&address, &world.bob, "shop");
+    assert!(open.call_value("status", json!({})).is_ok());
+    let given = admin.call_value("server.people_token", json!({ "user": "bob" })).unwrap();
+    let new = token_of(&given);
+    assert_eq!(given, json!({ "user": "bob", "token": new }));
+    assert!(new.starts_with("kito_") && new.len() == 5 + 64 && new != world.bob, "{new}");
+    assert!(open.call_value("status", json!({})).is_err());
+    assert_eq!(refusal(Client::remote(&remote(&address, &world.bob, "shop"), true)), unknown);
+    let mut bob = connect(&address, &new, "shop");
+    let mut beside = connect(&address, &new, "shop");
+    assert_eq!(bob.call_value("server.whoami", json!({})).unwrap()["user"], "bob");
+    // What the server keeps is what it hashes to, as for the first one.
+    let config = fs::read_to_string(world.dir.join("server.toml")).unwrap();
+    assert!(!config.contains(&new), "{config}");
+
+    // Bob gets another by himself, whatever his role: the connection he
+    // asks through is told it and goes on, the one beside it does not.
+    let own = bob.call_value("server.people_token", json!({})).unwrap();
+    let newer = token_of(&own);
+    assert!(own["user"] == "bob" && newer != new, "{own}");
+    assert!(bob.call_value("status", json!({})).is_ok());
+    assert!(beside.call_value("status", json!({})).is_err());
+    assert_eq!(refusal(Client::remote(&remote(&address, &new, "shop"), true)), unknown);
+    // Named, he is himself still.
+    let newest = token_of(&bob.call_value("server.people_token", json!({ "user": "bob" })).unwrap());
+    assert!(bob.call_value("status", json!({})).is_ok());
+    assert_eq!(refusal(Client::remote(&remote(&address, &newer, "shop"), true)), unknown);
+
+    // Never nothing: a token is all he signs in with.
+    let no = said(bob.call_value("server.people_token", json!({ "remove": true })));
+    assert!(no.contains("bob would have no way to sign in: link an identity to them first"), "{no}");
+    let no = said(bob.call_value("server.people_unlink", json!({ "method": "hello" })));
+    assert!(no.contains("bob has no identity of `hello`: there is nothing to unlink"), "{no}");
+    // Naming a login proves nothing: he attaches none to himself by it.
+    for params in [json!({ "identity": "hello:bob" }), json!({ "user": "bob", "identity": "hello:bob" })] {
+        let no = said(bob.call_value("server.people_link", params));
+        let by_name = "naming a login proves nothing: bob links an account of their own by signing in to it";
+        assert!(no.contains(by_name) && no.contains("or an admin links it for them"), "{no}");
+    }
+    // Nobody else's is his to change, and he is told no more than that.
+    for person in ["ada", "erin", "nobody"] {
+        for method in ["server.people_token", "server.people_unlink", "server.people_link"] {
+            let no = said(bob.call_value(method, json!({ "user": person, "remove": true })));
+            assert!(
+                no.contains("only an admin of this server may manage its people: bob is a member"),
+                "{no}"
+            );
+        }
+    }
+    assert!(bob.call_value("status", json!({})).is_ok());
+
+    // An admin does not change an admin or an owner, as for their role:
+    // an owner does. What is her own, she changes.
+    for (person, role) in [("rose", "admin"), ("olga", "owner")] {
+        let no = said(admin.call_value("server.people_token", json!({ "user": person })));
+        assert!(no.contains(&format!("{person} is an {role}: only an owner changes them")), "{no}");
+    }
+    assert!(Client::remote(&remote(&address, &rose, "shop"), true).is_ok());
+    let mut owner = connect(&address, &olga, "shop");
+    let given = owner.call_value("server.people_token", json!({ "user": "rose" })).unwrap();
+    assert_eq!(refusal(Client::remote(&remote(&address, &rose, "shop"), true)), unknown);
+    assert!(Client::remote(&remote(&address, &token_of(&given), "shop"), true).is_ok());
+    let own = admin.call_value("server.people_token", json!({ "user": "erin" })).unwrap();
+    assert_eq!(own["user"], "erin");
+    assert!(admin.call_value("server.people", json!({})).is_ok());
+    assert_eq!(refusal(Client::remote(&remote(&address, &erin, "shop"), true)), unknown);
+    // What is not a name, or not a yes or a no, is a request that is wrong.
+    let no = said(owner.call_value("server.people_token", json!({ "user": ["bob"] })));
+    assert!(no.contains("`user` is the name of a person"), "{no}");
+    let no = said(owner.call_value("server.people_token", json!({ "user": "bob", "remove": 1 })));
+    assert!(no.contains("`remove` is true or false"), "{no}");
+    assert!(bob.call_value("status", json!({})).is_ok());
+
+    // On the server's machine: a new token printed once, and the one
+    // before stops at once. A connection that SSH opened was not opened
+    // with a token: it goes on.
+    std::env::set_var("KITOD_BIN", kitod());
+    let command =
+        [env!("CARGO_BIN_EXE_kito-server"), "--dir", world.dir.to_str().unwrap(), "stdio", "--as", "bob"];
+    let through_ssh = Remote {
+        server: None,
+        command: command.iter().map(|part| (*part).to_owned()).collect(),
+        repo: "shop".to_owned(),
+        token: None,
+        ..Default::default()
+    };
+    let mut by_ssh = Client::remote(&through_ssh, true).unwrap();
+    let printed = ok(&world.dir, &["user", "token", "bob"]);
+    assert!(printed.contains("bob's new token, shown this once:"), "{printed}");
+    assert!(printed.contains("The one they had stops working now"), "{printed}");
+    let last = token_in(&printed);
+    assert!(bob.call_value("status", json!({})).is_err());
+    assert_eq!(refusal(Client::remote(&remote(&address, &newest, "shop"), true)), unknown);
+    assert!(connect(&address, &last, "shop").call_value("status", json!({})).is_ok());
+    assert_eq!(by_ssh.call_value("server.whoami", json!({})).unwrap()["user"], "bob");
+    // The same rules there: never nothing, and a plugin says who a login is.
+    let no = refused(&world.dir, &["user", "token", "bob", "--remove"]);
+    assert!(no.contains("bob would have no way to sign in: link an identity to them first"), "{no}");
+    let no = refused(&world.dir, &["user", "unlink", "bob", "hello"]);
+    assert!(no.contains("bob has no identity of `hello`: there is nothing to unlink"), "{no}");
+    let no = refused(&world.dir, &["user", "link", "bob", "hello:bob"]);
+    assert!(no.contains("no way to sign in with `hello`: no plugin enabled here signs people in"), "{no}");
+    assert!(refused(&world.dir, &["user", "token", "dan"]).contains("dan is not a user of this server"));
+    assert!(ok(&world.dir, &["user", "list"]).contains("bob [token] (member): shop (integrate)"));
+    assert!(connect(&address, &last, "shop").call_value("status", json!({})).is_ok());
+
+    // Who changed whose token is kept, and no token is.
+    let audit = ok(&world.dir, &["audit"]);
+    let lines: Vec<String> =
+        audit.lines().map(|line| line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")).collect();
+    for line in [
+        "erin token_changed bob",
+        "bob token_changed bob",
+        "olga token_changed rose",
+        "erin token_changed erin",
+        "the server's machine token_changed bob",
+    ] {
+        assert!(lines.iter().any(|kept| kept == line), "no `{line}` in {lines:#?}");
+    }
+    let kept: String = fs::read_dir(world.dir.join("audit"))
+        .unwrap()
+        .map(|file| fs::read_to_string(file.unwrap().path()).unwrap_or_default())
+        .collect();
+    assert!(kept.contains("server.people_token"), "the requests are kept: {kept}");
+    for token in [&world.bob, &new, &newer, &newest, &last, &erin, &rose] {
+        assert!(!kept.contains(token.as_str()), "a token in the audit log");
+    }
 }
 
 #[test]
@@ -692,8 +841,11 @@ fn a_server_written_before_roles_per_repository_is_read_as_it_was_meant() {
     text.push_str("\n[users.few]\ntoken = \"y\"\nrepos = [\"shop\"]\n");
     fs::write(&path, text).unwrap();
     let list = ok(&world.dir, &["user", "list"]);
-    assert!(list.contains("old (admin): every repository; given shop (write), site (read)"), "{list}");
-    assert!(list.contains("few (member): shop (integrate)"), "{list}");
+    assert!(
+        list.contains("old [token] (admin): every repository; given shop (write), site (read)"),
+        "{list}"
+    );
+    assert!(list.contains("few [token] (member): shop (integrate)"), "{list}");
     let kept = fs::read_to_string(&path).unwrap();
     assert!(!kept.contains("repos =") && kept.contains("server_role = \"admin\""), "{kept}");
 }
@@ -864,7 +1016,7 @@ fn what_changes_the_server_is_kept_in_a_chain_and_the_server_is_backed_up_whole(
     assert!(to.join("server.toml").is_file() && to.join("repos/shop/.kito").is_dir());
     assert!(!to.join("backup.key").exists() && !to.join("backups").exists());
     let people = ok(&to, &["user", "list"]);
-    assert!(people.contains("rose") && people.contains("bob (member)"), "{people}");
+    assert!(people.contains("rose") && people.contains("bob [token] (member)"), "{people}");
     assert!(fs::read_to_string(to.join("repos/shop/src/shop.ts")).unwrap().contains("total"));
     // Its repositories open: the indexes left out are made again.
     let set = ok(&to, &["repo", "set", "shop", "--approvals", "1"]);

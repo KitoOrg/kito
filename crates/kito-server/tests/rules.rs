@@ -265,9 +265,10 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
     let mut world = World::new();
     let carol = token_in(&ok(&world.dir, &["user", "add", "carol", "--repo", "shop:read"]));
     let users = ok(&world.dir, &["user", "list"]);
-    assert!(users.contains("ada <ada@example.com> (member): shop (integrate)"), "{users}");
+    assert!(users.contains("ada <ada@example.com> [token] (member): shop (integrate)"), "{users}");
     assert!(
-        users.contains("bob (member): shop (write)") && users.contains("carol (member): shop (read)"),
+        users.contains("bob [token] (member): shop (write)")
+            && users.contains("carol [token] (member): shop (read)"),
         "{users}"
     );
     let (ada, bob) = (world.ada.clone(), world.bob.clone());
@@ -362,7 +363,7 @@ fn who_may_read_who_may_write_and_who_may_integrate() {
     // What a person may do can change, for one repository too: it holds
     // for the connections made from then on.
     ok(&world.dir, &["grant", "bob", "shop", "integrate"]);
-    assert!(ok(&world.dir, &["user", "list"]).contains("bob (member): shop (integrate)"));
+    assert!(ok(&world.dir, &["user", "list"]).contains("bob [token] (member): shop (integrate)"));
     call(&bob, "shutdown", json!({}));
     wait_for("bob's daemon to stop", || Client::connect(&bob).is_err());
     write(&work, "README.md", "# Shop\n\nPrices are in cents.\n");

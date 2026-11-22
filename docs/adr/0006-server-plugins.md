@@ -238,3 +238,191 @@ offer a way that is not ready. The plugin answers `{ "ready": true }` or
 `{ "ready": false, "why": … }`; one that does not know the question
 (it fails, or answers something else) is taken to be ready, so the
 plugins that exist keep working as they did.
+
+## Amendment, 2026-11-23: how a person signs in can be changed
+
+A person added with a token could not be given an identity later, and
+one added by identity had no token: they were removed and added again,
+and lost what they had been given. The person asked that it can be
+changed, and decided how: an identity is linked to somebody who has a
+token, or unlinked; a new token is issued, and the old one stops; a
+token is taken away; a person may have a token and identities at once;
+admins change it for others (only an owner for an admin or an owner, as
+for roles), and each person for themselves.
+
+- **A person has a token, identities, or both: never nothing.** What
+  would leave somebody with no way to sign in is refused, and says what
+  to do first (`bob would have no way to sign in: give them a token
+  first`). An identity counts while the server offers its way: with the
+  plugin that signs people in with `github` disabled, `github:bob` signs
+  nobody in, and bob's token is not taken away for it (`github:bob is
+  all they would have, and this server offers that way no more`). One
+  identity is one person's, and a person has at most one of each way to
+  sign in (`unlink it first`).
+- **On the server's machine**: `kito-server user link <name>
+  <method:login>` (the plugin says who the login is, as for `user add
+  --identity`), `user unlink <name> <method>`, `user token <name>` (a
+  new one, printed once) and `user token <name> --remove`. `user list`
+  says how each person signs in, `[token, github:bob]`, never a secret.
+- **Requests**, in the family of the server's people (ADR 0014): asked
+  through a client's connection and through `POST /-/people` alike, the
+  person named by `user` as in the others.
+
+  ```text
+  server.people_link   { user, identity: "github:bob" }  →  { user, token: true|false, logins: […] }
+  server.people_unlink { user, method: "github" }        →  the same
+  server.people_token  { user }                          →  { user, token: "kito_…" }
+  server.people_token  { user, remove: true }            →  { user, token: null }
+  ```
+
+  The new token is said this once, to whoever asked: no other request
+  answers a token, and none is ever logged. `server.people` says `token:
+  true|false` for each person, and `/-/me` says `signs_in: { token,
+  logins }` to whoever asks. A plugin that asks as itself is refused all
+  three, as the rest of the family (ADR 0020): asked with nobody named,
+  it would be the token of whoever is called as the plugin is.
+- **Who may ask.** For somebody else, the rule of roles: an admin for a
+  member, an owner for anybody. For oneself (`user` left out, or one's
+  own name), anybody asks for a new token, takes their token away and
+  unlinks an identity, whatever their role: whoever holds what a person
+  signs in with is that person already. **Nobody links themselves by
+  naming a login**, unless they could change that person anyway. A
+  login named proves nothing: whoever held bob's token for a minute
+  would attach an account of their own to bob, and be bob for good.
+- **Who asks is looked at again where the change is made**, on the
+  configuration as it is then (ADR 0014, amended): what the request
+  came with is theirs still (their token was not changed or taken away,
+  their session has not ended, they were not removed), and they still
+  may change that person. A request that began a moment before its
+  token was taken away gets no new token for it, and a link by name is
+  not made for an admin when the person became an owner while the
+  plugin was asked who the login is.
+- **An account of one's own is linked with the provider's word.** `GET
+  /-/sign-in/<method>?link=1`, from somebody signed in in that browser
+  (the session cookie), starts the flow of signing in. What is kept for
+  the way back is in the state cookie, after the plugin's state: a
+  value made for this link and no other, 32 random bytes as a session's
+  token is. The server keeps what the value hashes to, with the session
+  the link was asked from, for the ten minutes the cookie lasts. No
+  page reads or writes that cookie (`HttpOnly`). At the callback the
+  value is hashed and looked up, and names the session: it is taken out
+  as it is looked up, so that it brings a browser back once, whatever
+  follows; it ends with its session; and a link asked again forgets the
+  one before. What the server keeps on its disk, and so what every
+  backup has, brings nobody back: not what a session's token hashes to,
+  not what the value does. The identity that comes back is attached to
+  the person of that session, if the session is there still; no session
+  is opened; a small page says so and goes on to `/`, as the one of
+  signing in does. The way back starts on the provider's site, so the
+  session's own cookie (`SameSite=Strict`) may not come with it: the
+  session is known by the value, and a session the browser does send
+  must be that one. An identity that is theirs already changes nothing,
+  and goes on. When it cannot be linked (no link waits for the value;
+  it is another person's; they have one of that way; they are no longer
+  signed in; they said no at the provider), nothing changes, and a page
+  says why in words, with a link to `/`: a person reads it. Without
+  `link=1` the flow is what it was; a `link=1` from nobody signed in is
+  refused.
+- **The sign-in cookie is this host's own when the server is served
+  securely.** It is then named `__Host-kito_sign_in`, which a browser
+  takes only with `Secure`, for every path (`Path=/`) and with no
+  `Domain`: a host beside the server under the same domain cannot plant
+  one. In the clear (this machine, `--plain`) it keeps its name,
+  `kito_sign_in`, for `/-/sign-in`. It is set, read and forgotten under
+  the one name in each case. Sent for every path, it would reach the
+  pages too: the server passes none of its own cookies on to a plugin,
+  the session's as before and this one, and lets a plugin set neither.
+- **What a change ends.** Linking ends nothing, and neither does a first
+  token: nothing was taken away. A new token in place of one, a token
+  taken away and an identity unlinked each end, at once:
+  - every session of that person (browsers, `kito sign-in`) but the one
+    the request came through. A session does not say what it was opened
+    with, and one opened with what was just taken away, perhaps by
+    somebody else, must not go on;
+  - every connection of a client opened with a token that is no longer
+    theirs. A connection remembers what it was opened with, as what it
+    hashes to, and is refused at its next request (`bob's token was
+    changed: connect again with the new one`). One opened with a session
+    ends with its session. The connection that asked for its own new
+    token is told it, and goes on; one that SSH opened was opened with
+    no token, and goes on.
+
+  The sessions and the configuration are changed under one lock, by
+  one writer at a time (ADR 0014, amended). **The sessions end first,
+  and the configuration is written after.** When the sessions cannot
+  be ended nothing changes: the token is the one it was, and whoever
+  asked is told. When the sessions ended and the configuration could
+  not be written, the person signs in again with what they had: nobody
+  is locked out, and no session goes on that should not. A session
+  opens only if what proved who somebody is, is theirs still when the
+  session is written, under the same lock: one opened at the same
+  moment is ended by the change, or is not opened. What stays possible
+  is a token that was written and never told: the server stopped, or
+  the connection was lost, between the write and the answer. The server
+  keeps no token, so it cannot say it again; an admin gives another.
+- **A person is not removed while their sessions could not be ended**:
+  they end in the same change, before the person goes, so that none is
+  left for a later person of that name. And when what the server keeps
+  cannot be held for a change (something holds it and does not let go),
+  that is said to whoever asked, never passed over: a sign-out that
+  could not be made answers so, and the browser keeps its cookie.
+- **A person has at most 64 sessions**: opening one more ends their
+  oldest. The sessions are written whole at every change, and are not
+  one person's to make slow for everybody.
+- **Events and the log**: `identity_linked` (with the `identity`),
+  `identity_unlinked`, `token_changed` (with `replaced`) and
+  `token_removed`, each with the `user`, `what`, and who did it (`by`)
+  when it was not done on the server's machine. Then `session_ended`,
+  once for each session that ended. Never a token. Each is kept in the
+  audit log before whoever asked is answered, and told to the plugins
+  that listen once the answer is on its way, in the order it happened:
+  a plugin that is slow holds no token back. The same holds for the
+  token of somebody just added (`user_added`); on the server's machine
+  a token is printed before any plugin hears of it. A server run for
+  one client (`stdio`, as SSH runs it) tells the plugins before it
+  leaves.
+- **What cannot be checked is refused.** On the port of the clients a
+  connection is held at every request to the configuration as it is
+  then. When `server.toml` cannot be read, an open connection is not
+  answered on what it knew, and a new one is not let in on what was
+  read when the server started: `the server's configuration cannot be
+  read just now: try again`.
+- **From a connected directory**: `kito people link <name>
+  <method:login>`, `kito people unlink [<name>] <method>`, `kito people
+  token [<name>] [--remove]`; with no name, oneself. A new token of
+  one's own is written in the directory when a token is what it connects
+  with (not a session), so that it keeps working, and its daemon is
+  started again. It is printed once either way: the other directories
+  connected with the old one need it too, and are connected again with
+  it (`kito connect`, which starts the daemon of a directory that had
+  one again).
+- **How a client connects is said to whoever is signed in.** `/-/me`
+  carries `clients: { port, plain, fingerprint }`: the port the server
+  listens on for clients, whether it encrypts, and the fingerprint its
+  certificate is known by (none when it does not encrypt, or when an
+  authority vouches for it). They are the three facts `server.people_add`
+  answers to an admin, and none is a secret: the port answers anybody,
+  and the fingerprint is of the certificate the server presents to
+  whoever connects. A page needs them to write a `kito connect` line
+  for somebody who is not an admin, with the token they just asked for.
+
+What follows from it:
+
+- Whoever holds a person's token can change it, take it away and unlink
+  that person's identities. A token was that person already; an admin,
+  or the server's machine, gives a new one.
+- A change made for oneself from a browser keeps that browser signed
+  in, even when its session was opened with what is taken away: the one
+  who asks is trusted to be the one who is cleaning up.
+- Anybody now causes `server.toml` to be written, with their own token.
+  Every change of it is made alone, on the file as it is at that
+  moment: nobody who writes brings back what was changed since they
+  read it, a token taken away least of all. That is a rule of the
+  server's configuration, not only of signing in: ADR 0014, amended
+  2026-11-23, states it.
+- A link is finished in the browser it was begun in, within ten
+  minutes, and once. A browser that comes back with a value that was
+  used starts again at `/-/sign-in/<method>?link=1`.
+- The plugins hear of a change of how somebody signs in once it was
+  made and answered: after the fact, as every event is told, and for
+  these after the answer too. The audit log has it before either.

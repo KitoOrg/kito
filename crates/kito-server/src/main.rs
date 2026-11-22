@@ -319,7 +319,31 @@ enum UserCmd {
     },
     /// Change a person's role on the server: member, admin, owner
     Role { name: String, role: String },
-    /// List the people, their role on the server, and what they may do where
+    /// Attach an identity to a person: whoever signs in as it is them,
+    /// and they keep their token
+    Link {
+        name: String,
+        /// Who they are for a plugin that signs people in, as
+        /// <method>:<login> (github:bob)
+        #[arg(value_name = "METHOD:LOGIN")]
+        identity: String,
+    },
+    /// Detach a person's identity of a way to sign in: their sessions end
+    Unlink {
+        name: String,
+        /// The way to sign in: github
+        method: String,
+    },
+    /// Give a person a new token, printed once: the one they had stops
+    /// working at once
+    Token {
+        name: String,
+        /// Take their token away instead: they sign in from then on
+        #[arg(long)]
+        remove: bool,
+    },
+    /// List the people, how each signs in, their role on the server, and
+    /// what they may do where
     List,
     /// Remove a person: their token stops working
     Remove { name: String },
@@ -348,6 +372,34 @@ fn ago(given: &str) -> Result<u64, String> {
     };
     let n: u64 = number.parse().map_err(|_| format!("`{given}` is no time: say 12h, 7d or 2w"))?;
     Ok(now.saturating_sub(n * size))
+}
+
+/// How a person signs in now, in a line: never a secret.
+fn signs_in(server: &Server, name: &str) -> String {
+    let ways: Vec<String> = server
+        .config
+        .users
+        .get(name)
+        .map(User::signs_in_with)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|way| if way == "token" { "with a token".to_owned() } else { format!("as {way}") })
+        .collect();
+    format!("{name} signs in {}.", ways.join(" or "))
+}
+
+/// Keeps what a command did in the audit log, says it, and then tells
+/// the plugins that listen, each event in order: a plugin that is slow
+/// holds back nothing that is said only once, and the command still
+/// tells them before it leaves.
+fn said_then_told(server: &Server, events: Vec<(&'static str, Value)>, said: impl FnOnce()) {
+    for (kind, event) in &events {
+        server.note(kind, event);
+    }
+    said();
+    for (kind, event) in events {
+        server.tell_plugins(kind, event);
+    }
 }
 
 /// Who changed a setting with `kito-server` itself, on the server's machine.
@@ -735,31 +787,37 @@ fn run(cli: &Cli) -> Result<(), String> {
                     None => Ok((given.clone(), Role::Write)),
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            // What says the server they reach is this one: found before
+            // they are added, for nobody to be added and not told how.
+            let known = known_by(&server.dir)?;
             let token = server.add_user(name, email.clone(), &access, role, identity.as_ref())?;
-            server.tell(
-                "user_added",
-                json!({ "user": name, "role": role.word(), "what": format!("{name} ({})", role.word()) }),
-            );
+            let added =
+                json!({ "user": name, "role": role.word(), "what": format!("{name} ({})", role.word()) });
             let first = access.first().map(|(repo, _)| repo.as_str()).unwrap_or("<repository>");
-            if access.is_empty() && role == ServerRole::Member {
-                println!("{name} may use no repository yet: `kito-server grant {name} <repository> <role>`.");
-            }
-            if let Some(token) = &token {
-                println!("{name} added. Their token, shown this once:");
-                println!("{token}");
-                // What they connect with: the token, and what says the
-                // server they reach is this one.
-                println!("They connect with:");
-                println!("  kito connect <host>:<port>/{first} --token {token}{}", known_by(&server.dir)?);
-            } else if let Some(identity) = &identity {
-                let method = &identity.provider;
-                println!(
-                    "{name} added: whoever signs in as {method}:{} is {name}. No token.",
-                    identity.login
-                );
-                println!("They connect with:");
-                println!("  kito connect <host>:<port>/{first} --sign-in {method}{}", known_by(&server.dir)?);
-            }
+            // Their token is said before a plugin hears of them: it is said once.
+            said_then_told(&server, vec![("user_added", added)], || {
+                if access.is_empty() && role == ServerRole::Member {
+                    println!(
+                        "{name} may use no repository yet: `kito-server grant {name} <repository> <role>`."
+                    );
+                }
+                if let Some(token) = &token {
+                    println!("{name} added. Their token, shown this once:");
+                    println!("{token}");
+                    // What they connect with: the token, and what says the
+                    // server they reach is this one.
+                    println!("They connect with:");
+                    println!("  kito connect <host>:<port>/{first} --token {token}{known}");
+                } else if let Some(identity) = &identity {
+                    let method = &identity.provider;
+                    println!(
+                        "{name} added: whoever signs in as {method}:{} is {name}. No token.",
+                        identity.login
+                    );
+                    println!("They connect with:");
+                    println!("  kito connect <host>:<port>/{first} --sign-in {method}{known}");
+                }
+            });
         }
         Cmd::User { command: UserCmd::Role { name, role } } => {
             let mut server = Server::open(&dir_of(cli))?;
@@ -780,6 +838,84 @@ fn run(cli: &Cli) -> Result<(), String> {
                     println!("{name} is an owner: as an admin, and names admins and owners.")
                 }
             }
+        }
+        Cmd::User { command: UserCmd::Link { name, identity } } => {
+            // Who that is, asked of the plugin now: what is kept does not
+            // change when they rename themselves there.
+            let identity = Server::open(&dir_of(cli))?.look_up(identity)?;
+            // The server as it is once the plugin has answered.
+            let mut server = Server::open(&dir_of(cli))?;
+            let written = identity.written();
+            match server.link(name, &identity)? {
+                true => {
+                    let what = format!("{name}: {written}");
+                    let event = json!({ "user": name, "identity": identity.key(), "what": what });
+                    said_then_told(&server, vec![("identity_linked", event)], || {
+                        println!("Whoever signs in as {written} is {name} from now on.");
+                        println!("{}", signs_in(&server, name));
+                    });
+                }
+                false => {
+                    println!("{written} is {name} already: nothing changed.");
+                    println!("{}", signs_in(&server, name));
+                }
+            }
+        }
+        Cmd::User { command: UserCmd::Unlink { name, method } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            // Every session of theirs ends with it: one of them may have
+            // been opened as who they no longer are.
+            let (login, ended) = server.unlink(name, method, None)?;
+            let event = json!({ "user": name, "what": format!("{name}: {login}") });
+            let events = Server::with_sessions_ended(("identity_unlinked", event), name, ended);
+            said_then_told(&server, events, || {
+                println!("{name} no longer signs in as {login}: their sessions ended.");
+                println!("{}", signs_in(&server, name));
+            });
+        }
+        Cmd::User { command: UserCmd::Token { name, remove: false } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            // Found before the token is changed: nothing fails between
+            // the change and the one time the token is said.
+            let known = known_by(&server.dir)?;
+            let (token, replaced, ended) = server.change_token(name, None)?;
+            let what = match replaced {
+                true => name.clone(),
+                false => format!("{name}, who had none"),
+            };
+            let event = json!({ "user": name, "replaced": replaced, "what": what });
+            let events = Server::with_sessions_ended(("token_changed", event), name, ended);
+            // What they connect with, as when they were added.
+            let given = server.config.users.get(name).and_then(|user| user.access.keys().next());
+            let first = given.map(String::as_str).unwrap_or("<repository>");
+            said_then_told(&server, events, || {
+                match replaced {
+                    true => println!("{name}'s new token, shown this once:"),
+                    false => println!("{name} has a token now, shown this once:"),
+                }
+                println!("{token}");
+                println!("They connect with:");
+                println!("  kito connect <host>:<port>/{first} --token {token}{known}");
+                if replaced {
+                    println!(
+                        "The one they had stops working now: their sessions ended, and what was connected with \
+                         it is connected again with this one."
+                    );
+                }
+            });
+        }
+        Cmd::User { command: UserCmd::Token { name, remove: true } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            let ended = server.remove_token(name, None)?;
+            let event = json!({ "user": name, "what": name });
+            let events = Server::with_sessions_ended(("token_removed", event), name, ended);
+            said_then_told(&server, events, || {
+                println!(
+                    "{name} has no token any more: their sessions ended, and what was connected with it no \
+                     longer works."
+                );
+                println!("{}", signs_in(&server, name));
+            });
         }
         Cmd::Grant { name, repo, role } => {
             let mut server = Server::open(&dir_of(cli))?;
@@ -831,10 +967,12 @@ fn run(cli: &Cli) -> Result<(), String> {
                     (true, false) => vec!["no repository".to_owned()],
                     (false, false) => places,
                 };
-                // Who they sign in as, by the login it had when added.
-                let signs = match user.logins.is_empty() {
+                // How they sign in: with a token, as who a plugin says they
+                // are (by the login it had when it was attached), or both.
+                let ways = user.signs_in_with();
+                let signs = match ways.is_empty() {
                     true => String::new(),
-                    false => format!(" [{}]", user.logins.join(", ")),
+                    false => format!(" [{}]", ways.join(", ")),
                 };
                 println!("{name}{email}{signs} ({}): {}", user.server_role.word(), places.join(", "));
             }
@@ -926,16 +1064,19 @@ fn run(cli: &Cli) -> Result<(), String> {
                     println!("{hex}");
                 }
                 BackupCmd::Schedule { every, keep, dir } => {
-                    if let Some(every) = every {
-                        server.config.backup.every_hours = *every;
-                    }
-                    if let Some(keep) = keep {
-                        server.config.backup.keep = *keep;
-                    }
-                    if let Some(dir) = dir {
-                        server.config.backup.dir = Some(dir.clone());
-                    }
-                    server.save_config()?;
+                    server.change(|change| {
+                        let backup = &mut change.config_mut().backup;
+                        if let Some(every) = every {
+                            backup.every_hours = *every;
+                        }
+                        if let Some(keep) = keep {
+                            backup.keep = *keep;
+                        }
+                        if let Some(dir) = dir {
+                            backup.dir = Some(dir.clone());
+                        }
+                        Ok::<(), String>(())
+                    })?;
                     let config = &server.config.backup;
                     let place = match backup::folder(&server.dir, config) {
                         Some(dir) => dir.display().to_string(),
@@ -949,8 +1090,10 @@ fn run(cli: &Cli) -> Result<(), String> {
                 }
                 BackupCmd::S3 { endpoint, bucket, region, prefix, keys, off } => {
                     if *off {
-                        server.config.backup.s3 = None;
-                        server.save_config()?;
+                        server.change(|change| {
+                            change.config_mut().backup.s3 = None;
+                            Ok::<(), String>(())
+                        })?;
                         println!("Backups are no longer sent to S3.");
                         server.tell("backup_s3", json!({ "what": "off" }));
                         return Ok(());
@@ -981,8 +1124,10 @@ fn run(cli: &Cli) -> Result<(), String> {
                     };
                     // Asked once, before it is kept: a storage that cannot be reached says so now.
                     backup::S3::new(&server.dir, &s3)?.list()?;
-                    server.config.backup.s3 = Some(s3.clone());
-                    server.save_config()?;
+                    server.change(|change| {
+                        change.config_mut().backup.s3 = Some(s3.clone());
+                        Ok::<(), String>(())
+                    })?;
                     println!("Backups go to {}/{} too.", s3.endpoint, s3.bucket);
                     server.tell("backup_s3", json!({ "what": format!("{}/{}", s3.endpoint, s3.bucket) }));
                 }
@@ -1023,6 +1168,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
         Cmd::Serve { listen, plain, http } => {
             let server = Server::open(&dir_of(cli))?;
+            // What a server stopped in the middle of a write left behind.
+            server.sweep_staged();
             // Backups as the schedule says, while the server serves.
             let dir = server.dir.clone();
             std::thread::spawn(move || loop {
@@ -1066,6 +1213,8 @@ fn run(cli: &Cli) -> Result<(), String> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             session::run(&server, &mut stdin.lock(), &mut stdout.lock(), Some((name, person)));
+            // The plugins hear of what this client changed before the process leaves.
+            state::told();
         }
     }
     Ok(())

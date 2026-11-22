@@ -102,3 +102,68 @@ Asked for with the settings page of the web client:
   (`settings/<repository>.jsonl`, the last 200), from a client or from
   `kito-server repo set` on its machine, and given to maintainers and
   admins (`server.settings_history`).
+
+## Amended 2026-11-23: a change of the server's configuration is made alone
+
+Found when 0.39.3 was reviewed. Everything that wrote `server.toml`
+wrote the copy it had read when its request began: a change made in
+between was undone by whoever wrote later, and nobody was told. With
+people changing their own tokens (ADR 0006, amended), what was undone
+could be a revocation. A repository added from a git address, a clone
+of a minute, wrote back a token an owner had taken away meanwhile. Two
+people who asked for a new token at once wrote over each other: one held
+a token the server did not know, and the one they had replaced worked.
+Anybody writing in a loop brought back whoever an admin had just
+removed, or the role they had just lost.
+
+- **Every change is made alone, on the configuration as it is on the
+  disk at that moment.** One way, for everything that writes
+  `server.toml`: the lock is taken, the file is read again, the change
+  checks and changes what was just read, that is written, the lock is
+  let go. What a change checks, it checks there: the person exists, the
+  name is free, the role rule holds, they keep a way to sign in.
+- **Nothing slow is done while the lock is held**: no plugin is asked,
+  nothing is cloned, uploaded or sent over the network. What is slow is
+  done first; then the lock is taken, and what was checked before is
+  checked again. When a repository is deleted, what the people were
+  given of it leaves the configuration first, and its files after.
+- **Who asked is looked at again in the change.** A request that takes
+  its time (a clone, a plugin installed or asked) changes nothing for
+  somebody who, when the change is made, was removed, came with a token
+  or a session that is no longer theirs, or is no longer the admin or
+  the owner the request is for: `ada is no longer an admin of this
+  server: nothing was changed`. What was made before that stays (a
+  repository that was cloned), for the server's admins.
+- **One lock, for the configuration and for the sessions**, taken once
+  for a change: `.lock` in the server's directory. A change of one
+  often ends or reads the other, and with one lock there is no order to
+  take two in. It is not the audit log's, which has its own and is
+  taken while a line is written. In the code a change is a value of its
+  own: what writes is a method of it, and nothing of it begins a change
+  inside another, so the lock is not taken twice.
+- **A lock says whose it is**, and is removed by its holder only. One
+  older than five seconds is taken over, since a crash must not block
+  the server for ever; whoever it was taken from finds out before it
+  writes, and writes nothing. When the lock cannot be had within two
+  seconds, whoever asked is told so, and nothing is changed.
+- **A net under it**: a server remembers what `server.toml` hashed to
+  when it read it, and writes over nothing else (`the server's
+  configuration was changed meanwhile: nothing was written; ask
+  again`). With the first point in place this does not happen. It is
+  there so that a writer nobody converted refuses, instead of undoing
+  somebody's change.
+- **What a server stopped in the middle of a write left staged** beside
+  `server.toml` (`server.toml.<pid>-<n>.new`, with what tokens hash to)
+  is swept when the server starts, once it is older than a minute.
+
+What follows from it:
+
+- A change waits for the one before it, which is short. One that cannot
+  have the lock is refused, rather than made on what was read earlier.
+- `server.toml` edited by hand while the server runs is not written
+  over without a word: a change that read it a moment before the edit
+  is refused, and the next one reads the edit.
+- A window stays that a lock file cannot close: a writer that held the
+  lock for more than five seconds, was taken over, and lost it between
+  its last look and the moment it puts its file in place. Nothing holds
+  the lock that long: what is slow is outside it.
