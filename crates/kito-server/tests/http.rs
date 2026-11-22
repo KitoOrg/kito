@@ -477,8 +477,16 @@ fn somebody_signs_in_in_a_browser_as_who_a_plugin_says_they_are() {
     let ways = served.request("GET", "/-/sign-in", &[], None).json();
     assert_eq!(
         ways["methods"],
-        json!([{ "method": "hello", "about": "Sign in with hello", "path": "/-/sign-in/hello" }])
+        json!([{ "method": "hello", "about": "Sign in with hello", "path": "/-/sign-in/hello", "ready": true }])
     );
+    // A way its plugin says is not set up is listed with why: a client does not offer it.
+    let not_ready = served.dir.join("plugins/hello/not-ready");
+    fs::create_dir_all(not_ready.parent().unwrap()).unwrap();
+    fs::write(&not_ready, "an admin gives it the provider's application first\n").unwrap();
+    let ways = served.request("GET", "/-/sign-in", &[], None).json();
+    assert_eq!(ways["methods"][0]["ready"], false, "{ways}");
+    assert_eq!(ways["methods"][0]["why"], "an admin gives it the provider's application first", "{ways}");
+    fs::remove_file(&not_ready).unwrap();
     let nowhere = served.request("GET", "/-/sign-in/github", &[], None);
     assert_eq!(nowhere.status, 404, "{}", nowhere.body);
 

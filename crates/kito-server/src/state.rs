@@ -851,8 +851,17 @@ impl Server {
             .collect()
     }
 
+    /// Why a way to sign in cannot be used from a browser now (`sign-in
+    /// ready`), or `None`: it can, or its plugin does not know the
+    /// question, and is taken to be ready as it always was.
+    pub fn sign_in_not_ready(&self, method: &str) -> Option<String> {
+        let answer = self.sign_in_step(method, &["ready"], &serde_json::json!({ "kind": "browser" })).ok()?;
+        (answer["ready"] == false).then(|| answer["why"].as_str().unwrap_or("it is not set up").to_owned())
+    }
+
     /// Asks the plugin that signs people in by `method` one thing
-    /// (`begin`, `finish`, `lookup <login>`), with `told` on its input.
+    /// (`begin`, `finish`, `ready`, `lookup <login>`), with `told` on its
+    /// input.
     pub fn sign_in_step(
         &self,
         method: &str,

@@ -1816,3 +1816,11 @@ for ([ADR 0020](adr/0020-plugins-that-work-on-their-own.md)). It uses the
 secret the server already gives it for its pages, rather than a token of
 its own, so there is one thing per plugin to keep and to change; and it
 is held to what an administrator gave it, as its pages are.
+
+### D-177 · The plugin says whether its way to sign in can be used
+The server listed a way to sign in as soon as its plugin was enabled,
+and the page offered it before anybody had set it up. Whether it is set
+up is the plugin's to know (which application, which secret), so the
+server asks it (`sign-in ready`) rather than read its files
+([ADR 0006](adr/0006-server-plugins.md), amended); a plugin that does
+not answer is taken to be ready, so the ones that exist keep working.

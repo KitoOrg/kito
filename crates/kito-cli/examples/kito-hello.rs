@@ -252,6 +252,14 @@ fn main() -> ExitCode {
                         Some(login) => person(login),
                     }
                 }
+                // Not set up while a file of its own says so, with why.
+                Some("ready") => {
+                    let file = PathBuf::from(said("KITO_SERVER_DIR")).join("plugins/hello/not-ready");
+                    match std::fs::read_to_string(file) {
+                        Ok(why) => serde_json::json!({ "ready": false, "why": why.trim() }),
+                        Err(_) => serde_json::json!({ "ready": true }),
+                    }
+                }
                 Some("lookup") => match args.get(2).map(String::as_str) {
                     Some("nobody") | None => {
                         serde_json::json!({ "refused": "hello knows nobody by that name" })

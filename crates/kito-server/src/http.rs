@@ -390,18 +390,34 @@ async fn close_session(State(http): State<Arc<Http>>, headers: HeaderMap) -> Res
     ([(header::SET_COOKIE, http.cookie_line("", 0))], Json(json!({}))).into_response()
 }
 
-/// `GET /-/sign-in`: the ways to sign in here, each a plugin's.
+/// `GET /-/sign-in`: the ways to sign in here, each a plugin's, and
+/// whether each can be used now: one that is not set up is listed with
+/// why, for a client not to offer it.
 async fn ways(State(http): State<Arc<Http>>) -> Response {
     let server = match http.server() {
         Ok(server) => server,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    let methods: Vec<Value> = server
-        .sign_in_methods()
-        .into_iter()
-        .map(|(method, about)| json!({ "path": format!("/-/sign-in/{method}"), "method": method, "about": about }))
-        .collect();
-    answered(json!({ "methods": methods }))
+    let asked = tokio::task::spawn_blocking(move || {
+        let ways = server.sign_in_methods().into_iter();
+        ways.map(|(method, about)| {
+            let not_ready = server.sign_in_not_ready(&method);
+            let mut way = json!({
+                "path": format!("/-/sign-in/{method}"), "method": method, "about": about,
+                "ready": not_ready.is_none(),
+            });
+            if let Some(why) = not_ready {
+                way["why"] = json!(why);
+            }
+            way
+        })
+        .collect::<Vec<Value>>()
+    })
+    .await;
+    match asked {
+        Ok(methods) => answered(json!({ "methods": methods })),
+        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 /// `GET /-/sign-in/<method>`: sends the browser where the plugin says the

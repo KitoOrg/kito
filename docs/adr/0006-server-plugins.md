@@ -225,3 +225,16 @@ a change from the browser, and every two seconds for a change made on
 its machine: one enabled is started, one disabled is stopped (its input
 closed, then its process ended), one updated or given other permissions
 is started again. Ways to sign in were already read for each request.
+
+## Amendment, 2026-11-22: a way that is not set up is not offered
+
+A plugin that signs people in was listed as soon as it was enabled,
+before anybody had given it the provider's application: the sign-in
+page offered a button that could only fail. The server now asks each
+one `sign-in ready` when it lists them (told the `kind`, as `begin` is:
+`browser`), and says the answer with the way in `/-/sign-in`:
+`"ready": true`, or `"ready": false` with `"why"`. A client does not
+offer a way that is not ready. The plugin answers `{ "ready": true }` or
+`{ "ready": false, "why": … }`; one that does not know the question
+(it fails, or answers something else) is taken to be ready, so the
+plugins that exist keep working as they did.

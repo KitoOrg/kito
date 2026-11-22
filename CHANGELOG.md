@@ -4,6 +4,14 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.1]
+
+- **A way to sign in that is not set up is said so.** The server asks
+  each sign-in plugin `sign-in ready` when it lists them, and `/-/sign-in`
+  carries `ready` (and `why`): a client does not offer one that could
+  only fail. A plugin that does not know the question is taken to be
+  ready.
+
 ## [0.39.0]
 
 Plugins of a server that work on their own
