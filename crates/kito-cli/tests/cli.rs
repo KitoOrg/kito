@@ -565,10 +565,11 @@ fn init_sets_the_project_up_for_claude_code() {
     assert!(ignored.contains("/CLAUDE.md\n") && ignored.contains("/.claude/\n"), "{ignored}");
 
     // Asked again, there is nothing to do.
-    let again = kito_as_installed(root, &["claude"]);
+    let again = kito_as_installed(root, &["assistant", "add", "claude"]);
     assert!(again.contains("set up here already"), "{again}");
-    let again = json(root, &["claude", "--json"]);
-    assert!(again["files"].as_array().unwrap().iter().all(|file| file["change"] == "unchanged"), "{again}");
+    let again = json(root, &["assistant", "add", "claude", "--json"]);
+    let files = again[0]["said"]["files"].as_array().unwrap();
+    assert!(files.iter().all(|file| file["change"] == "unchanged"), "{again}");
     ok(root, &["sync"]);
     assert!(ok(root, &["status"]).contains("0 since the last checkpoint"));
     ok(root, &["daemon", "stop"]);
@@ -590,7 +591,7 @@ fn a_project_can_be_left_alone_and_set_up_later() {
     assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "# Notes\n");
 
     // Later, with the daemon running: the files are recorded as they are written.
-    let out = kito_as_installed(root, &["claude"]);
+    let out = kito_as_installed(root, &["assistant", "add", "claude"]);
     for (file, change) in [
         (".gitignore", "updated"),
         (".mcp.json", "created"),

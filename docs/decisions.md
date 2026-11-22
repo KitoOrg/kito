@@ -1414,6 +1414,23 @@ cannot disagree with what the plugin does. An assistant's plugin writes
 files in a working directory, which a server has none of; a plugin that
 only signs in or serves pages has nothing to do in a repository.
 
+### D-174 · Colour is for a person at a terminal, and it is Kito's indigo
+The command line colours what a person reads: the logo and headings of
+the help, lane and checkpoint names, what went in, what stopped it, notes,
+and the `kito:` of an error. It is off whenever somebody other than a
+person may be reading: when the output is not a terminal, when `NO_COLOR`
+is set (to anything, empty included), when `TERM` is `dumb`, and with
+`--json`. `CLICOLOR_FORCE` (anything but `0`) turns it on for a pager
+that draws colour; `NO_COLOR` wins over it. Off, every line is the same
+bytes as before, so scripts, tests and agents that read the output see no
+change; the one-line mark before "Kito repository created" is left out
+entirely rather than drawn without colour. The colour is the brand's
+indigo, the light shade (`#a5a0f5`) because most terminals are dark;
+exact where `COLORTERM` says the terminal draws any colour, the nearest of
+the 256 otherwise. Clap is told the same, so its help and errors follow
+the same rules. `kito claude` went at the same time: it said what `kito
+assistant add claude` says, and ADR 0011 is about there being one way.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

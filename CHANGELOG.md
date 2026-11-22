@@ -4,6 +4,21 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [Unreleased]
+
+- **The command line has Kito's look**: `kito --help` starts with the
+  logo (three lanes that become one line, ending in a dot), the name and
+  the version, and lists the commands in groups, the most used first
+  (start, lanes, history, assistants and plugins, git, server, settings).
+  Headings are in Kito's indigo; commands and flags in bold; lane and
+  checkpoint names, what went in, notes and the `kito:` of errors are
+  coloured too. Colour is only for a terminal: none when the output goes
+  to a file or a program, with `NO_COLOR`, with `TERM=dumb`, or with
+  `--json`; `CLICOLOR_FORCE=1` asks for it anyway (D-174).
+- Help lines are shorter: the first sentence is shown with `-h`, the rest
+  with `--help`. `kito hook` is for assistants, and is no longer listed.
+- **`kito claude` is gone**: `kito assistant add claude` does the same.
+
 ## [0.36.1]
 
 - **A plugin runs where it is meant to**: the registry says, for each

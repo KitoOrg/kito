@@ -9,7 +9,7 @@
 //!   session starts.
 //!
 //! What is written is only added to what is there, and taking it out
-//! leaves the rest. The words are those of `kito claude`.
+//! leaves the rest. The words are those of `kito assistant add claude`.
 
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -88,7 +88,7 @@ fn without_rules(text: &str) -> String {
 fn rules(path: &Path, wanted: bool) -> Result<Option<Done>, String> {
     let was = read(path)?;
     let now = was.as_deref().unwrap_or_default();
-    // Rules that are there are Kito's to bring up to date (`kito claude`
+    // Rules that are there are Kito's to bring up to date (`kito assistant add claude`
     // knows the ones it wrote before): here they are there, or not.
     if wanted && now.lines().any(|line| line.trim_end() == HEADING) {
         return Ok(None);
@@ -235,7 +235,7 @@ fn all(root: &Path, wanted: bool) -> Result<Vec<Done>, String> {
     Ok(done.into_iter().flatten().collect())
 }
 
-/// Takes out what `setup` (or `kito claude`) wrote, and nothing else.
+/// Takes out what `setup` (or `kito assistant add claude`) wrote, and nothing else.
 pub fn remove(root: &Path) -> Result<Vec<Done>, String> {
     all(root, false)
 }

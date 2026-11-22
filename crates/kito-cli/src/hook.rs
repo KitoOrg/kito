@@ -1,6 +1,6 @@
 //! What Claude Code runs around its tools in a project kept by Kito.
 //!
-//! The rules of `CLAUDE.md` are advice; these are not. `kito claude` writes
+//! The rules of `CLAUDE.md` are advice; these are not. `kito assistant add claude` writes
 //! three hooks into `.claude/settings.json`, and Claude Code runs them
 //! whatever the model decided to do:
 //!

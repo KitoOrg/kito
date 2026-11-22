@@ -13,7 +13,7 @@
 //!   a reason Claude was not told is held back once, with the reasons;
 //! - `CLAUDE.md`: the rules, one lane per task.
 //!
-//! `kito init` and `kito import` do this by themselves, `kito claude` does
+//! `kito init` and `kito import` do this by themselves, `kito assistant add claude` does
 //! it in a repository that is already there. Doing it twice changes nothing.
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -422,7 +422,7 @@ fn rules(path: &Path) -> Result<Change, String> {
                 (!text.contains(word)).then(|| {
                     format!(
                         "its Kito section was changed by hand and says nothing of {what}: compare it \
-                         with what `kito claude` writes in a new project"
+                         with what `kito assistant add claude` writes in a new project"
                     )
                 })
             };
@@ -603,7 +603,7 @@ fn runs(group: &Json, command: &str) -> bool {
 /// The hooks, each where it is missing. What else the project runs around
 /// the same tools stays as it is.
 fn hooks(entries: &mut Entries) -> Result<bool, String> {
-    let by_hand = "add the hooks by hand, as `kito claude` writes them in an empty directory";
+    let by_hand = "add the hooks by hand, as `kito assistant add claude` writes them in an empty directory";
     let Json::Object(events) = entry(entries, "hooks", Json::Object(Vec::new())) else {
         return Err(format!("its hooks is not an object: {by_hand}"));
     };
