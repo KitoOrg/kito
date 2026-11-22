@@ -1176,6 +1176,24 @@ impl Daemon {
                     Ok(json!({}))
                 }
                 "pull" => to_json(serde_json::to_value(self.pull().map_err(|why| (rpc::REFUSED, why))?)),
+                // The git remote's commits brought in and the main lane pushed,
+                // now rather than at the next integration (ADR 0020).
+                "git_sync" => {
+                    let status = self.with_repo(|repo| repo.status()).map_err(internal)?;
+                    if status.push.is_none() {
+                        return Err((
+                            rpc::REFUSED,
+                            "this repository has no git remote: set one with `[git] push`".to_owned(),
+                        ));
+                    }
+                    self.push_wanted.notify_one();
+                    Ok(json!({
+                        "remote": status.push,
+                        "pushed": status.pushed,
+                        "push_error": status.push_error,
+                        "pull_waiting": status.pull_waiting,
+                    }))
+                }
                 "reasons_behind" => {
                     let lane = lane()?;
                     to_json(serde_json::to_value(

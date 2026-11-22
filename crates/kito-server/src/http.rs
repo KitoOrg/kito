@@ -38,6 +38,9 @@ const SIGNING_IN: &str = "kito_sign_in";
 /// what the server says with every request it passes on.
 pub const ENV_PAGES_LISTEN: &str = "KITO_PAGES_LISTEN";
 pub const ENV_PAGES_SECRET: &str = "KITO_PAGES_SECRET";
+/// Where a plugin that serves pages reaches the server's `/-/api` from
+/// this machine, with its secret in `x-kito-plugin` (ADR 0020).
+pub const ENV_SERVER_API: &str = "KITO_SERVER_API";
 
 /// A plugin that serves pages, as the server reaches it.
 #[derive(Clone)]
@@ -64,6 +67,8 @@ struct Http {
     /// enabled and disabled, while the server runs.
     pages: std::sync::RwLock<Vec<Pages>>,
     client: Client<HttpConnector, Body>,
+    /// The server's HTTP on this machine, in the clear: for its plugins.
+    local: String,
 }
 
 fn random_hex() -> Result<String, String> {
@@ -526,6 +531,31 @@ async fn api(
         Ok(server) => server,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
+    // A plugin that serves pages asks as itself, with the secret the
+    // server gave it, and with what it was given (ADR 0020).
+    if let Some(plugin) = headers.get("x-kito-plugin").and_then(|value| value.to_str().ok()) {
+        let Some((name, given)) = http.plugin_of(plugin) else {
+            return said(StatusCode::UNAUTHORIZED, "this is not the secret of a plugin that runs here");
+        };
+        let user = crate::state::User { server_role: crate::state::ServerRole::Admin, ..Default::default() };
+        let (dir, method, place) = (server.dir.clone(), call.method.clone(), repo.clone());
+        let who = format!("plugin:{name}");
+        let asked = tokio::task::spawn_blocking(move || {
+            crate::session::ask(&server, &name, &user, &repo, &call.method, call.params, Some(&given))
+        })
+        .await;
+        crate::audit::request(&dir, &who, Some(&place), &method, matches!(asked, Ok(Ok(_))));
+        return match asked {
+            Ok(Ok(value)) => answered(value),
+            Ok(Err((code, message))) => (
+                StatusCode::BAD_REQUEST,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(json!({ "error": message, "code": code })),
+            )
+                .into_response(),
+            Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        };
+    }
     let Some(who) = http.who(&server, &headers) else {
         return said(StatusCode::UNAUTHORIZED, "nobody is signed in: give a token, or open a session");
     };
@@ -634,6 +664,7 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
     tell("x-kito-mount", if page.mount.is_empty() { "/" } else { &page.mount });
     if let Some(who) = &who {
         tell("x-kito-user", &who.name);
+        tell("x-kito-role", who.user.server_role.word());
     }
     match http.client.request(Request::from_parts(parts, body)).await {
         Ok(response) => {
@@ -662,6 +693,23 @@ async fn pass_on(State(http): State<Arc<Http>>, request: Request) -> Response {
 }
 
 impl Http {
+    /// The plugin whose secret this is, and what it was given in a
+    /// repository (ADR 0020).
+    fn plugin_of(&self, said: &str) -> Option<(String, Vec<Permission>)> {
+        let pages = self.pages.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        pages
+            .iter()
+            .find(|page| {
+                page.secret.len() == said.len()
+                    && page.secret.bytes().zip(said.bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+            })
+            .map(|page| {
+                let given =
+                    page.given.iter().copied().filter(|permission| permission.of_a_repository()).collect();
+                (page.plugin.clone(), given)
+            })
+    }
+
     /// What pages may ask of a repository: what the plugins that serve
     /// them were given.
     fn pages_may(&self) -> Vec<Permission> {
@@ -715,7 +763,7 @@ impl Http {
             if pages.iter().any(|page| page.plugin == found.manifest.name) {
                 continue;
             }
-            match start_pages(&server.dir, &found, mount, given) {
+            match start_pages(&server.dir, &found, mount, given, &self.local) {
                 Ok(page) => {
                     eprintln!("kito-server: pages: {} at {}/", page.plugin, page.mount);
                     pages.push(page);
@@ -735,6 +783,7 @@ fn start_pages(
     found: &kitod::plugins::Installed,
     mount: String,
     given: Vec<Permission>,
+    local: &str,
 ) -> Result<Pages, String> {
     use std::sync::atomic::Ordering;
     let name = found.manifest.name.clone();
@@ -748,6 +797,7 @@ fn start_pages(
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (dir, told, stopped) =
         (dir.to_path_buf(), (listen.clone(), secret.clone(), name.clone()), stop.clone());
+    let local = local.to_owned();
     std::thread::spawn(move || {
         let pause = std::time::Duration::from_millis(200);
         while !stopped.load(Ordering::SeqCst) {
@@ -758,6 +808,7 @@ fn start_pages(
                 .env(kitod::plugins::ENV_API, rpc::API.to_string())
                 .env(ENV_PAGES_LISTEN, &told.0)
                 .env(ENV_PAGES_SECRET, &told.1)
+                .env(ENV_SERVER_API, &local)
                 .stdin(std::process::Stdio::piped())
                 .spawn();
             match child {
@@ -821,11 +872,22 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         true => None,
         false => Some(tokio_rustls::TlsAcceptor::from(crate::tls::config(&server.dir)?)),
     };
+    // On this machine, in the clear, for the server's own plugins: the
+    // encrypted address is for the server's name, not for 127.0.0.1.
+    let local_listener = match plain {
+        true => None,
+        false => Some(std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("127.0.0.1: {e}"))?),
+    };
+    let local = match &local_listener {
+        Some(listener) => format!("http://{}", listener.local_addr().map_err(|e| e.to_string())?),
+        None => format!("http://{bound}"),
+    };
     let http = Arc::new(Http {
         dir: server.dir.clone(),
         secure: !plain,
         pages: std::sync::RwLock::new(Vec::new()),
         client: Client::builder(TokioExecutor::new()).build_http(),
+        local,
     });
     http.settle_pages();
     let mounted: Vec<String> = {
@@ -860,6 +922,9 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
     let _ = out.flush();
 
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    if let Some(local) = &local_listener {
+        local.set_nonblocking(true).map_err(|e| e.to_string())?;
+    }
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -870,6 +935,22 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
                 Ok(listener) => listener,
                 Err(e) => return eprintln!("kito-server: HTTP is not served: {e}"),
             };
+            if let Some(local) =
+                local_listener.and_then(|local| tokio::net::TcpListener::from_std(local).ok())
+            {
+                let router = router.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((stream, _)) = local.accept().await else { continue };
+                        let router = router.clone();
+                        tokio::spawn(async move {
+                            let service = hyper_util::service::TowerToHyperService::new(router);
+                            let serving = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                            let _ = serving.serve_connection(TokioIo::new(stream), service).await;
+                        });
+                    }
+                });
+            }
             loop {
                 let Ok((stream, _)) = listener.accept().await else { continue };
                 let (router, tls) = (router.clone(), tls.clone());

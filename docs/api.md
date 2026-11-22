@@ -149,6 +149,7 @@ with what comes with it, where a program named itself otherwise.
 | `resolve_conflict` | `conflict`, `[choice]` (`main`, `lane`), `[text]` | The conflict, decided | `kito-integrate` (`ConflictInfo`) |
 | `catch_up` | `lane` | Brings into a permanent lane what its target got since | `kito-integrate` (`IntegrationResult`) |
 | `pull` | | Brings in the commits of the git remote, through a lane | `pull.rs` (`Pull`) |
+| `git_sync` | | Brings in what the git remote has and pushes, now (ADR 0020): `remote`, what was last `pushed`, `push_error`, `pull_waiting` as they were when asked | `server.rs` |
 
 ## `admin`
 

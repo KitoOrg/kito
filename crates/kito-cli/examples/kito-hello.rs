@@ -296,8 +296,29 @@ fn main() -> ExitCode {
                     }
                 }
                 let told = |name: &str| headers.get(name).cloned().unwrap_or_else(|| "-".to_owned());
-                let body = format!(
-                    "hello pages
+                // `/ask/<repository>/<method>`: the server asked as this
+                // plugin, with its secret (ADR 0020).
+                let asked = path.strip_prefix("/ask/").and_then(|rest| rest.split_once('/')).map(|(repo, method)| {
+                    let api = said("KITO_SERVER_API");
+                    let address = api.trim_start_matches("http://").to_owned();
+                    let call = format!("{{\"method\":\"{method}\",\"params\":{{}}}}");
+                    let request = format!(
+                        "POST /-/api/{repo} HTTP/1.1\r\nHost: {address}\r\nx-kito-plugin: {secret}\r\n\
+                         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{call}",
+                        call.len()
+                    );
+                    let mut answer = String::new();
+                    if let Ok(mut server) = std::net::TcpStream::connect(&address) {
+                        let _ = server.write_all(request.as_bytes());
+                        let _ = server.read_to_string(&mut answer);
+                    }
+                    let status = answer.lines().next().unwrap_or("").to_owned();
+                    let body = answer.split_once("\r\n\r\n").map(|(_, body)| body.to_owned()).unwrap_or_default();
+                    format!("asked={status}\n{body}\n")
+                });
+                let body = asked.unwrap_or_default()
+                    + &format!(
+                        "hello pages
 path={path}
 user={}
 secret={}
@@ -305,12 +326,12 @@ mount={}
 cookie={}
 authorization={}
 ",
-                    told("x-kito-user"),
-                    if told("x-kito-secret") == secret { "ok" } else { "wrong" },
-                    told("x-kito-mount"),
-                    told("cookie"),
-                    told("authorization"),
-                );
+                        told("x-kito-user"),
+                        if told("x-kito-secret") == secret { "ok" } else { "wrong" },
+                        told("x-kito-mount"),
+                        told("cookie"),
+                        told("authorization"),
+                    );
                 let _ = write!(
                     &stream,
                     "HTTP/1.1 200 OK

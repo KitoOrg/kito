@@ -4,6 +4,18 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.0]
+
+Plugins of a server that work on their own
+([ADR 0020](docs/adr/0020-plugins-that-work-on-their-own.md)).
+
+- A plugin that serves pages asks `/-/api` as itself, with the secret
+  the server gave it and what it was given; the server also listens on
+  127.0.0.1 for its plugins (`KITO_SERVER_API`).
+- Pages are told the person's role on the server (`x-kito-role`).
+- **`git_sync`**: what the git remote has comes in, and the main lane is
+  pushed, now.
+
 ## [0.38.0]
 
 A review sent whole ([ADR 0019](docs/adr/0019-a-review-sent-whole.md)).

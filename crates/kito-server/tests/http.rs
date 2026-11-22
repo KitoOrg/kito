@@ -332,6 +332,20 @@ fn pages_are_passed_on_to_the_plugin_that_serves_them() {
 
     // What is the server's own is never the plugin's.
     assert_eq!(served.request("GET", "/-/me", &[], None).status, 401);
+
+    // The plugin asks the server as itself, with what it was given (ADR
+    // 0020): it reads; it does not write; a wrong secret is nobody.
+    let asked = page("/ask/shop/lanes", &[]);
+    assert!(asked.body.starts_with("asked=HTTP/1.1 200"), "{}", asked.body);
+    let wrote = page("/ask/shop/checkpoint", &[]);
+    assert!(
+        wrote.body.contains("may not ask `checkpoint`") || wrote.body.contains("not something a client"),
+        "{}",
+        wrote.body
+    );
+    let call = json!({ "method": "lanes" });
+    let nobody = served.request("POST", "/-/api/shop", &[("x-kito-plugin", "guess")], Some(&call));
+    assert_eq!(nobody.status, 401, "{}", nobody.body);
 }
 
 #[test]

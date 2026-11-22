@@ -1809,3 +1809,10 @@ draft is nobody else's business; they reach the repository in one call
 that checks them all first, so a review is never half there. What a
 reviewer saw is kept with the verdict as the contents of the files, not
 as a count of ops, so "since my review" is a diff of texts.
+
+### D-176 · A plugin works on its own with the secret it already has
+A plugin that keeps a repository in step with GitHub has nobody to act
+for ([ADR 0020](adr/0020-plugins-that-work-on-their-own.md)). It uses the
+secret the server already gives it for its pages, rather than a token of
+its own, so there is one thing per plugin to keep and to change; and it
+is held to what an administrator gave it, as its pages are.

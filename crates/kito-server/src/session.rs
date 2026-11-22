@@ -77,6 +77,8 @@ const ALLOWED: &[&str] = &[
     "submit_review",
     "apply_suggestion",
     "changes_since_review",
+    // The git remote now (ADR 0020).
+    "git_sync",
 ];
 
 /// Of those, what somebody who may only read can ask.

@@ -53,3 +53,5 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0019 · A review sent whole, suggestions, and what changed since](0019-a-review-sent-whole.md)
   (accepted)
+- [0020 · A server's plugins that work on its repositories on their own](0020-plugins-that-work-on-their-own.md)
+  (accepted)

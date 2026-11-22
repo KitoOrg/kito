@@ -521,6 +521,33 @@ fn every_integration_is_pushed_to_the_git_remote() {
     assert_eq!(why["reasons"][0]["why"], "straight to git");
     assert_eq!(why["reasons"][0]["by"], "Ada");
 
+    // Asked for, without waiting for an integration (ADR 0020): what the
+    // remote got since comes in now.
+    git(&other, &["pull", "-q", "--no-rebase", "origin", "main"]);
+    write(&other, "CHANGES.md", "from git, synced on demand\n");
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "a change log"]);
+    // Kito may be pushing its merge at the same moment: pull it and try again.
+    wait_for("their push", || {
+        let pushed = Command::new("git").current_dir(&other).args(["push", "-q", "origin", "main"]).output();
+        pushed.is_ok_and(|out| out.status.success()) || {
+            let _ = Command::new("git")
+                .current_dir(&other)
+                .args(["pull", "-q", "--no-rebase", "origin", "main"])
+                .output();
+            false
+        }
+    });
+    let synced = call(&ada, "git_sync", json!({}));
+    assert_eq!(synced["remote"].as_str(), Some(remote.to_str().unwrap()), "{synced}");
+    wait_for("the commit synced on demand", || read(&world.main(), "CHANGES.md").contains("on demand"));
+    // And the merge is pushed: the remote has Kito's merge of it.
+    wait_for("the merge pushed", || {
+        let parents = git_out(&remote, &["rev-list", "--parents", "-n", "1", "main"]);
+        parents.split_whitespace().count() == 3
+            && git_out(&remote, &["show", "main:CHANGES.md"]).contains("on demand")
+    });
+
     // A commit that conflicts with what a lane did waits in its lane, and
     // nothing is pushed over it until somebody decides.
     git(&other, &["pull", "-q", "origin", "main"]);

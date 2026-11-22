@@ -155,7 +155,7 @@ const WRITE: &[&str] = &[
     "take",
 ];
 
-const INTEGRATE: &[&str] = &["request_integration", "resolve_conflict", "catch_up", "pull"];
+const INTEGRATE: &[&str] = &["request_integration", "resolve_conflict", "catch_up", "pull", "git_sync"];
 
 /// Never for a plugin, whatever it was given: its own key would be worth
 /// every other's.
