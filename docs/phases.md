@@ -2605,6 +2605,44 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 35 · repositories from afar — done
+
+The person asked for admins to add repositories from a connected
+directory and from the web client (empty, from a git address, or sent
+from their machine), to archive them before they are deleted, and to
+rename them. Released as 0.36.0
+([ADR 0018](adr/0018-repositories-from-afar.md), D-172).
+
+### What is there
+
+- `server.repos_all`, `server.repo_add`, `server.repo_upload_*`,
+  `server.repo_archive`, `server.repo_unarchive`, `server.repo_delete`,
+  `server.repo_rename`, for admins (restoring and deleting for owners).
+- `kito repos all | add | archive | unarchive | delete | rename`;
+  `kito-server repo archive | unarchive | delete | rename`.
+- Archived repositories deleted after 30 days by the serving server;
+  renamed ones reached by their old name.
+
+### How it was tested
+
+- `kito-server/tests/server.rs`: added empty, refused from a path of
+  the server's machine, a token kept out of the error; sent as a git
+  bundle and as a Kito archive, a broken one refused and nothing left;
+  renamed and reached by the old name; archived, out of reach, brought
+  back and deleted by an owner only; the same on the server's machine,
+  and every change in the audit log.
+- `kito-cli/tests/cli.rs`: an admin adds, pushes a Kito repository and a
+  git one, renames and archives from a connected directory; a member is
+  refused.
+
+### Known limitations
+
+- **Cloning from a real private address was not tried** here: the
+  token's path is tested for its refusals only.
+- **A Kito repository sent carries its main lane's files**, not files
+  changed and not saved in it.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 34 · the audit log and backups — done
 
 The person asked for an audit log of the server (people and access,

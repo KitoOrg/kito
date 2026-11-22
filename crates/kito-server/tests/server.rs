@@ -906,3 +906,129 @@ fn what_changes_the_server_is_kept_in_a_chain_and_the_server_is_backed_up_whole(
             && String::from_utf8_lossy(&broken.stderr).contains("it was changed after it was written")
     );
 }
+
+#[test]
+fn admins_add_archive_rename_and_owners_delete_repositories() {
+    let mut world = World::new();
+    let rose = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
+    let olga = token_in(&ok(&world.dir, &["user", "add", "olga", "--role", "owner"]));
+    let address = world.serve();
+    let mut bob = connect(&address, &world.bob, "shop");
+    let said = bob.call_value("server.repo_add", json!({ "name": "notes" })).unwrap_err().to_string();
+    assert!(said.contains("only an admin"), "{said}");
+
+    // Empty: the admin who adds it maintains it.
+    let mut admin = connect(&address, &rose, "shop");
+    assert_eq!(admin.call_value("server.repo_add", json!({ "name": "notes" })).unwrap()["name"], "notes");
+    assert!(world.repo("notes").join(".kito").is_dir());
+    let mut notes = connect(&address, &rose, "notes");
+    notes.call_value("status", json!({})).unwrap();
+    // Never a directory of the server's machine; a token only over https.
+    let here = world.dir.join("..").join("shop-src");
+    let said = admin
+        .call_value("server.repo_add", json!({ "name": "copy", "from": here.to_str().unwrap() }))
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("not a git address"), "{said}");
+    let said = admin
+        .call_value(
+            "server.repo_add",
+            json!({ "name": "copy", "from": "http://example.com/x.git", "token": "t0ken" }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(said.contains("https://") && !said.contains("t0ken"), "{said}");
+
+    // Sent from a machine: a git repository as a bundle of its history ...
+    let bundle = world.dir.join("..").join("shop.bundle");
+    git(&here, &["bundle", "create", bundle.to_str().unwrap(), "--all"]);
+    let upload = |admin: &mut Client, bytes: &[u8], name: &str, kind: &str, key: Option<&[u8; 32]>| {
+        let id = admin.call_value("server.repo_upload_begin", json!({})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for piece in bytes.chunks(1000) {
+            admin
+                .call_value(
+                    "server.repo_upload_chunk",
+                    json!({ "id": id, "data": kitod::rpc::encode(piece) }),
+                )
+                .unwrap();
+        }
+        let mut ended = json!({ "id": id, "name": name, "kind": kind });
+        if let Some(key) = key {
+            ended["key"] = json!(kitod::rpc::encode(key));
+        }
+        admin.call_value("server.repo_upload_end", ended)
+    };
+    upload(&mut admin, &fs::read(&bundle).unwrap(), "shop2", "git", None).unwrap();
+    assert!(fs::read_to_string(world.repo("shop2").join("src/shop.ts")).unwrap().contains("total"));
+    // ... and a Kito one whole, its history with it.
+    let site = world.repo("site");
+    let files = kitod::archive::collect(&site, &|path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        text.starts_with(".kito/index") || text.contains("sock") || text.ends_with("lock")
+    });
+    let key = kitod::archive::random_key().unwrap();
+    let packed = world.dir.join("..").join("site.kitoarchive");
+    kitod::archive::write(&site, &files, &packed, &key).unwrap();
+    upload(&mut admin, &fs::read(&packed).unwrap(), "site2", "kito", Some(&key)).unwrap();
+    let mut site2 = connect(&address, &rose, "site2");
+    site2.call_value("status", json!({})).unwrap();
+    let said = upload(&mut admin, b"not an archive", "site3", "kito", Some(&key)).unwrap_err().to_string();
+    assert!(!world.repo("site3").exists(), "{said}");
+    assert!(fs::read_dir(world.dir.join("uploads")).unwrap().next().is_none());
+
+    // Renamed: the old name still reaches it.
+    admin.call_value("server.repo_rename", json!({ "from": "shop2", "to": "shop3" })).unwrap();
+    assert!(!world.repo("shop2").exists() && world.repo("shop3").is_dir());
+    let mut old = connect(&address, &rose, "shop2");
+    old.call_value("status", json!({})).unwrap();
+    drop(old);
+
+    // Archived: out of reach, kept 30 days; owners bring it back or delete it.
+    admin.call_value("server.repo_archive", json!({ "name": "shop3" })).unwrap();
+    refusal(Client::remote(&remote(&address, &rose, "shop3"), true));
+    let all = admin.call_value("server.repos_all", json!({})).unwrap();
+    assert!(
+        all["archived"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|repo| repo["name"] == "shop3" && repo["by"] == "rose"),
+        "{all}"
+    );
+    assert!(
+        all["repos"].as_array().unwrap().iter().any(|repo| repo["name"] == "notes" && repo["members"] == 1),
+        "{all}"
+    );
+    assert_eq!(all["renamed"]["shop2"], "shop3");
+    let said = admin.call_value("server.repo_unarchive", json!({ "name": "shop3" })).unwrap_err().to_string();
+    assert!(said.contains("only an owner"), "{said}");
+    let mut owner = connect(&address, &olga, "shop");
+    owner.call_value("server.repo_unarchive", json!({ "name": "shop3" })).unwrap();
+    assert!(world.repo("shop3").is_dir());
+    owner.call_value("server.repo_archive", json!({ "name": "shop3" })).unwrap();
+    assert!(owner.call_value("server.repo_delete", json!({ "name": "shop3" })).is_err());
+    owner.call_value("server.repo_delete", json!({ "name": "shop3", "confirm": "shop3" })).unwrap();
+    assert!(!world.dir.join("archived/shop3").exists());
+    let all = owner.call_value("server.repos_all", json!({})).unwrap();
+    assert!(all["archived"].as_array().unwrap().is_empty() && all["renamed"].get("shop2").is_none(), "{all}");
+
+    // On the server's machine too, and every change kept.
+    ok(&world.dir, &["repo", "rename", "notes", "journal"]);
+    ok(&world.dir, &["repo", "archive", "journal"]);
+    assert!(refused(&world.dir, &["repo", "delete", "journal", "--confirm", "notes"])
+        .contains("--confirm journal"));
+    let audit = ok(&world.dir, &["audit"]);
+    for kind in ["repo_added", "repo_renamed", "repo_archived", "repo_unarchived", "repo_deleted"] {
+        assert!(audit.contains(kind), "{kind}: {audit}");
+    }
+    for name in ["site2", "archived/journal"] {
+        if let Ok(mut daemon) =
+            Client::connect(&world.dir.join(if name.contains('/') { "" } else { "repos" }).join(name))
+        {
+            let _ = daemon.call_value("shutdown", json!({}));
+        }
+    }
+}

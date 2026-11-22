@@ -49,3 +49,5 @@ Compatibility with existing data, migration, what becomes harder.
 - [0016 · Search and numbers over what a repository did](0016-search-and-numbers.md)
 - [0017 · The server's audit log, and its backups](0017-audit-and-backups.md)
   (accepted)
+- [0018 · Repositories added, archived, renamed and deleted from afar](0018-repositories-from-afar.md)
+  (accepted)

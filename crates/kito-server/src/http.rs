@@ -251,7 +251,7 @@ async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): J
     if who.by_cookie && headers.get("x-kito").is_none() {
         return said(StatusCode::FORBIDDEN, "not a request of a page of this server");
     }
-    let theirs = ["server.people", "server.audit", "server.backup"];
+    let theirs = ["server.people", "server.audit", "server.backup", "server.repo"];
     if !theirs.iter().any(|prefix| call.method.starts_with(prefix)) {
         return said(
             StatusCode::NOT_FOUND,

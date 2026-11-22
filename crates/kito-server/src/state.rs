@@ -9,6 +9,10 @@ pub const CONFIG_FILE: &str = "server.toml";
 /// In the environment of a plugin run for a server: the server's directory.
 pub const ENV_SERVER_DIR: &str = "KITO_SERVER_DIR";
 const REPOS_DIR: &str = "repos";
+/// Where archived repositories wait to be deleted (ADR 0018).
+const ARCHIVED_DIR: &str = "archived";
+/// Days an archived repository is kept.
+pub const KEEP_ARCHIVED_DAYS: u64 = 30;
 /// The address a new server listens on: this machine only. Clients on
 /// other machines come in through SSH, or the address is changed by whoever
 /// knows the network is theirs.
@@ -32,6 +36,10 @@ pub struct Config {
     /// Backups of the whole server (ADR 0017).
     #[serde(skip_serializing_if = "crate::backup::BackupConfig::is_default")]
     pub backup: crate::backup::BackupConfig,
+    /// Repositories that were renamed, by their old name (ADR 0018): the
+    /// directories connected with it still reach them.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub renamed: BTreeMap<String, String>,
 }
 
 /// `[sign_in]`: what holds for whoever signs in with a plugin (ADR 0006).
@@ -142,6 +150,7 @@ impl Default for Config {
             plugins: BTreeMap::new(),
             sign_in: SignInConfig::default(),
             backup: crate::backup::BackupConfig::default(),
+            renamed: BTreeMap::new(),
         }
     }
 }
@@ -312,6 +321,11 @@ pub fn hash_of(token: &str) -> String {
     kito_core::Hash::of(token.as_bytes()).to_string()
 }
 
+/// A name a repository may have (ADR 0018).
+pub fn check_repo_name(name: &str) -> Result<(), String> {
+    check_name("repository", name)
+}
+
 /// A name that is safe as a directory and in a configuration key.
 fn check_name(what: &str, name: &str) -> Result<(), String> {
     let plain = !name.is_empty()
@@ -398,6 +412,219 @@ impl Server {
             .collect();
         names.sort();
         names
+    }
+
+    // ------------------------------------------------- repositories (ADR 0018)
+
+    /// The name a repository has now: one renamed is still reached by its
+    /// old name.
+    pub fn resolve(&self, name: &str) -> String {
+        let mut now = name.to_owned();
+        for _ in 0..16 {
+            if self.repo(&now).is_some() {
+                break;
+            }
+            match self.config.renamed.get(&now) {
+                Some(next) => now = next.clone(),
+                None => break,
+            }
+        }
+        now
+    }
+
+    /// Stops the daemon of a repository, if one runs, and waits for it.
+    fn stop_daemon(root: &Path) {
+        if let Ok(mut client) = kitod::client::Client::connect(root) {
+            let _ = client.call_value("shutdown", serde_json::json!({}));
+            let socket = kitod::rpc::socket_path(root);
+            for _ in 0..1000 {
+                if !socket.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    fn archived_dir(&self) -> PathBuf {
+        self.dir.join(ARCHIVED_DIR)
+    }
+
+    /// Takes a repository out of use: hidden and closed, kept for
+    /// `KEEP_ARCHIVED_DAYS`, then deleted. Who may use it stays said, for
+    /// when it comes back.
+    pub fn archive_repo(&self, name: &str, by: &str) -> Result<(), String> {
+        let root =
+            self.repo(name).ok_or_else(|| format!("there is no repository `{name}` on this server"))?;
+        let to = self.archived_dir().join(name);
+        if to.exists() {
+            return Err(format!("an archived repository is called `{name}` already: delete it first"));
+        }
+        Self::stop_daemon(&root);
+        std::fs::create_dir_all(self.archived_dir()).map_err(|e| e.to_string())?;
+        std::fs::rename(&root, &to).map_err(|e| format!("{}: {e}", root.display()))?;
+        let said = serde_json::json!({ "at_ms": now_ms(), "by": by });
+        std::fs::write(self.archived_dir().join(format!("{name}.json")), said.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The archived repositories: name, when, by whom, and when it goes.
+    pub fn archived(&self) -> Vec<serde_json::Value> {
+        let mut found: Vec<serde_json::Value> = std::fs::read_dir(self.archived_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let said: serde_json::Value =
+                    std::fs::read_to_string(self.archived_dir().join(format!("{name}.json")))
+                        .ok()
+                        .and_then(|text| serde_json::from_str(&text).ok())
+                        .unwrap_or_default();
+                let at = said["at_ms"].as_u64().unwrap_or(0);
+                Some(serde_json::json!({
+                    "name": name,
+                    "at_ms": at,
+                    "by": said["by"],
+                    "deleted_at_ms": at + KEEP_ARCHIVED_DAYS * 86_400_000,
+                }))
+            })
+            .collect();
+        found.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        found
+    }
+
+    /// Brings an archived repository back, as it was.
+    pub fn unarchive_repo(&self, name: &str) -> Result<(), String> {
+        check_name("repository", name)?;
+        let from = self.archived_dir().join(name);
+        if !from.is_dir() {
+            return Err(format!("no archived repository is called `{name}`"));
+        }
+        let to = self.dir.join(REPOS_DIR).join(name);
+        if to.exists() {
+            return Err(format!("the server has a repository `{name}` already: rename one first"));
+        }
+        std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(self.archived_dir().join(format!("{name}.json")));
+        Ok(())
+    }
+
+    /// Deletes a repository for good, archived or not, and what the people
+    /// were given of it. The backups still have it.
+    pub fn delete_repo(&mut self, name: &str) -> Result<(), String> {
+        check_name("repository", name)?;
+        let (live, archived) = (self.repo(name), self.archived_dir().join(name));
+        match (live, archived.is_dir()) {
+            (Some(root), _) => {
+                Self::stop_daemon(&root);
+                std::fs::remove_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+            }
+            (None, true) => {
+                std::fs::remove_dir_all(&archived).map_err(|e| format!("{}: {e}", archived.display()))?;
+                let _ = std::fs::remove_file(self.archived_dir().join(format!("{name}.json")));
+            }
+            (None, false) => return Err(format!("there is no repository `{name}` on this server")),
+        }
+        for user in self.config.users.values_mut() {
+            user.access.remove(name);
+        }
+        self.config.renamed.retain(|old, new| old != name && new != name);
+        self.save()
+    }
+
+    /// Deletes the archived repositories kept longer than they are kept.
+    /// Answers which.
+    pub fn purge_archived(&mut self) -> Vec<String> {
+        let now = now_ms();
+        let due: Vec<String> = self
+            .archived()
+            .into_iter()
+            .filter(|one| one["deleted_at_ms"].as_u64().is_some_and(|at| at <= now))
+            .filter_map(|one| one["name"].as_str().map(str::to_owned))
+            .collect();
+        due.into_iter().filter(|name| self.delete_repo(name).is_ok()).collect()
+    }
+
+    /// Renames a repository: who may use it, the kitchens that name it and
+    /// what was kept of its settings follow; the old name still reaches it.
+    pub fn rename_repo(&mut self, from: &str, to: &str) -> Result<(), String> {
+        check_name("repository", to)?;
+        let root =
+            self.repo(from).ok_or_else(|| format!("there is no repository `{from}` on this server"))?;
+        let target = self.dir.join(REPOS_DIR).join(to);
+        if target.exists() || self.archived_dir().join(to).exists() {
+            return Err(format!("the server has a repository `{to}` already"));
+        }
+        Self::stop_daemon(&root);
+        std::fs::rename(&root, &target).map_err(|e| e.to_string())?;
+        for user in self.config.users.values_mut() {
+            if let Some(role) = user.access.remove(from) {
+                user.access.insert(to.to_owned(), role);
+            }
+        }
+        // An old name taken by the new one is no longer an old name.
+        self.config.renamed.remove(to);
+        for new in self.config.renamed.values_mut() {
+            if new == from {
+                *new = to.to_owned();
+            }
+        }
+        self.config.renamed.insert(from.to_owned(), to.to_owned());
+        self.save()?;
+        let settings = self.dir.join("settings");
+        let _ = std::fs::rename(settings.join(format!("{from}.jsonl")), settings.join(format!("{to}.jsonl")));
+        // The repositories whose kitchen it is.
+        let old_path = format!("../{from}");
+        for name in self.repos() {
+            let Some(other) = self.repo(&name) else { continue };
+            let store = other.join(kito_store::STORE_DIR);
+            let names_it = kitod::config::Config::load(&store)
+                .is_ok_and(|config| config.kitchen.path.as_deref() == Some(old_path.as_str()));
+            if names_it {
+                Self::stop_daemon(&other);
+                let new_path = format!("../{to}");
+                kitod::config::write_value(&store, "kitchen", "path", Some(new_path.as_str().into()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a repository from a git address, with a token used for the
+    /// clone and kept nowhere.
+    pub fn add_repo_from_git(&self, name: &str, url: &str, token: Option<&str>) -> Result<PathBuf, String> {
+        let token = token.map(str::trim).filter(|token| !token.is_empty());
+        let given = match token {
+            Some(token) => match url.split_once("://") {
+                Some(("https", rest)) => format!("https://x-access-token:{token}@{rest}"),
+                _ => return Err("a token goes with an https:// address".into()),
+            },
+            None => url.to_owned(),
+        };
+        let added = self.add_repo(name, Some(&given), true).map_err(|why| match token {
+            Some(token) => why.replace(token, "<token>"),
+            None => why,
+        })?;
+        // The clone keeps where it came from, without the token.
+        if token.is_some() {
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&added)
+                .args(["remote", "set-url", "origin", url])
+                .output();
+        }
+        Ok(added)
+    }
+
+    /// Where a repository sent from a client is put together while it comes.
+    pub fn upload_path(&self, id: &str) -> Result<PathBuf, String> {
+        let plain = id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        match plain {
+            true => Ok(self.dir.join("uploads").join(id)),
+            false => Err("no such upload".into()),
+        }
     }
 
     /// Creates a repository: empty, or with the history of a git one. One

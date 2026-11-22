@@ -39,6 +39,8 @@ webpki-roots.workspace = true
 sha2.workspace = true
 rustix.workspace = true
 getrandom = "0.2"
+# Archives: a server's backups, a repository pushed to a server (ADR 0017, 0018).
+zstd.workspace = true
 # The registry of plugins (ADR 0008): read over HTTPS, archives unpacked.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 flate2 = "1"

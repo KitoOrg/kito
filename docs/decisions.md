@@ -1398,6 +1398,15 @@ while the server runs, because the stores are append-only and checked,
 and leave out what is rebuilt; encryption uses what the TLS library
 already brings, so nothing new is trusted for it.
 
+### D-172 · A repository is archived before it is deleted, and keeps its old name
+Taking a repository away is the one change of a server that cannot be
+undone, so it is two steps ([ADR 0018](adr/0018-repositories-from-afar.md)):
+admins archive, and only time or an owner deletes. A rename keeps the old
+name as a link rather than telling every connected directory, because
+those directories may be on machines nobody can reach. A repository sent
+from a machine travels in the backups' archive, so one format is checked
+for both.
+
 ### D-164 · The assistant in a lane is what its side says, and Kito draws nothing
 A lane says which assistant its agent runs in, and the model
 ([ADR 0010](adr/0010-assistant-in-a-lane.md)), because the person who

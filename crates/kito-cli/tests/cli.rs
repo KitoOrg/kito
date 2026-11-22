@@ -1755,6 +1755,34 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert!(left.contains("no longer follows the main lane; its files stay"), "{left}");
     assert!(desk.join("src/shop.py").is_file());
 
+    // An admin adds repositories from a connected directory: empty, or
+    // sent whole from this machine, a Kito repository or a git one.
+    let rose = run(&["user", "add", "rose", "--role", "admin", "--repo", "shop:read"]);
+    let rose = rose.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    ok(&base, &["connect", &address, "shop", "admin", "--token", &rose]);
+    let admin = base.join("admin");
+    assert!(!kito(&here, &["repos", "add", "notes"]).status.success());
+    assert!(ok(&admin, &["repos", "add", "notes"]).contains("`notes` is on"));
+    let mine = base.join("mine");
+    fs::create_dir_all(&mine).unwrap();
+    fs::write(mine.join("notes.py"), "def note():\n    return 1\n").unwrap();
+    ok(&mine, &["init"]);
+    ok(&mine, &["checkpoint", "-m", "a note"]);
+    assert!(
+        ok(&admin, &["repos", "add", "pushed", "--push", mine.to_str().unwrap()]).contains("`pushed` is on")
+    );
+    ok(&mine, &["daemon", "stop"]);
+    assert!(fs::read_to_string(serverdir.join("repos/pushed/notes.py")).unwrap().contains("note"));
+    assert!(serverdir.join("repos/pushed/.kito/format").is_file());
+    ok(&admin, &["repos", "add", "fromgit", "--push", src.to_str().unwrap()]);
+    assert_eq!(fs::read_to_string(serverdir.join("repos/fromgit/src/shop.py")).unwrap(), SHOP_PY);
+    ok(&admin, &["repos", "rename", "fromgit", "shop2"]);
+    ok(&admin, &["repos", "archive", "shop2"]);
+    let all = ok(&admin, &["repos", "all"]);
+    assert!(all.contains("pushed") && all.contains("shop2                archived by rose"), "{all}");
+    assert!(all.contains("fromgit              is shop2 now"), "{all}");
+    assert!(!kito(&admin, &["repos", "delete", "shop2", "--confirm", "shop2"]).status.success());
+
     // Copies of lanes are for directories connected to a server.
     let own = base.join("own");
     fs::create_dir_all(&own).unwrap();

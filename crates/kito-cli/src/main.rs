@@ -177,6 +177,39 @@ enum TaskCmd {
 }
 
 #[derive(Subcommand)]
+enum ReposCmd {
+    /// Every repository of the server, the archived ones too (admins)
+    All,
+    /// Add one: empty, from a git address, or pushed from a directory here
+    Add {
+        name: String,
+        /// A git address the server clones
+        #[arg(long, value_name = "URL")]
+        from: Option<String>,
+        /// A file with a token for a private git address: used once, kept nowhere
+        #[arg(long, value_name = "FILE", requires = "from")]
+        token_file: Option<PathBuf>,
+        /// A repository of this machine, sent whole: a Kito one with all its
+        /// history, or a git one
+        #[arg(long, value_name = "DIR")]
+        push: Option<PathBuf>,
+    },
+    /// Take one out of use: hidden, deleted after 30 days
+    Archive { name: String },
+    /// Bring an archived one back (owners)
+    Unarchive { name: String },
+    /// Delete one for good (owners)
+    Delete {
+        name: String,
+        /// Its name again, to say it is meant
+        #[arg(long, value_name = "NAME")]
+        confirm: String,
+    },
+    /// Rename one: directories connected with the old name still reach it
+    Rename { from: String, to: String },
+}
+
+#[derive(Subcommand)]
 enum PeopleCmd {
     /// Add a person to the server: their token is printed once
     Add {
@@ -534,8 +567,12 @@ enum Cmd {
         /// The way to sign in (default: the one this directory was connected with)
         method: Option<String>,
     },
-    /// The repositories you may use on the server this directory is connected to
-    Repos,
+    /// The repositories you may use on the server this directory is
+    /// connected to; for admins, add, archive, rename and delete them
+    Repos {
+        #[command(subcommand)]
+        command: Option<ReposCmd>,
+    },
     /// What happens in the repository, as it happens
     Watch {
         /// Only what happens in this lane
@@ -3900,6 +3937,183 @@ fn cmd_backup(cli: &Cli, what: Option<&str>) -> Outcome {
     Ok(())
 }
 
+/// What goes up when a repository of this machine is pushed to a server
+/// (ADR 0018): a Kito repository's store, less what is rebuilt, and the
+/// files of its main lane; written to `out`. Answers how many files.
+fn pack_kito_repository(root: &Path, out: &Path, key: &[u8; 32]) -> Result<usize, String> {
+    let mut client = Client::connect_or_start(root).map_err(fail)?;
+    let listed: Value = client.call("lane_files", json!({})).map_err(fail)?;
+    let mut files: Vec<PathBuf> = listed["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file["path"].as_str().map(PathBuf::from))
+        .collect();
+    let store = kitod::archive::collect(&root.join(".kito"), &|path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        text == "index"
+            || text.starts_with("index/")
+            || text == "remote.toml"
+            || text.starts_with("refused/")
+            || name == "lock"
+            || name == ".lock"
+            || name.starts_with("socket")
+            || name.ends_with(".sock")
+    });
+    files.extend(store.into_iter().map(|path| Path::new(".kito").join(path)));
+    let (count, _) = kitod::archive::write(root, &files, out, key)?;
+    Ok(count)
+}
+
+/// Sends a file to the server in pieces, and says what it is.
+fn upload(
+    client: &mut Client,
+    file: &Path,
+    name: &str,
+    kind: &str,
+    key: Option<&[u8; 32]>,
+) -> Result<Value, String> {
+    use std::io::Read as _;
+    let begun: Value = client.call("server.repo_upload_begin", json!({})).map_err(fail)?;
+    let id = begun["id"].as_str().ok_or("the server opened no upload")?.to_owned();
+    let mut input = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let total = input.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let mut sent = 0u64;
+    let mut piece = vec![0u8; 512 * 1024];
+    loop {
+        let n = input.read(&mut piece).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let _: Value = client
+            .call("server.repo_upload_chunk", json!({ "id": id, "data": kitod::rpc::encode(&piece[..n]) }))
+            .map_err(fail)?;
+        sent += n as u64;
+        eprint!("\rkito: sent {} of {} KB", sent / 1024, total / 1024);
+    }
+    eprintln!();
+    let mut ended = json!({ "id": id, "name": name, "kind": kind });
+    if let Some(key) = key {
+        ended["key"] = json!(kitod::rpc::encode(key));
+    }
+    client.call("server.repo_upload_end", ended).map_err(fail)
+}
+
+/// `kito repos …` (ADR 0018): the server's repositories, for its admins.
+fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
+    let (remote, mut client) = server_here(cli, false)?;
+    let said: Value = match command {
+        ReposCmd::All => {
+            let all: Value = client.call("server.repos_all", json!({})).map_err(fail)?;
+            if cli.json {
+                print_json(&all);
+                return Ok(());
+            }
+            for repo in all["repos"].as_array().into_iter().flatten() {
+                println!(
+                    "{:<20} {} people given it, {} KB kept",
+                    repo["name"].as_str().unwrap_or("?"),
+                    repo["members"],
+                    repo["store_bytes"].as_u64().unwrap_or(0) / 1024
+                );
+            }
+            for repo in all["archived"].as_array().into_iter().flatten() {
+                let gone =
+                    utc(repo["deleted_at_ms"].as_u64().unwrap_or(0)).chars().take(10).collect::<String>();
+                println!(
+                    "{:<20} archived by {}, deleted on {gone}",
+                    repo["name"].as_str().unwrap_or("?"),
+                    repo["by"].as_str().unwrap_or("?")
+                );
+            }
+            for (old, new) in all["renamed"].as_object().into_iter().flatten() {
+                println!("{old:<20} is {} now", new.as_str().unwrap_or("?"));
+            }
+            return Ok(());
+        }
+        ReposCmd::Add { name, from, token_file, push } => match (from, push) {
+            (Some(_), Some(_)) => {
+                return Err("a repository comes from a git address or from a directory here, not both".into())
+            }
+            (None, Some(dir)) => {
+                let dir = std::path::absolute(dir).map_err(|e| e.to_string())?;
+                let staged = std::env::temp_dir().join(format!("kito-push-{}", std::process::id()));
+                let done = if dir.join(".kito").join("format").is_file() {
+                    let key = kitod::archive::random_key()?;
+                    let count = pack_kito_repository(&dir, &staged, &key)?;
+                    eprintln!("kito: {count} files of {} packed", dir.display());
+                    upload(&mut client, &staged, name, "kito", Some(&key))
+                } else if dir.join(".git").exists() {
+                    let bundled = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&dir)
+                        .args(["bundle", "create"])
+                        .arg(&staged)
+                        .arg("--all")
+                        .output()
+                        .map_err(|e| format!("git: {e}"))?;
+                    if !bundled.status.success() {
+                        return Err(format!(
+                            "git bundle: {}",
+                            String::from_utf8_lossy(&bundled.stderr).trim()
+                        ));
+                    }
+                    upload(&mut client, &staged, name, "git", None)
+                } else {
+                    Err(format!("{} is neither a Kito repository nor a git one", dir.display()))
+                };
+                let _ = std::fs::remove_file(&staged);
+                done?
+            }
+            (from, None) => {
+                let token = match token_file {
+                    Some(file) => Some(
+                        std::fs::read_to_string(file)
+                            .map_err(|e| format!("{}: {e}", file.display()))?
+                            .trim()
+                            .to_owned(),
+                    ),
+                    None => None,
+                };
+                client
+                    .call("server.repo_add", json!({ "name": name, "from": from, "token": token }))
+                    .map_err(fail)?
+            }
+        },
+        ReposCmd::Archive { name } => {
+            client.call("server.repo_archive", json!({ "name": name })).map_err(fail)?
+        }
+        ReposCmd::Unarchive { name } => {
+            client.call("server.repo_unarchive", json!({ "name": name })).map_err(fail)?
+        }
+        ReposCmd::Delete { name, confirm } => {
+            client.call("server.repo_delete", json!({ "name": name, "confirm": confirm })).map_err(fail)?
+        }
+        ReposCmd::Rename { from, to } => {
+            client.call("server.repo_rename", json!({ "from": from, "to": to })).map_err(fail)?
+        }
+    };
+    if cli.json {
+        print_json(&said);
+        return Ok(());
+    }
+    let name = said["name"].as_str().unwrap_or("?");
+    match command {
+        ReposCmd::Add { .. } => println!(
+            "`{name}` is on {}, and you maintain it: `kito connect {}/{name}` in a new directory, `kito grant` to give it.",
+            remote.place(),
+            remote.place()
+        ),
+        ReposCmd::Archive { .. } => println!("`{name}` is archived: nobody reaches it, and it is deleted in 30 days."),
+        ReposCmd::Unarchive { .. } => println!("`{name}` is back, as it was."),
+        ReposCmd::Delete { .. } => println!("`{name}` is deleted. The backups made before still have it."),
+        ReposCmd::Rename { from, .. } => println!("`{from}` is `{name}` now; what is connected to `{from}` still reaches it."),
+        ReposCmd::All => {}
+    }
+    Ok(())
+}
+
 fn cmd_repos(cli: &Cli) -> Outcome {
     let root = root_of(cli)?;
     let remote = Remote::load(&root)
@@ -5024,7 +5238,8 @@ fn run() -> ExitCode {
             })
         }
         Cmd::SignIn { method } => cmd_sign_in(&cli, method),
-        Cmd::Repos => cmd_repos(&cli),
+        Cmd::Repos { command: None } => cmd_repos(&cli),
+        Cmd::Repos { command: Some(command) } => cmd_repos_manage(&cli, command),
         Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),
         Cmd::Who { target } => cmd_who(&cli, target),
         Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),

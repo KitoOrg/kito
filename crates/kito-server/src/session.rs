@@ -132,6 +132,8 @@ pub fn ask(
     within: Option<&[kitod::plugins::Permission]>,
 ) -> Result<Value, (i64, String)> {
     // The same answer for one that is not there and one that is not theirs.
+    let resolved = server.resolve(repo);
+    let repo = resolved.as_str();
     let root = server.repo(repo).filter(|_| user.may_use(repo)).ok_or_else(|| {
         (NO_SUCH_REPO, format!("there is no repository `{repo}` for {name} on this server"))
     })?;
@@ -327,7 +329,8 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
             }
         };
     };
-    let repo = match hello.get("repo").and_then(Value::as_str) {
+    let asked_repo = hello.get("repo").and_then(Value::as_str).map(|repo| server.resolve(repo));
+    let repo = match asked_repo.as_deref() {
         Some(repo) => match server.repo(repo).filter(|_| user.may_use(repo)) {
             Some(root) => Some((repo.to_owned(), root)),
             // The same answer for one that is not there and one that is not theirs.
@@ -544,6 +547,15 @@ fn note_settings(server: &Server, name: &str, repo: &str, method: &str, params: 
 
 /// The server's people, asked from a connected directory.
 const PEOPLE: &[&str] = &[
+    "server.repos_all",
+    "server.repo_add",
+    "server.repo_upload_begin",
+    "server.repo_upload_chunk",
+    "server.repo_upload_end",
+    "server.repo_archive",
+    "server.repo_unarchive",
+    "server.repo_delete",
+    "server.repo_rename",
     "server.audit",
     "server.audit_verify",
     "server.backups",
@@ -638,6 +650,143 @@ pub fn people(
         }
         _ if !admin => {
             Err(refused(format!("only an admin of this server may manage its people: {name} is a member")))
+        }
+        // The server's repositories (ADR 0018), for admins; restoring and
+        // deleting for owners.
+        "server.repos_all" => {
+            let live: Vec<Value> = now
+                .repos()
+                .into_iter()
+                .map(|repo| {
+                    let members =
+                        now.config.users.values().filter(|them| them.access.contains_key(&repo)).count();
+                    let size =
+                        now.repo(&repo).map(|root| dir_size(&root.join(kito_store::STORE_DIR))).unwrap_or(0);
+                    json!({ "name": repo, "members": members, "store_bytes": size })
+                })
+                .collect();
+            Ok(
+                json!({ "repos": live, "archived": now.archived(), "renamed": now.config.renamed, "keep_archived_days": crate::state::KEEP_ARCHIVED_DAYS }),
+            )
+        }
+        "server.repo_add" => {
+            let repo = text("name")?.to_owned();
+            let from = params.get("from").and_then(Value::as_str).filter(|from| !from.trim().is_empty());
+            let token = params.get("token").and_then(Value::as_str);
+            match from {
+                // An address elsewhere: not a directory of the server's own machine.
+                Some(url) if !is_remote_git(url.trim()) => {
+                    return Err(refused(format!(
+                        "`{}` is not a git address: one is https://, ssh:// or user@host:path",
+                        url.trim()
+                    )))
+                }
+                Some(url) => now.add_repo_from_git(&repo, url.trim(), token).map_err(refused)?,
+                None => now.add_repo(&repo, None, false).map_err(refused)?,
+            };
+            // Whoever adds it maintains it.
+            let _ = now.grant(name, &repo, Some(Role::Maintain));
+            let from_said = from.map(|url| format!(" from {url}")).unwrap_or_default();
+            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{from_said}") }));
+            Ok(json!({ "name": repo }))
+        }
+        "server.repo_upload_begin" => {
+            let mut bytes = [0u8; 16];
+            getrandom::getrandom(&mut bytes).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+            let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let path = now.upload_path(&id).map_err(refused)?;
+            std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                .map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+            std::fs::write(&path, b"").map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+            Ok(json!({ "id": id }))
+        }
+        "server.repo_upload_chunk" => {
+            use std::io::Write as _;
+            let path = now.upload_path(text("id")?).map_err(refused)?;
+            let bytes =
+                rpc::decode(text("data")?).ok_or((rpc::INVALID_PARAMS, "`data` is not base64".to_owned()))?;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|_| refused("no such upload".to_owned()))?;
+            file.write_all(&bytes).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
+            Ok(json!({ "size": file.metadata().map(|meta| meta.len()).unwrap_or(0) }))
+        }
+        "server.repo_upload_end" => {
+            let path = now.upload_path(text("id")?).map_err(refused)?;
+            let repo = text("name")?.to_owned();
+            let kind = text("kind")?;
+            let result = (|| -> Result<(), String> {
+                if now.repo(&repo).is_some() || now.dir.join("archived").join(&repo).exists() {
+                    return Err(format!("the server already has something called `{repo}`"));
+                }
+                match kind {
+                    // A Kito repository as it was on the machine it came from.
+                    "kito" => {
+                        let key = kitod::rpc::decode(text("key").map_err(|(_, why)| why)?)
+                            .filter(|key| key.len() == 32)
+                            .ok_or("the key of the upload is not one")?;
+                        let mut fixed = [0u8; 32];
+                        fixed.copy_from_slice(&key);
+                        crate::state::check_repo_name(&repo)?;
+                        let root = now.dir.join("repos").join(&repo);
+                        let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+                        if let Err(why) = kitod::archive::read(file, &fixed, &root) {
+                            let _ = std::fs::remove_dir_all(&root);
+                            return Err(why);
+                        }
+                        if now.repo(&repo).is_none() {
+                            let _ = std::fs::remove_dir_all(&root);
+                            return Err("what was sent is not a Kito repository".into());
+                        }
+                        Ok(())
+                    }
+                    // A git repository, as a bundle of its history.
+                    "git" => now.add_repo(&repo, Some(&path.to_string_lossy()), true).map(|_| ()),
+                    other => Err(format!("`{other}`: an upload is `kito` or `git`")),
+                }
+            })();
+            let _ = std::fs::remove_file(&path);
+            result.map_err(refused)?;
+            let _ = now.grant(name, &repo, Some(Role::Maintain));
+            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}, sent from {name}'s machine ({kind})") }));
+            Ok(json!({ "name": repo }))
+        }
+        "server.repo_archive" => {
+            let repo = text("name")?.to_owned();
+            now.archive_repo(&repo, name).map_err(refused)?;
+            now.tell("repo_archived", json!({ "repo": repo, "by": name, "what": format!("{repo}, deleted in {} days", crate::state::KEEP_ARCHIVED_DAYS) }));
+            Ok(json!({ "name": repo }))
+        }
+        "server.repo_unarchive" | "server.repo_delete" if !owner => {
+            Err(refused("only an owner of this server brings back or deletes a repository".to_owned()))
+        }
+        "server.repo_unarchive" => {
+            let repo = text("name")?.to_owned();
+            now.unarchive_repo(&repo).map_err(refused)?;
+            now.tell("repo_unarchived", json!({ "repo": repo, "by": name, "what": repo }));
+            Ok(json!({ "name": repo }))
+        }
+        "server.repo_delete" => {
+            let repo = text("name")?.to_owned();
+            if params.get("confirm").and_then(Value::as_str) != Some(repo.as_str()) {
+                return Err((
+                    rpc::INVALID_PARAMS,
+                    format!("to delete `{repo}`, give its name again as `confirm`"),
+                ));
+            }
+            now.delete_repo(&repo).map_err(refused)?;
+            now.tell("repo_deleted", json!({ "repo": repo, "by": name, "what": repo }));
+            Ok(json!({ "name": repo }))
+        }
+        "server.repo_rename" => {
+            let (from, to) = (text("from")?.to_owned(), text("to")?.to_owned());
+            now.rename_repo(&from, &to).map_err(refused)?;
+            now.tell(
+                "repo_renamed",
+                json!({ "repo": to, "by": name, "what": format!("{from} is {to} now") }),
+            );
+            Ok(json!({ "from": from, "name": to }))
         }
         // The audit log and the backups (ADR 0017), for admins.
         "server.audit" => {
@@ -739,6 +888,31 @@ pub fn people(
             format!("`{method}` is not something a client can ask through the server"),
         )),
     }
+}
+
+/// A git address of another machine, the only kind a client may have the
+/// server clone (ADR 0018): never a path on the server's own disk.
+fn is_remote_git(url: &str) -> bool {
+    match url.split_once("://") {
+        Some((scheme, rest)) => matches!(scheme, "https" | "http" | "ssh" | "git") && !rest.is_empty(),
+        // user@host:path, as ssh is written for git
+        None => url
+            .split_once(':')
+            .is_some_and(|(host, path)| host.contains('@') && !host.contains('/') && !path.is_empty()),
+    }
+}
+
+/// The bytes of the files under a directory.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_size(&entry.path()),
+            _ => entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+        })
+        .sum()
 }
 
 /// Passes a request on to the repository's daemon, starting it if needed

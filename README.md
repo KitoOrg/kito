@@ -304,6 +304,18 @@ kito-server restore kito-backup-….kbak --to /srv/kito-restored
 Admins do the same from a connected directory: `kito audit`, `kito
 backup`, `kito backup now`.
 
+### A server's repositories, from a connected directory
+
+```bash
+kito repos                                   # those you may use
+kito repos add notes                         # admins: an empty one, which you maintain
+kito repos add api --from https://github.com/acme/api.git --token-file token.txt
+kito repos add mine --push ~/code/mine       # a Kito repository whole, or a git one
+kito repos rename api backend                # what is connected to `api` still reaches it
+kito repos archive backend                   # out of use; deleted after 30 days
+kito repos unarchive backend                 # owners; `kito repos delete … --confirm …` now
+```
+
 ### Search and numbers
 
 ```bash

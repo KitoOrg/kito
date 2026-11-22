@@ -4,6 +4,21 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.36.0]
+
+Repositories from afar (phase 35,
+[ADR 0018](docs/adr/0018-repositories-from-afar.md)).
+
+- **`kito repos add`** for admins in a connected directory: an empty
+  repository, one cloned from a git address (a token used once and kept
+  nowhere), or one sent from this machine with `--push`: a Kito
+  repository with all its history, or a git one.
+- **`kito repos archive`**: out of use, deleted after 30 days; owners
+  `unarchive` or `delete` it now. **`kito repos rename`**: directories
+  connected with the old name still reach it.
+- The same on the server's machine: `kito-server repo archive |
+  unarchive | delete | rename`.
+
 ## [0.35.0]
 
 The server's audit log and backups (phase 34,

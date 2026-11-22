@@ -207,6 +207,19 @@ enum RepoCmd {
     },
     /// List the repositories, with the rules of each
     List,
+    /// Take a repository out of use: hidden, and deleted after 30 days
+    Archive { name: String },
+    /// Bring an archived repository back
+    Unarchive { name: String },
+    /// Delete a repository for good (the backups still have it)
+    Delete {
+        name: String,
+        /// Its name again, to say it is meant
+        #[arg(long, value_name = "NAME")]
+        confirm: String,
+    },
+    /// Rename a repository: directories connected with the old name still reach it
+    Rename { from: String, to: String },
     /// Set the rules of a repository: protection, checks, git push
     Set {
         name: String,
@@ -577,6 +590,34 @@ fn run(cli: &Cli) -> Result<(), String> {
                     "It is empty: put its files there, `kito checkpoint`, then `kito-server repo set {name} --protect`."
                 ),
             }
+        }
+        Cmd::Repo { command: RepoCmd::Archive { name } } => {
+            let server = Server::open(&dir_of(cli))?;
+            server.archive_repo(name, "the server's machine")?;
+            let what = format!("{name}, deleted in {} days", state::KEEP_ARCHIVED_DAYS);
+            server.tell("repo_archived", json!({ "repo": name, "what": what }));
+            println!("`{name}` is archived: nobody reaches it, and it is deleted in {} days (`repo unarchive {name}` brings it back).", state::KEEP_ARCHIVED_DAYS);
+        }
+        Cmd::Repo { command: RepoCmd::Unarchive { name } } => {
+            let server = Server::open(&dir_of(cli))?;
+            server.unarchive_repo(name)?;
+            server.tell("repo_unarchived", json!({ "repo": name, "what": name }));
+            println!("`{name}` is back, as it was.");
+        }
+        Cmd::Repo { command: RepoCmd::Delete { name, confirm } } => {
+            if confirm != name {
+                return Err(format!("to delete `{name}`, give its name again: --confirm {name}"));
+            }
+            let mut server = Server::open(&dir_of(cli))?;
+            server.delete_repo(name)?;
+            server.tell("repo_deleted", json!({ "repo": name, "what": name }));
+            println!("`{name}` is deleted. The backups made before still have it.");
+        }
+        Cmd::Repo { command: RepoCmd::Rename { from, to } } => {
+            let mut server = Server::open(&dir_of(cli))?;
+            server.rename_repo(from, to)?;
+            server.tell("repo_renamed", json!({ "repo": to, "what": format!("{from} is {to} now") }));
+            println!("`{from}` is `{to}` now; what is connected to `{from}` still reaches it.");
         }
         Cmd::Repo { command: RepoCmd::List } => {
             let server = Server::open(&dir_of(cli))?;
@@ -978,6 +1019,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             // Backups as the schedule says, while the server serves.
             let dir = server.dir.clone();
             std::thread::spawn(move || loop {
+                // Archived repositories kept their time are deleted (ADR 0018).
+                if let Ok(mut now) = Server::open(&dir) {
+                    for gone in now.purge_archived() {
+                        let what = format!("{gone}, archived {} days ago", state::KEEP_ARCHIVED_DAYS);
+                        now.tell("repo_deleted", json!({ "repo": gone, "what": what }));
+                    }
+                }
                 let config = Server::open(&dir).map(|server| server.config.backup).unwrap_or_default();
                 match backup::due_in(&dir, &config) {
                     Some(wait) if wait.is_zero() => {

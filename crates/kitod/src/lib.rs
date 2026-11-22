@@ -3,6 +3,7 @@
 //! It owns the store and is the only one that writes to it. The CLI and the
 //! MCP server are thin clients that talk to it over a Unix socket (JSON-RPC).
 
+pub mod archive;
 pub mod client;
 pub mod comments;
 pub mod config;
