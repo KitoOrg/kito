@@ -2605,6 +2605,33 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 29 · people, for the web client — done
+
+The web client's people page (kito-web 0.11) needed what the server
+did not give: who uses a repository over HTTP, when each was last here,
+and roles that count at once. Released as 0.30.0 (ADR 0014, amended).
+
+### What is there
+
+- An open connection reads the person's role at every request.
+- `seen/<name>`: when each person was last here.
+- `POST /-/people`; `server.members` and `server.grant` through
+  `/-/api/<repository>`; `server.members` for maintainers and admins.
+- Adding somebody answers the port and whether the server encrypts.
+
+### How it was tested
+
+- `kito-server/tests/server.rs`: a role lowered and a repository taken
+  away in an open connection; the members with when each was here.
+- kito-web's `tests/team.rs`: the people and the members over HTTP, for
+  an admin and for one who may only read.
+- The pages, against `scripts/demo-team.sh` of kito-web, in a browser.
+
+### Known limitations
+
+- **Last seen** is to the minute.
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 28 · roles per repository and on the server — done
 
 A person had one role for every repository they could use, and the

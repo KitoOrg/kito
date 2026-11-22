@@ -67,5 +67,23 @@ that the server have roles of its own, and that the commands be simple.
   they could use every repository as `integrate`.
 - Adding and removing repositories stays on the server's machine: it
   clones and imports, which is long and runs as the server.
-- What a person may do is read when they connect, as before: a change
-  counts from their next connection.
+- What a person may do was read when they connected; since 0.30 it is
+  read at every request (see below).
+
+## Amended 2026-11-22: the people page
+
+Asked for with the people page of the web client:
+
+- **A change counts at once**: an open connection reads the person's role
+  at every request, and one removed, or whose repository was taken away,
+  is stopped there.
+- **Who uses a repository** (`server.members`) is for its maintainers
+  and the server's admins, as `kito members` is.
+- **When each person was last here** is kept, a file each in `seen/`,
+  written at most once a minute, and given with the members and the
+  people.
+- **The server's people over HTTP**: `POST /-/people` answers
+  `server.people`, `_add`, `_remove` and `_role` as whoever is signed in;
+  `/-/api/<repository>` answers `server.members` and `server.grant`.
+  Adding somebody answers the port the server listens on and whether it
+  encrypts, for the line they connect with.

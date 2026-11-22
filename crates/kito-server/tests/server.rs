@@ -685,3 +685,30 @@ fn a_server_written_before_roles_per_repository_is_read_as_it_was_meant() {
     let kept = fs::read_to_string(&path).unwrap();
     assert!(!kept.contains("repos =") && kept.contains("server_role = \"admin\""), "{kept}");
 }
+
+#[test]
+fn a_role_changed_counts_at_once_and_who_was_here_is_known() {
+    let mut world = World::new();
+    let address = world.serve();
+    let mut bob = connect(&address, &world.bob, "shop");
+    assert!(bob.call_value("status", json!({})).is_ok());
+    // Read only from now on, in the connection that is open.
+    ok(&world.dir, &["grant", "bob", "shop", "read"]);
+    let no = bob
+        .call_value("open_lane", json!({ "agent": "x", "intent": "y", "scope": ["README.md"] }))
+        .unwrap_err();
+    assert!(no.to_string().contains("may read this repository"), "{no}");
+    // And nothing once it is taken away.
+    ok(&world.dir, &["revoke", "bob", "shop"]);
+    assert!(bob.call_value("status", json!({})).is_err());
+    // Who was here, and when.
+    let mut ada = connect(&address, &world.ada, "shop");
+    let members = ada.call_value("server.members", json!({})).unwrap_err();
+    assert!(members.to_string().contains("only"), "ada integrates, and may not list: {members}");
+    ok(&world.dir, &["grant", "ada", "shop", "maintain"]);
+    let members = ada.call_value("server.members", json!({})).unwrap();
+    let ada_seen = members["members"].as_array().unwrap().iter().find(|m| m["user"] == "ada").unwrap()
+        ["seen_ms"]
+        .clone();
+    assert!(ada_seen.as_u64().is_some_and(|ms| ms > 0), "{members}");
+}

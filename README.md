@@ -912,7 +912,7 @@ kito-server --dir /srv/kito user role ada admin               # member, admin, o
 From a directory connected to the repository:
 
 ```bash
-kito members                 # who may use it, and as what
+kito members                 # who may use it, and as what (maintainers)
 kito grant bob write         # maintainers and admins
 kito revoke bob
 kito people                  # admins: everybody on the server

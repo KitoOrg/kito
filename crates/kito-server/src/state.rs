@@ -109,6 +109,8 @@ struct Session {
 }
 
 const SESSIONS_FILE: &str = "sessions.toml";
+/// When each person was last here: a file each.
+const SEEN_DIR: &str = "seen";
 /// What a session's token starts with: told apart from the tokens an
 /// administrator hands out.
 pub const SESSION_PREFIX: &str = "kitos_";
@@ -479,6 +481,35 @@ impl Server {
         Ok(identity.is_none().then_some(token))
     }
 
+    /// Notes that a person was here now: at most once a minute each, in
+    /// `seen/<name>` (one file each, written whole).
+    pub fn saw(&self, name: &str) {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static NOTED: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+        let noted = NOTED.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let mut noted = noted.lock().unwrap_or_else(|e| e.into_inner());
+            if noted.get(name).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60)) {
+                return;
+            }
+            noted.insert(name.to_owned(), std::time::Instant::now());
+        }
+        let dir = self.dir.join(SEEN_DIR);
+        if check_name("user", name).is_err() || std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let staged = dir.join(format!(".{name}.new"));
+        if std::fs::write(&staged, now_ms().to_string()).is_ok() {
+            let _ = std::fs::rename(&staged, dir.join(name));
+        }
+    }
+
+    /// When a person was last here, in milliseconds since 1970.
+    pub fn seen(&self, name: &str) -> Option<u64> {
+        std::fs::read_to_string(self.dir.join(SEEN_DIR).join(name)).ok()?.trim().parse().ok()
+    }
+
     /// Changes what a person may do on the server itself.
     pub fn set_server_role(&mut self, name: &str, role: ServerRole) -> Result<(), String> {
         let user =
@@ -524,6 +555,7 @@ impl Server {
         if self.config.users.remove(name).is_none() {
             return Err(format!("{name} is not a user of this server"));
         }
+        let _ = std::fs::remove_file(self.dir.join(SEEN_DIR).join(name));
         self.save()?;
         // Their sessions end with them.
         self.change_sessions(|sessions| sessions.retain(|_, session| session.user != name))

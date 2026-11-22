@@ -4,6 +4,18 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.30.0]
+
+People, for the web client (phase 29).
+
+- A role changed, or a repository taken away, counts at once in open
+  connections.
+- When each person was last here, given with the members and the
+  people.
+- The server's people over HTTP (`/-/people`), and who uses a
+  repository through `/-/api/<repository>`, for kito-web 0.11's people
+  pages. `kito members` is for maintainers and admins.
+
 ## [0.29.0]
 
 Roles per repository, and roles on the server (phase 28,

@@ -587,7 +587,7 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
     assert_eq!(served.request("GET", "/-/admin/plugins", &[], None).status, 401);
     let refused = served.request("GET", "/-/admin/plugins", &[("Cookie", &carol), ("X-Kito", "1")], None);
     assert_eq!(refused.status, 403, "{}", refused.body);
-    assert!(refused.body.contains("for its administrators"), "{}", refused.body);
+    assert!(refused.body.contains("for its admins"), "{}", refused.body);
     let change = json!({ "action": "disable", "name": "hello" });
     assert_eq!(
         served

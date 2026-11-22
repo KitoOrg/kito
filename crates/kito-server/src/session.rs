@@ -115,6 +115,9 @@ pub fn ask(
         (NO_SUCH_REPO, format!("there is no repository `{repo}` for {name} on this server"))
     })?;
     let role = user.role_in(repo).unwrap_or(Role::Read);
+    if PEOPLE.contains(&method) {
+        return people(server, name, user, Some(repo), Some(role), method, &params);
+    }
     if MAINTAIN.contains(&method) && role < Role::Maintain {
         return Err((
             rpc::REFUSED,
@@ -275,7 +278,7 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
     if hello.get("version").and_then(Value::as_u64) != Some(PROTOCOL) {
         return refuse(writer, &format!("this server speaks version {PROTOCOL} of the protocol"));
     }
-    let Some((name, user)) =
+    let Some((name, mut user)) =
         known.or_else(|| hello.get("token").and_then(Value::as_str).and_then(|token| server.user_of(token)))
     else {
         // The same answer for no token and for a wrong one; a session
@@ -310,8 +313,9 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
 
     // What the person may do in the repository goes with every request:
     // the repository's daemon applies it.
-    let role = repo.as_ref().and_then(|(repo, _)| user.role_in(repo));
-    let person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
+    server.saw(&name);
+    let mut role = repo.as_ref().and_then(|(repo, _)| user.role_in(repo));
+    let mut person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
     // The connection to the repository's daemon, made when first needed.
     let mut daemon: Option<Client> = None;
     let mut line = String::new();
@@ -322,6 +326,22 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
         }
         if line.trim().is_empty() {
             continue;
+        }
+        // What the person may do now, not when they connected: one
+        // removed, or whose repository was taken away, is stopped at once.
+        if let Ok(now) = Server::open(&server.dir) {
+            match now.config.users.get(&name) {
+                Some(them) => user = them.clone(),
+                None => return refuse(writer, &format!("{name} is no longer a user of this server")),
+            }
+            if let Some((repo, _)) = &repo {
+                role = user.role_in(repo);
+                if role.is_none() {
+                    return refuse(writer, &format!("{name} may no longer use `{repo}`"));
+                }
+            }
+            person = json!({ "name": name, "email": user.email, "role": role.map(Role::word) });
+            now.saw(&name);
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Err(e) => Response::err(0, rpc::PARSE_ERROR, format!("invalid request: {e}")),
@@ -427,7 +447,7 @@ const PEOPLE: &[&str] = &[
 
 /// Answers one of `PEOPLE`, as `name` with what they may do: `here` the
 /// repository of the session, `role` theirs in it.
-fn people(
+pub fn people(
     server: &Server,
     name: &str,
     user: &User,
@@ -451,10 +471,26 @@ fn people(
     match method {
         "server.members" => {
             let repo = here.ok_or((rpc::INVALID_PARAMS, "this session is about no repository".to_owned()))?;
+            if role < Some(Role::Maintain) && !admin {
+                return Err(refused(format!(
+                    "only a maintainer of `{repo}` sees who uses it: {name} may {}",
+                    role.map(Role::word).unwrap_or("nothing")
+                )));
+            }
             let members: Vec<Value> = now
                 .members(repo)
                 .into_iter()
-                .map(|(person, role, by_server)| json!({ "user": person, "role": role.word(), "admin": by_server }))
+                .map(|(person, role, by_server)| {
+                    let them = now.config.users.get(&person);
+                    json!({
+                        "user": person,
+                        "role": role.word(),
+                        "admin": by_server,
+                        "email": them.and_then(|them| them.email.clone()),
+                        "logins": them.map(|them| them.logins.clone()).unwrap_or_default(),
+                        "seen_ms": now.seen(&person),
+                    })
+                })
                 .collect();
             Ok(json!({ "repo": repo, "members": members }))
         }
@@ -492,7 +528,7 @@ fn people(
                 .map(|(person, them)| {
                     let access: serde_json::Map<String, Value> =
                         them.access.iter().map(|(repo, role)| (repo.clone(), json!(role.word()))).collect();
-                    json!({ "user": person, "email": them.email, "role": them.server_role.word(), "access": access, "logins": them.logins })
+                    json!({ "user": person, "email": them.email, "role": them.server_role.word(), "access": access, "logins": them.logins, "seen_ms": now.seen(person) })
                 })
                 .collect();
             Ok(json!(people))
@@ -513,8 +549,13 @@ fn people(
             let email = params.get("email").and_then(Value::as_str).map(str::to_owned);
             let token = now.add_user(person, email, &[], given, identity.as_ref()).map_err(refused)?;
             now.tell("user_added", json!({ "user": person, "role": given.word(), "by": name, "what": format!("{person} ({})", given.word()) }));
+            // What they connect with: the port the server listens on, its certificate.
+            let (port, plain) = match SERVING.get() {
+                Some((bound, plain)) => (Some(bound.port().to_string()), *plain),
+                None => (now.config.listen.rsplit_once(':').map(|(_, port)| port.to_owned()), false),
+            };
             Ok(
-                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": crate::tls::fingerprint(&now.dir).ok() }),
+                json!({ "user": person, "role": given.word(), "token": token, "fingerprint": (!plain).then(|| crate::tls::fingerprint(&now.dir).ok()).flatten(), "plain": plain, "port": port }),
             )
         }
         "server.people_remove" | "server.people_role" => {
@@ -597,10 +638,15 @@ fn serve_client(server: &Server, stream: TcpStream, tls: Option<Arc<rustls::Serv
 /// Listens for clients, each served on a thread of its own. Connections
 /// are encrypted with the server's certificate; `plain`: they are not,
 /// and the server listens on this machine only.
+/// Where this process serves clients, and whether it encrypts: what a
+/// person added from a page connects to.
+static SERVING: std::sync::OnceLock<(std::net::SocketAddr, bool)> = std::sync::OnceLock::new();
+
 pub fn serve(server: Server, listen: Option<&str>, plain: bool) -> Result<(), String> {
     let address = listen.unwrap_or(&server.config.listen).to_owned();
     let listener = TcpListener::bind(&address).map_err(|e| format!("{address}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
+    let _ = SERVING.set((bound, plain));
     if plain && !bound.ip().is_loopback() {
         return Err(format!(
             "{bound} is reachable from other machines: a server that does not encrypt (--plain) \

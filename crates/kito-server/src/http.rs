@@ -130,12 +130,14 @@ impl Http {
             .and_then(|value| value.strip_prefix("Bearer "));
         if let Some(token) = bearer {
             let (name, user) = server.user_of(token.trim())?;
+            server.saw(&name);
             return Some(Who { name, user, by_cookie: false });
         }
         // A session and nothing else: the token an administrator handed
         // out is not something a browser keeps.
         let id = cookie(headers, COOKIE).filter(|id| id.starts_with(SESSION_PREFIX))?;
         let (name, user) = server.user_of(id)?;
+        server.saw(&name);
         Some(Who { name, user, by_cookie: true })
     }
 
@@ -192,7 +194,7 @@ fn administrator(
         true => Ok(who),
         false => Err((
             StatusCode::FORBIDDEN,
-            "the plugins of this server are for its administrators (`kito-server user admin <name>`, on its machine)",
+            "the plugins of this server are for its admins (`kito-server user role <name> admin`, on its machine)",
         )),
     }
 }
@@ -232,6 +234,44 @@ async fn admin_change(
     match done {
         Ok(Ok(done)) => answered(done),
         Ok(Err(why)) => said(StatusCode::BAD_REQUEST, &why),
+        Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `POST /-/people`: the server's people, asked as whoever is signed in
+/// (ADR 0014): `server.people`, `server.people_add`, `_remove`, `_role`.
+async fn people(State(http): State<Arc<Http>>, headers: HeaderMap, Json(call): Json<Call>) -> Response {
+    let server = match http.server() {
+        Ok(server) => server,
+        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let Some(who) = http.who(&server, &headers) else {
+        return said(StatusCode::UNAUTHORIZED, "nobody is signed in: give a token, or open a session");
+    };
+    if who.by_cookie && headers.get("x-kito").is_none() {
+        return said(StatusCode::FORBIDDEN, "not a request of a page of this server");
+    }
+    if !call.method.starts_with("server.people") {
+        return said(
+            StatusCode::NOT_FOUND,
+            "`/-/people` answers server.people, server.people_add, _remove and _role",
+        );
+    }
+    let asked = tokio::task::spawn_blocking(move || {
+        crate::session::people(&server, &who.name, &who.user, None, None, &call.method, &call.params)
+    })
+    .await;
+    match asked {
+        Ok(Ok(value)) => answered(value),
+        Ok(Err((code, message))) => {
+            let status = match code {
+                rpc::REFUSED => StatusCode::FORBIDDEN,
+                rpc::METHOD_NOT_FOUND => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            (status, [(header::CACHE_CONTROL, "no-store")], Json(json!({ "error": message, "code": code })))
+                .into_response()
+        }
         Err(e) => said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -629,6 +669,7 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
         .route("/-/session", post(open_session).delete(close_session))
         .route("/-/api/{repo}", post(api))
         .route("/-/admin/plugins", get(admin_plugins).post(admin_change))
+        .route("/-/people", post(people))
         .route("/-/sign-in", get(ways))
         .route("/-/sign-in/{method}", get(begin_sign_in))
         .route("/-/sign-in/{method}/callback", get(finish_sign_in))
