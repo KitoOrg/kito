@@ -14,12 +14,10 @@ use std::path::Path;
 
 /// How Kito's part of the file begins: the plugins that write `AGENTS.md`
 /// know a part that begins `<!-- kito: begin` as Kito's, and leave it be.
-pub const BEGIN: &str =
-    "<!-- kito: begin (written by Kito from `kito instructions` at every session: change them \
-                         there, not here) -->";
+pub const BEGIN: &str = kitod::instructions::BEGIN;
 /// How every part written by Kito or by one of its plugins begins.
 const MARK: &str = "<!-- kito: begin";
-const END: &str = "<!-- kito: end -->";
+const END: &str = kitod::instructions::END;
 
 /// A file an assistant reads, and the folders of instructions it gets.
 struct Target {
@@ -72,19 +70,11 @@ pub fn own_part(text: &str) -> String {
 /// What an assistant is told: Kito's rules, then each instruction of the
 /// folders it reads.
 pub fn compose(items: &[Value], folders: &[&str]) -> String {
-    let mut text = format!("{BEGIN}\n\n{}", crate::claude::RULES);
-    for item in items {
-        let name = item["name"].as_str().unwrap_or_default();
-        if !folders.contains(&kitod::instructions::folder_of(name)) {
-            continue;
-        }
-        let body = item["text"].as_str().unwrap_or_default().trim();
-        if !body.is_empty() {
-            text.push_str(&format!("\n{body}\n"));
-        }
-    }
-    text.push_str(&format!("\n{END}\n"));
-    text
+    let pairs: Vec<(&str, &str)> = items
+        .iter()
+        .map(|item| (item["name"].as_str().unwrap_or_default(), item["text"].as_str().unwrap_or_default()))
+        .collect();
+    kitod::instructions::compose(&pairs, folders)
 }
 
 /// Writes the files of the assistants set up in `root`, takes away those

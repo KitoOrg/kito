@@ -2605,6 +2605,33 @@ a name installs. Released as 0.24.0
 - **Not run on macOS or Windows** since 0.20.0: the project's CI is
   stopped by the account's billing.
 
+## Phase 31 · instructions, for the web client — done
+
+The web client's instructions page (kito-web 0.12) shows what each
+assistant reads and who changed what, as the person asked. Released as
+0.32.0 (ADR 0012, amended).
+
+### What is there
+
+- Kito's rules, and the writing of what an assistant reads, are the
+  daemon's: `instructions_text`.
+- Each change of an instruction is kept, with who made it and the text
+  before and after: `instructions_history`.
+
+### How it was tested
+
+- `kitod` unit tests: what an assistant reads, the history.
+- `kito-server/tests/server.rs`: what Claude Code reads through the
+  server, and the history, for one who may only read.
+- kito-web's `tests/team.rs`: written by one who may write, read by a
+  reader, refused to the reader.
+- The page, against kito-web's `scripts/demo-team.sh`, in a browser.
+
+### Known limitations
+
+- **The history is the last 200 changes.**
+- **Not run on macOS or Windows** since 0.20.0.
+
 ## Phase 30 · a repository's rules, for the web client — done
 
 The web client's settings page (kito-web 0.12) changes a repository's

@@ -588,6 +588,18 @@ fn what_agents_are_told_is_the_server_s_and_its_kitchen_comes_first() {
     assert_eq!(told["items"][0]["text"], "Tabs here.\n");
     let refused = carol.call_value("instructions_set", json!({ "name": "style", "text": "Mine." }));
     assert!(refused.unwrap_err().to_string().contains("may read this repository"));
+    // What Claude Code reads, as the server has it; and who changed what.
+    let claude = bob.call_value("instructions_text", json!({ "assistant": "claude" })).unwrap();
+    let text = claude["text"].as_str().unwrap();
+    assert!(
+        text.contains("## Version control: Kito")
+            && text.contains("Tabs here.")
+            && !text.contains("Answer briefly.")
+    );
+    let history = carol.call_value("instructions_history", json!({})).unwrap();
+    assert_eq!(history[0]["by"], "ada");
+    assert_eq!(history[0]["name"], "claude/brief.md");
+    assert_eq!(history[1]["after"], "Tabs here.\n");
     // Kept by Kito, not in the project's files.
     assert!(world.repo("shop").join(".kito/instructions/all/style.md").is_file());
     assert!(!world.repo("shop").join("instructions").exists());

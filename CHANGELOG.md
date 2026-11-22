@@ -4,6 +4,15 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.32.0]
+
+Instructions, for the web client (phase 31).
+
+- **What an assistant reads**, Kito's rules first, asked of the daemon
+  (`instructions_text`): the same text `kito instructions show` prints.
+- **Who changed which instruction**, and the text before and after,
+  kept for each repository (`instructions_history`).
+
 ## [0.31.0]
 
 A repository's rules, for the web client (phase 30).

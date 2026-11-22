@@ -103,6 +103,8 @@ with what comes with it, where a program named itself otherwise.
 | `reasons_behind` | `lane` | The reasons behind what a lane replaced, not told yet | `guard.rs` (`Replaced`) |
 | `assistant_session` | `session`, `assistant` (`[name]`, `[version]`, `[model]`) | Nothing. What the session of an assistant runs on is remembered while the daemon runs (the last 256), and said of the lanes that session then edits in: nothing of the repository changes | `server.rs` |
 | `instructions` | | What the repository's agents are told (ADR 0012): the kitchen attached, each instruction with where it comes from (`kitchen` or `repository`), and the kitchen's it took away | `instructions.rs` (`Instructions`) |
+| `instructions_text` | `[assistant]` (`claude` by default) | What that assistant reads: Kito's rules, then the instructions for every assistant and for it, between Kito's marks | `instructions.rs` (`compose`) |
+| `instructions_history` | | Who changed which instruction, when, the text before and after (the last 200), the latest first | `instructions.rs` (`history`) |
 
 ## `write`
 

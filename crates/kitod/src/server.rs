@@ -437,11 +437,26 @@ impl Daemon {
                     let got = self.with_repo(|repo| Ok(repo.instructions())).map_err(internal)?;
                     to_json(serde_json::to_value(got))
                 }
+                // What an assistant reads, Kito's rules first (ADR 0012).
+                "instructions_text" => {
+                    let assistant = optional("assistant").unwrap_or_else(|| "claude".to_owned());
+                    let got = self.with_repo(|repo| Ok(repo.instructions())).map_err(internal)?;
+                    let pairs: Vec<(&str, &str)> =
+                        got.items.iter().map(|item| (item.name.as_str(), item.text.as_str())).collect();
+                    let text =
+                        crate::instructions::compose(&pairs, &[crate::instructions::ALL, assistant.as_str()]);
+                    Ok(json!({ "assistant": assistant, "text": text }))
+                }
+                "instructions_history" => {
+                    let root = self.with_repo(|repo| Ok(repo.root().to_owned())).map_err(internal)?;
+                    Ok(json!(crate::instructions::history(&root)))
+                }
                 "instructions_set" | "instructions_remove" => {
                     let given = text("name")?;
                     let name =
                         crate::instructions::name_of(given).map_err(|why| (rpc::INVALID_PARAMS, why))?;
                     let root = self.with_repo(|repo| Ok(repo.root().to_owned())).map_err(internal)?;
+                    let before = crate::instructions::own(&root, &name);
                     let (changed, what) = match request.method.as_str() {
                         "instructions_set" => {
                             let body = params.get("text").and_then(Value::as_str).unwrap_or_default();
@@ -460,6 +475,13 @@ impl Daemon {
                         }
                     };
                     if changed {
+                        let after = crate::instructions::own(&root, &name);
+                        // Who: the person a server says, or whoever works on this machine.
+                        let by = person_name(params)
+                            .or_else(|| self.with_repo(|repo| Ok(repo.identity.name.clone())).ok())
+                            .filter(|by| !by.is_empty())
+                            .unwrap_or_else(|| "this machine".to_owned());
+                        crate::instructions::note(&root, &by, &name, before.as_deref(), after.as_deref());
                         self.events.emit("instructions", None, person_name(params), what);
                     }
                     Ok(json!({ "name": name, "changed": changed }))

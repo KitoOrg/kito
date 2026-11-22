@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/kito-core", "crates/kito-store", "crates/kito-parse", "crates/kito-diff", "crates/kito-merge", "crates/kito-semantic", "crates/kito-lane", "crates/kito-integrate", "crates/kito-git", "crates/kitod", "crates/kito-cli", "crates/kito-mcp", "crates/kito-server"]
 
 [workspace.package]
-version = "0.31.0"
+version = "0.32.0"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"

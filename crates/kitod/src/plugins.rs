@@ -113,6 +113,8 @@ const READ: &[&str] = &[
     "assistant_session",
     // What agents are told (ADR 0012).
     "instructions",
+    "instructions_text",
+    "instructions_history",
 ];
 
 const WRITE: &[&str] = &[

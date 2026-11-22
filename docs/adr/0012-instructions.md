@@ -83,6 +83,12 @@ its kitchen's.
   it is.
 - Projects that recorded `CLAUDE.md` before keep it recorded until it is
   removed from the project in a lane; then Kito writes it.
+- Amended 2026-11-22, with the web client's instructions page: Kito's
+  rules and the writing of a file are the daemon's (`instructions_text`
+  gives what an assistant reads), and each change of an instruction is
+  kept with who made it and the text before and after
+  (`.kito/instructions-history.jsonl`, the last 200;
+  `instructions_history`), so an earlier text can be put back.
 - Hand edits between the marks are lost at the next writing: the first
   mark says so, and `kito instructions set` is the way. Lines outside the
   marks stay, on that machine only.
