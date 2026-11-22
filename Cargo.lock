@@ -2127,6 +2127,8 @@ dependencies = [
 name = "kito-cli"
 version = "0.36.2"
 dependencies = [
+ "anstyle",
+ "anstyle-query",
  "clap",
  "kito-core",
  "kito-integrate",

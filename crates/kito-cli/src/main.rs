@@ -26,11 +26,14 @@ mod claude_out;
 mod hook;
 mod instructions;
 mod log;
+mod paint;
+
+use paint::complain;
 
 #[derive(Parser)]
 #[command(name = "kito", version, about = "Semantic version control for agent swarms")]
 struct Cli {
-    /// Repository root (default: search for `.kito/` from the current directory upwards).
+    /// Repository root (default: the one this directory is in)
     #[arg(long, global = true, value_name = "DIR")]
     repo: Option<PathBuf>,
     /// Print the same structured output as the MCP server.
@@ -40,10 +43,94 @@ struct Cli {
     command: Cmd,
 }
 
+/// The commands of `kito --help`, in groups, the most used first. A
+/// command missing here is listed at the end, under "More".
+const GROUPS: &[(&str, &[&str])] = &[
+    ("Start", &["init", "import", "connect", "sign-in", "status"]),
+    (
+        "Lanes",
+        &["board", "lanes", "lane", "task", "intent", "integrate", "conflicts", "resolve", "who", "rename"],
+    ),
+    (
+        "History",
+        &["log", "why", "reasons", "note", "search", "stats", "watch", "checkpoint", "rollback", "sync"],
+    ),
+    ("Assistants and plugins", &["assistant", "instructions", "plugin", "registry"]),
+    ("Git and indexes", &["pull", "export-git", "scip"]),
+    ("Server", &["repos", "members", "grant", "revoke", "people", "audit", "backup"]),
+    ("Settings", &["identity", "protect", "daemon"]),
+];
+
+/// The command line as clap reads it, with Kito's look: the logo, the
+/// colours, and the commands in groups.
+fn command() -> clap::Command {
+    use clap::CommandFactory as _;
+    let command = Cli::command();
+    let about = command.get_about().map(ToString::to_string).unwrap_or_default();
+    let version = command.get_version().unwrap_or_default().to_owned();
+    let listed = grouped(&command);
+    let options = paint::heading("Options:");
+    command
+        .styles(paint::styles())
+        .color(paint::clap_choice())
+        .before_help(paint::banner(&version, &about))
+        .help_template(format!(
+            "{{before-help}}{{usage-heading}} {{usage}}\n\n{listed}{options}\n{{options}}"
+        ))
+}
+
+/// The commands under their groups' headings, as clap lists them.
+fn grouped(command: &clap::Command) -> String {
+    let visible: Vec<&clap::Command> = command.get_subcommands().filter(|sub| !sub.is_hide_set()).collect();
+    let about = |sub: &clap::Command| {
+        let mut text = sub.get_about().map(ToString::to_string).unwrap_or_default();
+        let aliases: Vec<&str> = sub.get_visible_aliases().collect();
+        if !aliases.is_empty() {
+            text.push_str(&format!(" [alias: {}]", aliases.join(", ")));
+        }
+        text
+    };
+    let mut groups: Vec<(&str, Vec<(&str, String)>)> = GROUPS
+        .iter()
+        .map(|(title, names)| {
+            let found = names.iter().filter_map(|name| visible.iter().find(|sub| sub.get_name() == *name));
+            (*title, found.map(|sub| (sub.get_name(), about(sub))).collect())
+        })
+        .collect();
+    let listed = |name: &str| GROUPS.iter().any(|(_, names)| names.contains(&name));
+    let mut more: Vec<(&str, String)> = visible
+        .iter()
+        .filter(|sub| !listed(sub.get_name()))
+        .map(|sub| (sub.get_name(), about(sub)))
+        .collect();
+    more.push(("help", "Print this message or the help of the given subcommand(s)".to_owned()));
+    groups.push(("More", more));
+    let width =
+        groups.iter().flat_map(|(_, subs)| subs.iter().map(|(name, _)| name.len())).max().unwrap_or(0);
+    let mut out = String::new();
+    for (title, subs) in groups.iter().filter(|(_, subs)| !subs.is_empty()) {
+        out.push_str(&format!("{}\n", paint::heading(&format!("{title}:"))));
+        for (name, about) in subs {
+            let pad = " ".repeat(width - name.len());
+            out.push_str(&format!("  {}{pad}  {about}\n", paint::literal(name)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn parse() -> Cli {
+    use clap::FromArgMatches as _;
+    let matches = command().get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
-    /// Install a plugin for you: by its name, from the registry, or from
-    /// a directory that holds its `kito-plugin.toml` and its program
+    /// Install a plugin for you, by its name or from a directory
+    ///
+    /// By its name, from the registry, or from a directory that holds its
+    /// `kito-plugin.toml` and its program.
     Add {
         /// The plugin, as the registry lists it: `web`, or `web@0.4.0`
         #[arg(required_unless_present = "path", conflicts_with = "path")]
@@ -58,8 +145,10 @@ enum PluginCmd {
     Outdated,
     /// Install the later version of a plugin, or of every plugin that has one
     Update { name: Option<String> },
-    /// Remove a plugin you installed: it takes out what it wrote for you
-    /// outside any repository, then its program goes
+    /// Remove a plugin you installed
+    ///
+    /// It takes out what it wrote for you outside any repository, then its
+    /// program goes.
     Remove {
         name: String,
         /// Do not run the plugin one last time
@@ -77,8 +166,9 @@ enum PluginCmd {
         #[arg(long, value_delimiter = ',', value_name = "PERMISSIONS")]
         only: Option<Vec<String>>,
     },
-    /// Stop a plugin from running in this repository: it takes out what
-    /// it wrote here, and its key is gone
+    /// Stop a plugin from running in this repository
+    ///
+    /// It takes out what it wrote here, and its key is gone.
     Disable {
         name: String,
         /// Remove what the plugin kept of its own here as well
@@ -92,15 +182,18 @@ enum PluginCmd {
 
 #[derive(Subcommand)]
 enum RegistryCmd {
-    /// Make a key for a registry: the file is the secret that signs it,
-    /// and what is printed is what everybody checks it with
+    /// Make a key for a registry
+    ///
+    /// The file is the secret that signs it, and what is printed is what
+    /// everybody checks it with.
     Key {
         /// Where the secret is written: kept off the machine that serves
         /// the registry
         file: PathBuf,
     },
-    /// Sign a registry kept in a directory: its index gets the next
-    /// number, and every file a signature beside it
+    /// Sign a registry kept in a directory
+    ///
+    /// Its index gets the next number, and every file a signature beside it.
     Sign {
         /// The directory that holds index.json and plugins/
         dir: PathBuf,
@@ -112,9 +205,10 @@ enum RegistryCmd {
 
 #[derive(Subcommand)]
 enum AssistantCmd {
-    /// Set coding assistants up for Kito in this repository, the same way
-    /// for each: claude, codex, zcode, or any a plugin knows. The plugin
-    /// that knows one is installed and enabled here when needed
+    /// Set coding assistants up for Kito here: claude, codex, zcode, …
+    ///
+    /// The same way for each: claude, codex, zcode, or any a plugin knows.
+    /// The plugin that knows one is installed and enabled here when needed.
     Add {
         #[arg(required = true, value_name = "NAME")]
         names: Vec<String>,
@@ -123,8 +217,9 @@ enum AssistantCmd {
     Remove { name: String },
     /// The assistants Kito knows, which this machine has, and how each is set up
     List,
-    /// Which assistants every new project gets (`kito init`, `import`,
-    /// `connect`); without a name, says it
+    /// Which assistants every new project gets; without a name, says it
+    ///
+    /// A new project is one of `kito init`, `import` or `connect`.
     Default {
         #[arg(value_name = "NAME", conflicts_with = "none")]
         names: Vec<String>,
@@ -189,8 +284,9 @@ enum ReposCmd {
         /// A file with a token for a private git address: used once, kept nowhere
         #[arg(long, value_name = "FILE", requires = "from")]
         token_file: Option<PathBuf>,
-        /// A repository of this machine, sent whole: a Kito one with all its
-        /// history, or a git one
+        /// A repository of this machine, sent whole
+        ///
+        /// A Kito one with all its history, or a git one.
         #[arg(long, value_name = "DIR")]
         push: Option<PathBuf>,
     },
@@ -219,8 +315,9 @@ enum PeopleCmd {
         role: String,
         #[arg(long)]
         email: Option<String>,
-        /// Who they are for a way to sign in, as <method>:<login>: they
-        /// sign in, and have no token
+        /// Who they are for a way to sign in, as <method>:<login>
+        ///
+        /// They sign in, and have no token.
         #[arg(long, value_name = "METHOD:LOGIN")]
         identity: Option<String>,
     },
@@ -240,17 +337,18 @@ enum InstructionsCmd {
         #[arg(long = "for", value_name = "ASSISTANT", default_value = "claude")]
         assistant: String,
     },
-    /// Set one of this repository's instructions, from a file or the
-    /// standard input: `all/<name>` for every assistant, `<assistant>/<name>`
-    /// for one. It replaces the kitchen's of the same name; an empty one
-    /// takes it away
+    /// Set one of this repository's instructions, from a file or the standard input
+    ///
+    /// `all/<name>` for every assistant, `<assistant>/<name>` for one. It
+    /// replaces the kitchen's of the same name; an empty one takes it away.
     Set {
         name: String,
         #[arg(long, value_name = "FILE")]
         file: Option<PathBuf>,
     },
-    /// Remove one of this repository's instructions (the kitchen's of the
-    /// same name is told again)
+    /// Remove one of this repository's instructions
+    ///
+    /// The kitchen's of the same name is told again.
     Remove { name: String },
     /// Attach a kitchen: a directory with an `instructions/` folder
     Kitchen {
@@ -317,11 +415,14 @@ enum Cmd {
     /// Who may use the repository this directory is connected to, and as what
     Members,
     /// Let a person use this repository: read, write, integrate, maintain
-    /// (maintainers and admins)
+    ///
+    /// For maintainers and admins.
     Grant { name: String, role: String },
     /// Take this repository away from a person
     Revoke { name: String },
-    /// The audit log of the server this directory is connected to (admins)
+    /// The audit log of the server (admins)
+    ///
+    /// The server this directory is connected to.
     Audit {
         /// Each request, not what changed the server
         #[arg(long)]
@@ -339,16 +440,20 @@ enum Cmd {
         #[arg(long)]
         verify: bool,
     },
-    /// The backups of the server this directory is connected to (admins):
-    /// list them (the default), or `now`
+    /// The backups of the server (admins): list them, or `now`
+    ///
+    /// The server this directory is connected to. Without `now`, they are listed.
     Backup { what: Option<String> },
-    /// The people of the server this directory is connected to (admins)
+    /// The people of the server (admins)
+    ///
+    /// The server this directory is connected to.
     People {
         #[command(subcommand)]
         command: Option<PeopleCmd>,
     },
-    /// What the assistants are told here: kept by Kito and shared, not in
-    /// the project's files
+    /// What the assistants are told here
+    ///
+    /// Kept by Kito and shared, not in the project's files.
     Instructions {
         #[command(subcommand)]
         command: Option<InstructionsCmd>,
@@ -368,11 +473,12 @@ enum Cmd {
         /// Start from scratch even if the directory is a git repository
         #[arg(long)]
         fresh: bool,
-        /// Do not set the project up for Claude Code (see `kito claude`)
+        /// Do not set the project up for Claude Code
         #[arg(long)]
         no_claude: bool,
-        /// Set this assistant up here (again for more), instead of the
-        /// ones `kito assistant default` says or the question
+        /// Set this assistant up here (again for more)
+        ///
+        /// Instead of the ones `kito assistant default` says, or the question.
         #[arg(long = "assistant", value_name = "NAME", conflicts_with = "no_assistants")]
         assistants: Vec<String>,
         /// Set no assistant up here
@@ -383,7 +489,7 @@ enum Cmd {
     Import {
         /// Git repository to import (default: the current directory)
         path: Option<PathBuf>,
-        /// Do not set the project up for Claude Code (see `kito claude`)
+        /// Do not set the project up for Claude Code
         #[arg(long)]
         no_claude: bool,
         /// Set this assistant up here (again for more)
@@ -393,9 +499,6 @@ enum Cmd {
         #[arg(long)]
         no_assistants: bool,
     },
-    /// Set the project up for Claude Code: the MCP server, the permission to
-    /// call it, the rules in CLAUDE.md (the same as `kito assistant add claude`)
-    Claude,
     /// Show the operation log, most recent first
     Log {
         /// Only what concerns this file; or a lane (lane/1) for its own log
@@ -419,19 +522,24 @@ enum Cmd {
     },
     /// Export the checkpoints not yet exported to git
     ExportGit,
-    /// Import a SCIP index of the repository: who uses what, found by an indexer in one go
+    /// Import a SCIP index of the repository
+    ///
+    /// Who uses what, found by an indexer in one go.
     Scip {
         /// The index (index.scip), made on the files as they are now
         file: PathBuf,
     },
     /// Restore files to the state of a checkpoint or of an earlier operation
     Rollback {
-        /// Point to return to: a checkpoint (ckpt#3) or the first digits
-        /// of an operation ID, as shown by `kito log`
+        /// A checkpoint (ckpt#3), or the first digits of an operation ID
+        ///
+        /// The point to return to, as `kito log` shows it.
         to: Option<String>,
         /// Only these files or directories (default: everything)
         paths: Vec<PathBuf>,
-        /// Go back to before the last N file changes (the lines of `kito log` that have an ID)
+        /// Go back to before the last N file changes
+        ///
+        /// The changes are the lines of `kito log` that have an ID.
         #[arg(long, value_name = "N", conflicts_with = "to")]
         ops: Option<u64>,
         /// Show what would change, without touching anything
@@ -455,12 +563,15 @@ enum Cmd {
         #[arg(long)]
         global: bool,
     },
-    /// Why a function, a file or some lines are the way they are: the
-    /// reasons they changed, what changed with them, who uses them, who is
-    /// on them now
+    /// Why a function, a file or some lines are the way they are
+    ///
+    /// The reasons they changed, what changed with them, who uses them, who
+    /// is on them now.
     Why {
-        /// <file>:<function> (src/auth.ts:getUser, src/auth.ts:Session.refresh),
-        /// a file, or lines: <file>:<line> or <file>:<line>-<line>
+        /// <file>:<function>, a file, or lines: <file>:<line>[-<line>]
+        ///
+        /// For example src/auth.ts:getUser, src/auth.ts:Session.refresh,
+        /// src/auth.ts, src/auth.ts:12 or src/auth.ts:12-30.
         target: String,
         /// As this lane has it, its own changes included (default: the main lane)
         #[arg(long, value_name = "LANE")]
@@ -478,19 +589,22 @@ enum Cmd {
     },
     /// Find earlier work by the words of its reason
     Reasons {
-        /// Words that must all be in the reason, its task, or the names of
-        /// who did it (none: the latest reasons)
+        /// Words that must all be in the reason, its task, or who did it
+        ///
+        /// Without words, the latest reasons.
         words: Vec<String>,
         /// How many at most
         #[arg(short = 'n', long, default_value_t = 20, value_name = "N")]
         limit: usize,
     },
-    /// Leave a note on a function, a file or a directory: something to know
-    /// about that code that no change says ("called by the nightly job: do
-    /// not rename"). It is told with the why of that code
+    /// Leave a note on a function, a file or a directory
+    ///
+    /// Something to know about that code that no change says ("called by the
+    /// nightly job: do not rename"). It is told with the why of that code.
     Note {
         /// <file>:<function>, a file, a directory (src/billing/), or lines
-        /// (the function they are in)
+        ///
+        /// Lines stand for the function they are in.
         target: Option<String>,
         /// What to know about it
         text: Vec<String>,
@@ -515,14 +629,16 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Connect a directory to a repository kept by a Kito server:
-    /// `kito connect kito.example.com/shop`
+    /// Connect a directory to a repository kept by a Kito server
+    ///
+    /// For example `kito connect kito.example.com/shop`.
     #[command(visible_alias = "clone")]
     Connect {
-        /// The repository's address: host[:port]/repository (or
-        /// kito://host[:port]/repository; the port is 7421 when none is
-        /// said). Also the server alone, then the repository: host:port
-        /// shop, ssh://user@host/path/of/the/server shop
+        /// The repository's address: host[:port]/repository
+        ///
+        /// Or kito://host[:port]/repository; the port is 7421 when none is
+        /// said. Also the server alone, then the repository: host:port shop,
+        /// ssh://user@host/path/of/the/server shop.
         #[arg(value_name = "ADDRESS")]
         server: String,
         /// The repository, when the address is of the server alone; else
@@ -534,21 +650,24 @@ enum Cmd {
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
         #[arg(long)]
         token: Option<String>,
-        /// Sign in instead, in a way the server offers (`github`): you
-        /// are sent to a page to say it is you, and need no token
+        /// Sign in instead, in a way the server offers (`github`)
+        ///
+        /// You are sent to a page to say it is you, and need no token.
         #[arg(long, value_name = "METHOD", conflicts_with = "token")]
         sign_in: Option<String>,
-        /// The fingerprint of the server's certificate, as `kito-server
-        /// fingerprint` prints it there: what says the server you reach
-        /// is the one you mean. Not needed for a server on this machine
+        /// The fingerprint of the server's certificate
+        ///
+        /// As `kito-server fingerprint` prints it there: what says the server
+        /// you reach is the one you mean. Not needed for a server on this
+        /// machine.
         #[arg(long, value_name = "SHA256")]
         fingerprint: Option<String>,
-        /// The server's certificate comes from a public authority: it is
-        /// known by its name
+        /// The server's certificate comes from a public authority
         #[arg(long, conflicts_with = "fingerprint")]
         authority: bool,
-        /// The server does not encrypt (`kito-server serve --plain`): on
-        /// this machine only
+        /// The server does not encrypt: on this machine only
+        ///
+        /// For a server started with `kito-server serve --plain`.
         #[arg(long, conflicts_with_all = ["fingerprint", "authority"])]
         plain: bool,
         /// Do not set the directory up for Claude Code
@@ -561,14 +680,17 @@ enum Cmd {
         #[arg(long)]
         no_assistants: bool,
     },
-    /// Sign in again to the server this directory is connected to: when
-    /// the session ended, or to be somebody else
+    /// Sign in again to the server this directory is connected to
+    ///
+    /// When the session ended, or to be somebody else.
     SignIn {
         /// The way to sign in (default: the one this directory was connected with)
         method: Option<String>,
     },
-    /// The repositories you may use on the server this directory is
-    /// connected to; for admins, add, archive, rename and delete them
+    /// The repositories you may use on the server; admins manage them
+    ///
+    /// The server this directory is connected to. Admins add, archive,
+    /// rename and delete them.
     Repos {
         #[command(subcommand)]
         command: Option<ReposCmd>,
@@ -585,8 +707,9 @@ enum Cmd {
         #[arg(long)]
         past: bool,
     },
-    /// Every open lane: whose it is, what for, what it declared and
-    /// changed, and which lanes are on the same code
+    /// Every open lane, whose it is and what it is for
+    ///
+    /// What each declared and changed, and which lanes are on the same code.
     Board,
     /// The lanes that declared or changed a function, a file or a directory
     Who {
@@ -650,19 +773,23 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
-    /// Bring in the commits the git remote has and the main lane does
-    /// not (made with plain git by people who do not work through Kito):
-    /// they are merged through a lane, and the result is pushed back.
-    /// Done by itself before every push
+    /// Bring in the commits of the git remote that the main lane lacks
+    ///
+    /// They are made with plain git by people who do not work through Kito:
+    /// they are merged through a lane, and the result is pushed back. Done by
+    /// itself before every push.
     Pull,
-    /// What Claude Code runs around its tools, written into the project by
-    /// `kito claude`: edits are checked before they are made
+    /// What an assistant runs around its tools, written into the project by
+    /// `kito assistant add`: edits are checked before they are made. For
+    /// programs, not people: hidden from the help
+    #[command(hide = true)]
     Hook {
         #[command(subcommand)]
         what: HookCmd,
     },
-    /// Protect the main lane: from then on it changes only when a lane is
-    /// integrated, and a file edited in the main directory is put back
+    /// Protect the main lane: it changes only when a lane is integrated
+    ///
+    /// From then on a file edited in the main directory is put back.
     Protect {
         /// Let the main directory be edited by hand again
         #[arg(long)]
@@ -691,9 +818,10 @@ enum LaneCmd {
         /// Why the lane is opened, in one sentence
         #[arg(long)]
         intent: String,
-        /// What the lane will change: functions (src/auth.ts:getUser),
-        /// files, directories (src/billing/). Once per item, or several
-        /// after one --scope
+        /// What the lane will change: functions, files, directories
+        ///
+        /// Functions (src/auth.ts:getUser), files, directories (src/billing/).
+        /// Once per item, or several after one --scope.
         #[arg(long, required = true, num_args = 1.., value_name = "ITEM")]
         scope: Vec<String>,
         /// The task the lane belongs to (task #55)
@@ -702,25 +830,30 @@ enum LaneCmd {
         /// Checkpoint to start from (default: the main lane as it is now)
         #[arg(long, value_name = "CHECKPOINT", conflicts_with = "on")]
         base: Option<String>,
-        /// Start on another lane as it is now, before it has landed; the
-        /// new lane lands on it unless --target says otherwise
+        /// Start on another lane as it is now, before it has landed
+        ///
+        /// The new lane lands on it unless --target says otherwise.
         #[arg(long, value_name = "LANE")]
         on: Option<String>,
-        /// The lane to land on: the one it starts on, or one below it
-        /// (main). It waits until the work it was built on is there
+        /// The lane to land on: the one it starts on, or one below it (main)
+        ///
+        /// It waits until the work it was built on is there.
         #[arg(long, value_name = "LANE")]
         target: Option<String>,
-        /// The assistant the agent runs in (claude-code, codex): shown
-        /// with the lane. An assistant set up for Kito says it by itself
+        /// The assistant the agent runs in (claude-code, codex)
+        ///
+        /// Shown with the lane. An assistant set up for Kito says it by itself.
         #[arg(long, value_name = "NAME")]
         assistant: Option<String>,
         /// With --assistant: the model it runs (claude-opus-5)
         #[arg(long, value_name = "MODEL", requires = "assistant")]
         model: Option<String>,
     },
-    /// Create a permanent lane, such as `staging`: lanes land on it under
-    /// checkpoints of its own, it has its own git branch and checks, and
-    /// `kito integrate <name>` lands it on main without closing it
+    /// Create a permanent lane, such as `staging`
+    ///
+    /// Lanes land on it under checkpoints of its own, it has its own git
+    /// branch and checks, and `kito integrate <name>` lands it on main
+    /// without closing it.
     Create {
         /// Its name: lowercase letters, digits, `-`, `_`, `.`
         name: String,
@@ -774,8 +907,9 @@ enum LaneCmd {
         #[arg(long)]
         stat: bool,
     },
-    /// Run a command in the working copy of a lane, confined to it: it
-    /// writes only there, and does not read Kito's own data or your keys
+    /// Run a command in the working copy of a lane, confined to it
+    ///
+    /// It writes only there, and does not read Kito's own data or your keys.
     Run {
         lane: String,
         /// The command opens no TCP connection either
@@ -792,12 +926,14 @@ enum LaneCmd {
         #[arg(long, num_args = 1.., value_name = "ITEM")]
         add: Vec<String>,
     },
-    /// In a directory connected to a server: bring the files of a lane
-    /// here and keep them in step as the lane changes
+    /// Bring the files of a lane here, kept in step as the lane changes
+    ///
+    /// In a directory connected to a server.
     Attach {
         lane: String,
-        /// Work in the lane from this machine: what is saved here goes to
-        /// the lane. For the lane's owner; takes over from another machine
+        /// Work in the lane from this machine: what is saved here goes to it
+        ///
+        /// For the lane's owner; it takes over from another machine.
         #[arg(long)]
         write: bool,
     },
@@ -1239,7 +1375,9 @@ fn said_cleaning(name: &str, place: &str, ran: Option<Result<String, String>>) {
             }
         }
         Some(Err(why)) => {
-            eprintln!("kito: the plugin `{name}` did not take out what it wrote {place} ({why}): it goes all the same")
+            complain!(
+                "the plugin `{name}` did not take out what it wrote {place} ({why}): it goes all the same"
+            )
         }
     }
 }
@@ -1308,7 +1446,7 @@ fn cmd_assistant(cli: &Cli, command: &AssistantCmd) -> Result<u8, String> {
                 print_json(&known);
             } else if known.is_empty() {
                 println!(
-                    "No plugin enabled here sets an assistant up. Claude Code is set up by `kito claude`."
+                    "No plugin enabled here sets an assistant up. Claude Code is set up by `kito assistant add claude`."
                 );
             }
             for plugin in known.iter().filter(|_| !cli.json) {
@@ -1378,7 +1516,7 @@ fn assistant_add(cli: &Cli, names: &[String]) -> Result<u8, String> {
             Err(why) => {
                 failed += 1;
                 if !cli.json {
-                    eprintln!("kito: {} is not set up: {why}", assistants::title(name));
+                    complain!("{} is not set up: {why}", assistants::title(name));
                 }
                 said.push(json!({ "name": name, "set_up": false, "error": why }));
             }
@@ -1864,7 +2002,7 @@ fn instructions_written(cli: &Cli) {
     match instructions::write(&root, &mut client) {
         Ok(lines) if !cli.json => lines.iter().for_each(|line| println!("Instructions: {line}")),
         Ok(_) => {}
-        Err(why) => eprintln!("kito: the instructions were not written: {why}"),
+        Err(why) => complain!("the instructions were not written: {why}"),
     }
 }
 
@@ -2032,18 +2170,6 @@ fn claude_here(cli: &Cli, root: &Path) -> Result<claude::Setup, String> {
     Ok(claude::setup(root))
 }
 
-fn cmd_claude(cli: &Cli) -> Outcome {
-    let root = root_of(cli)?;
-    let setup = claude_here(cli, &root)?;
-    if cli.json {
-        print_json(&setup.json());
-    } else {
-        setup.print();
-    }
-    instructions_written(cli);
-    Ok(())
-}
-
 /// A directory connected to a server holds no repository of its own.
 fn not_connected(root: &Path) -> Outcome {
     match Remote::load(root) {
@@ -2072,7 +2198,7 @@ fn cmd_init(cli: &Cli, path: &Option<PathBuf>, fresh: bool, chosen: &Chosen) -> 
     // Capture is continuous from the very start: the daemon starts with the repository.
     let mut client = Client::connect_or_start(&root).map_err(fail)?;
     if !cli.json {
-        println!("Kito repository created in {}", root.join(".kito").display());
+        println!("{}Kito repository created in {}", paint::mark(), root.join(".kito").display());
         if let Some(setup) = &new.claude {
             setup.print();
         }
@@ -2120,7 +2246,8 @@ fn cmd_import(cli: &Cli, path: &Option<PathBuf>, chosen: &Chosen) -> Outcome {
         }));
     } else {
         println!(
-            "Imported {}: {}, {}.",
+            "{}Imported {}: {}, {}.",
+            paint::mark(),
             count(report.commits as u64, "commit", "commits"),
             count(report.ops as u64, "operation", "operations"),
             count(report.checkpoints as u64, "checkpoint", "checkpoints")
@@ -2389,7 +2516,7 @@ fn cmd_why(cli: &Cli, target: &str, lane: &Option<String>, graph: bool, uses: bo
     }
     for note in strings(&answer["notes"]) {
         println!();
-        println!("Note: {note}");
+        println!("{} {note}", paint::warn("Note:"));
     }
     Ok(())
 }
@@ -2787,9 +2914,17 @@ fn cmd_checkpoint(cli: &Cli, label: &str) -> Outcome {
         return Ok(());
     }
     match (&done.git_commit, &done.git_error) {
-        (Some(commit), _) => println!("{} created and exported as git commit {}", done.id, &commit[..10]),
-        (None, Some(error)) => println!("{} created; export to git failed: {error}", done.id),
-        (None, None) => println!("{} created", done.id),
+        (Some(commit), _) => {
+            println!("{} created and exported as git commit {}", paint::id(&done.id), &commit[..10])
+        }
+        (None, Some(error)) => {
+            println!(
+                "{} created; {}",
+                paint::id(&done.id),
+                paint::warn(&format!("export to git failed: {error}"))
+            )
+        }
+        (None, None) => println!("{} created", paint::id(&done.id)),
     }
     Ok(())
 }
@@ -2838,8 +2973,8 @@ fn cmd_export(cli: &Cli) -> Outcome {
 
 fn lane_line(lane: &LaneInfo) -> String {
     let mut line = format!(
-        "{:<8} {:<12} {:<11} base {:<8} {:>7}  {:>8}",
-        lane.id,
+        "{} {:<12} {:<11} base {:<8} {:>7}  {:>8}",
+        paint::id(&format!("{:<8}", lane.id)),
         lane.agent,
         lane.state.replace('_', " "),
         lane.base,
@@ -2878,7 +3013,12 @@ fn cmd_lanes(cli: &Cli, all: bool) -> Outcome {
     if cli.json {
         print_json(&lanes);
     } else if lanes.is_empty() {
-        println!("No open lanes. Open one with `kito lane open <agent> --intent <why> --scope <what>`.");
+        println!(
+            "{}",
+            paint::hints(
+                "No open lanes. Open one with `kito lane open <agent> --intent <why> --scope <what>`."
+            )
+        );
     } else {
         lanes.iter().for_each(|lane| println!("{}", lane_line(lane)));
     }
@@ -3369,7 +3509,8 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
         }));
     } else {
         println!(
-            "{} is connected to `{repo}` on {} as {}.",
+            "{}{} is connected to `{repo}` on {} as {}.",
+            paint::mark(),
             dir.display(),
             remote.place(),
             me["user"].as_str().unwrap_or("?")
@@ -3461,7 +3602,7 @@ fn asked_everywhere(
         match Client::remote(&there, true).and_then(|mut client| client.call::<Value>(method, params.clone()))
         {
             Ok(answer) => answers.push((repo, answer)),
-            Err(e) => eprintln!("kito: {repo}: {e}"),
+            Err(e) => complain!("{repo}: {e}"),
         }
     }
     Ok(answers)
@@ -4364,13 +4505,18 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 let lane: LaneInfo = serde_json::from_value(opened.clone()).map_err(fail)?;
                 match (&lane.parent, &lane.target) {
                     (Some(parent), Some(target)) if parent == target => {
-                        println!("{} opened for {} on {parent}, which it lands on.", lane.id, lane.agent)
+                        println!(
+                            "{} opened for {} on {parent}, which it lands on.",
+                            paint::id(&lane.id),
+                            lane.agent
+                        )
                     }
                     (Some(parent), Some(target)) => println!(
                         "{} opened for {} on {parent}; it lands on {target} once {parent} has.",
-                        lane.id, lane.agent
+                        paint::id(&lane.id),
+                        lane.agent
                     ),
-                    _ => println!("{} opened for {} on {}.", lane.id, lane.agent, lane.base),
+                    _ => println!("{} opened for {} on {}.", paint::id(&lane.id), lane.agent, lane.base),
                 }
                 println!("Working copy: {}", lane.workdir.as_deref().unwrap_or(Path::new("")).display());
                 println!("Scope: {}", lane.scope.join(", "));
@@ -4599,14 +4745,20 @@ fn print_integration(result: &IntegrationResult) {
                 .map(|c| format!(" (git {})", &c[..10.min(c.len())]))
                 .unwrap_or_default();
             match (&result.landed_on, &result.checkpoint) {
-                (Some(target), Some(checkpoint)) => {
-                    println!("{}: landed on {target} as {checkpoint}{git}{verified}", result.lane)
+                (Some(target), Some(checkpoint)) => println!(
+                    "{}: {} as {}{git}{verified}",
+                    paint::id(&result.lane),
+                    paint::good(&format!("landed on {target}")),
+                    paint::id(checkpoint)
+                ),
+                (Some(target), None) => {
+                    println!("{}: {}", paint::id(&result.lane), paint::good(&format!("landed on {target}")))
                 }
-                (Some(target), None) => println!("{}: landed on {target}", result.lane),
                 (None, _) => println!(
-                    "{}: integrated as {}{git}{verified}",
-                    result.lane,
-                    result.checkpoint.clone().unwrap_or_default()
+                    "{}: {} {}{git}{verified}",
+                    paint::id(&result.lane),
+                    paint::good("integrated as"),
+                    paint::id(&result.checkpoint.clone().unwrap_or_default())
                 ),
             }
             for auto in &result.auto_resolutions {
@@ -4623,20 +4775,30 @@ fn print_integration(result: &IntegrationResult) {
                 println!("  {message}");
             }
         }
-        Integration::NothingToIntegrate => println!("{}: nothing to integrate", result.lane),
+        Integration::NothingToIntegrate => println!("{}: nothing to integrate", paint::id(&result.lane)),
         Integration::Conflicts => {
-            println!("{}: {}", result.lane, count(result.conflicts.len() as u64, "conflict", "conflicts"));
+            println!(
+                "{}: {}",
+                paint::id(&result.lane),
+                paint::warn(&count(result.conflicts.len() as u64, "conflict", "conflicts"))
+            );
             result.conflicts.iter().for_each(|c| println!("  {}", conflict_line(c)));
-            println!("  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again.");
+            println!(
+                "{}",
+                paint::hints(
+                    "  Decide each with `kito resolve <conflict> --main | --lane | --text FILE`, then integrate again."
+                )
+            );
             if result.conflicts.iter().any(|c| c.kind == "semantic_ref") {
-                println!("  For a semantic_ref (uses that may be of a renamed symbol): `kito resolve <conflict> --rewrite | --keep`.");
+                println!("{}", paint::hints("  For a semantic_ref (uses that may be of a renamed symbol): `kito resolve <conflict> --rewrite | --keep`."));
             }
         }
         Integration::VerificationFailed => {
             let report = result.verification.as_ref();
             println!(
-                "{}: verification failed: `{}`",
-                result.lane,
+                "{}: {} `{}`",
+                paint::id(&result.lane),
+                paint::warn("verification failed:"),
                 report.and_then(|v| v.failed_command.clone()).unwrap_or_default()
             );
             for line in report.and_then(|v| v.output.clone()).unwrap_or_default().lines() {
@@ -4667,7 +4829,11 @@ fn print_integration(result: &IntegrationResult) {
             );
         }
         Integration::OutOfScope => {
-            println!("{}: not integrated, it changed things outside its scope", result.lane);
+            println!(
+                "{}: {}",
+                paint::id(&result.lane),
+                paint::warn("not integrated, it changed things outside its scope")
+            );
             for item in &result.out_of_scope {
                 println!("  outside the scope  {item}");
             }
@@ -4805,7 +4971,7 @@ fn cmd_rename(cli: &Cli, symbol: &str, new_name: &str, lane: &Option<String>) ->
         done.references_updated.iter().for_each(|place| println!("  {place}"));
     }
     for note in &done.notes {
-        println!("Note: {note}");
+        println!("{} {note}", paint::warn("Note:"));
     }
     if !done.possible_references.is_empty() {
         println!("The old name is still written here (not touched: they may be uses of it):");
@@ -4978,7 +5144,7 @@ fn unreliable_events(status: &DaemonStatus) -> Option<String> {
 fn warn_if_events_unreliable(client: &mut Client) {
     let Ok(status) = client.call::<DaemonStatus>("status", json!({})) else { return };
     if let Some(why) = unreliable_events(&status) {
-        println!("Note: {why}.");
+        println!("{} {why}.", paint::warn("Note:"));
         if status.watcher.filesystem.as_deref() == Some("9p") {
             println!("      Under WSL it is better to keep the project in the Linux file system (for example in ~/projects).");
         }
@@ -5099,7 +5265,7 @@ fn main() -> ExitCode {
         // It panicked, and said so.
         Ok(Err(_)) => ExitCode::from(101),
         Err(e) => {
-            eprintln!("kito: {e}");
+            complain!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -5115,7 +5281,10 @@ fn run() -> ExitCode {
         }
         report(panic);
     }));
-    let cli = Cli::parse();
+    let cli = parse();
+    if cli.json {
+        paint::off();
+    }
     // A hook answers whoever runs it in its own words and with its own code.
     if let Cmd::Hook { what } = &cli.command {
         return match what {
@@ -5143,7 +5312,7 @@ fn run() -> ExitCode {
         return match done {
             Ok(code) => ExitCode::from(code),
             Err(e) => {
-                eprintln!("kito: {e}");
+                complain!("{e}");
                 ExitCode::FAILURE
             }
         };
@@ -5153,7 +5322,7 @@ fn run() -> ExitCode {
         return match cmd_external(&cli, line) {
             Ok(code) => ExitCode::from(code),
             Err(e) => {
-                eprintln!("kito: {e}");
+                complain!("{e}");
                 ExitCode::FAILURE
             }
         };
@@ -5163,7 +5332,7 @@ fn run() -> ExitCode {
         return match cmd_lane_run(&cli, lane, !*no_network, command) {
             Ok(code) => ExitCode::from(code),
             Err(e) => {
-                eprintln!("kito: {e}");
+                complain!("{e}");
                 ExitCode::FAILURE
             }
         };
@@ -5180,7 +5349,6 @@ fn run() -> ExitCode {
             path,
             &Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants },
         ),
-        Cmd::Claude => cmd_claude(&cli),
         Cmd::Instructions { command } => cmd_instructions(&cli, command.as_ref()),
         Cmd::Task { command } => cmd_task(&cli, command.as_ref()),
         Cmd::Search { words, kinds, since, until, who, place, outcome, limit, everywhere } => {
@@ -5276,7 +5444,7 @@ fn run() -> ExitCode {
             if cli.json {
                 print_json(&json!({ "error": message }));
             } else {
-                eprintln!("kito: {message}");
+                eprintln!("{}", paint::error(&message));
             }
             ExitCode::FAILURE
         }
@@ -5286,6 +5454,22 @@ fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{remote_for, utc};
+
+    #[test]
+    fn every_command_of_the_help_is_in_one_group() {
+        use clap::CommandFactory as _;
+        let command = super::Cli::command();
+        let visible: Vec<&str> =
+            command.get_subcommands().filter(|sub| !sub.is_hide_set()).map(clap::Command::get_name).collect();
+        let grouped: Vec<&str> = super::GROUPS.iter().flat_map(|(_, names)| names.iter().copied()).collect();
+        for name in &visible {
+            assert_eq!(grouped.iter().filter(|listed| *listed == name).count(), 1, "{name}");
+        }
+        assert!(grouped.iter().all(|name| visible.contains(name)), "{grouped:?}");
+        // What programs run is not shown to people.
+        assert!(!visible.contains(&"hook") && !visible.contains(&"claude"));
+        super::command().debug_assert();
+    }
 
     #[test]
     fn a_server_is_reached_with_a_token_or_through_ssh() {

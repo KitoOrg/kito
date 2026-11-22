@@ -21,6 +21,8 @@ kito-integrate = { path = "crates/kito-integrate" }
 kito-git = { path = "crates/kito-git" }
 kitod = { path = "crates/kitod" }
 
+anstyle = "1"
+anstyle-query = "1"
 blake3 = "1"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }

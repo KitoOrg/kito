@@ -30,6 +30,9 @@ a question whether to set them up.
     project, Claude Code's included. What is the person's own (ZCode's
     hooks) stays: other projects use it.
   - `kito claude` stays, as `kito assistant add claude` said shorter.
+    (Amended on 2026-11-22: `kito claude` is gone, D-174. It said
+    the same as `kito assistant add claude`, and one way is the point
+    of this decision.)
 - **Kito knows which assistants a machine has**: Claude Code (`claude`),
   Codex (`codex`), ZCode (`zcode`), each by its program on the `PATH` or
   its settings directory in the home directory (`~/.claude`, `~/.codex`,

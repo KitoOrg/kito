@@ -117,6 +117,11 @@ kito rollback ckpt#1
 kito identity --name "Ada" --email ada@example.com
 ```
 
+`kito --help` lists the commands in groups, the most used first. At a
+terminal the output has some colour; there is none when it goes to a file
+or a program, with `NO_COLOR` set, with `TERM=dumb`, or with `--json`
+(`CLICOLOR_FORCE=1` asks for it anyway).
+
 ## Agents and lanes
 
 Every agent works in a lane: a working copy of its own, where its saves are
@@ -381,7 +386,7 @@ written outside Kito's marks afterwards stay on that machine only.
 
 ### Claude Code
 
-`kito assistant add claude` (or `kito claude`, the same) writes:
+`kito assistant add claude` writes:
 
 | File | What goes in it |
 | --- | --- |
@@ -730,7 +735,7 @@ the task, who, for whom, the lane, the checkpoint) and who uses it. This
 is in the answer of the tool, so it reaches any agent on any model.
 
 For Claude Code the rest is done by hooks, which `kito init`, `kito import`
-and `kito claude` write into `.claude/settings.json`. Claude Code runs them
+and `kito assistant add claude` write into `.claude/settings.json`. Claude Code runs them
 around its tools, whatever the model decided:
 
 | Hook | When | What it does |
