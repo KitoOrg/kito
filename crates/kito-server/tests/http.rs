@@ -1380,7 +1380,9 @@ fn an_administrator_installs_and_takes_out_the_server_s_plugins_from_a_browser()
     let listed = listed.json();
     assert_eq!(
         listed["listed"],
-        json!([{ "name": "hello", "about": "Says what it is told", "latest": "0.9.0" }])
+        json!([{ "name": "hello", "about": "Says what it is told", "latest": "0.9.0" }]),
+        "{}",
+        listed["registry_error"]
     );
     let hello = &listed["installed"][0];
     assert_eq!(

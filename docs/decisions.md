@@ -2219,3 +2219,19 @@ is in the files sent and not in the history, or the other way. Before
 after `daemon stop` leaves everything where it is, and the error says
 the repository is on the server. A `--push` directory inside a
 repository of this machine, and not one itself, is that repository.
+
+### D-212 · The address of a file names a path as the system writes paths
+What follows `file://` in a registry's address is a path, and to it
+`/index.json` and `/plugins/<name>.json` are added. On Windows that met
+two faults: a path given in full (`\\?\C:\…`) is read as it is written,
+so the `/` added was part of a name that cannot exist; and the usual
+form of such an address, `file:///C:/…`, leaves `/C:/…`, which is no
+path there. On Windows the path's `/` are made `\`, and a `/` before a
+drive's letter is dropped
+([ADR 0008](adr/0008-plugin-registry.md), amended). It is done where
+the file is read (`file_path`), not where the address is said: the
+address is kept and shown as the person wrote it, and what a version
+was installed from stays the same text. The rule is a function of the
+text and of the system, so both systems' rules are tested on either.
+Found by running the failing test on Windows itself: the tests built
+for Windows inside WSL run on the machine's own Windows.

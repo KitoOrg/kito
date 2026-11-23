@@ -187,13 +187,34 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// The path an address of a file names: what follows `file://`, which
+/// everywhere but on Windows is that path as it is written.
+///
+/// Windows writes a path with `\`, and takes a `/` for one only in a path
+/// it works out itself. A path it is given in full (`\\?\C:\…`, which is
+/// what asking it for a directory's own name answers) is read as it is
+/// written, and a `/` in it is the name of nothing: the `/index.json`
+/// that follows a registry's address would never be found. So every `/`
+/// is a `\` there; and `/C:/…`, the path in `file:///C:/…`, which is how
+/// such an address is written everywhere else, is `C:\…`.
+fn file_path(said: &str, windows: bool) -> String {
+    if !windows {
+        return said.to_owned();
+    }
+    let said = match said.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &said[1..],
+        _ => said,
+    };
+    said.replace('/', "\\")
+}
+
 /// Reads what is at an address: HTTPS, a file (`file://`), or HTTP on
 /// this machine. Nothing else, and never more than `at_most` bytes.
 fn fetch(url: &str, at_most: u64) -> Result<Vec<u8>, String> {
     let too_big =
         || format!("{url}: it is more than {} MB, which nothing of a registry is", at_most / (1024 * 1024));
     if let Some(path) = url.strip_prefix("file://") {
-        let bytes = std::fs::read(path).map_err(|e| match e.kind() {
+        let bytes = std::fs::read(file_path(path, cfg!(windows))).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!("{url}: it is not there"),
             _ => format!("{url}: {e}"),
         })?;
@@ -791,5 +812,32 @@ mod tests {
         let url = format!("file://{}", file.display());
         assert_eq!(fetch(&url, 10).unwrap(), b"0123456789");
         assert!(fetch(&url, 9).unwrap_err().contains("more than"));
+
+        // The directory as the system itself names it, which on Windows is
+        // `\\?\C:\…`, and a file in it named as a registry names its
+        // files: with a `/`.
+        let full = tmp.path().canonicalize().unwrap();
+        assert_eq!(fetch(&format!("file://{}/index.json", full.display()), 10).unwrap(), b"0123456789");
+        #[cfg(windows)]
+        {
+            // And as the address of a file is written everywhere else.
+            let text = full.display().to_string();
+            let usual = text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/");
+            assert_eq!(fetch(&format!("file:///{usual}/index.json"), 10).unwrap(), b"0123456789");
+        }
+    }
+
+    #[test]
+    fn the_address_of_a_file_names_a_path_as_the_system_writes_paths() {
+        // Everywhere but on Windows: as it is written, whatever is in it.
+        for said in ["/srv/registry/index.json", "/C:/srv/index.json", r"\\?\C:\srv/index.json"] {
+            assert_eq!(file_path(said, false), said);
+        }
+        // On Windows a path given in full takes no `/`, and gets none.
+        assert_eq!(file_path(r"\\?\C:\srv\registry/index.json", true), r"\\?\C:\srv\registry\index.json");
+        assert_eq!(file_path(r"C:\srv\registry/plugins/web.json", true), r"C:\srv\registry\plugins\web.json");
+        // `file:///C:/…`, as such an address is written everywhere else.
+        assert_eq!(file_path("/C:/srv/registry/index.json", true), r"C:\srv\registry\index.json");
+        assert_eq!(file_path("/srv/registry", true), r"\srv\registry");
     }
 }

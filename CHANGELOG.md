@@ -4,6 +4,20 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.40.1]
+
+- **On Windows, a registry kept in a directory is read however its
+  address is written.** `KITO_REGISTRY=file://…` worked there only with
+  a path that Windows works out itself (`file://C:\team\registry`).
+  With a path given in full (`\\?\C:\…`, which is what a program gets
+  when it asks Windows for a directory's own name) nothing of the
+  registry was read: a server started that way listed no plugin on its
+  Plugins page and installed none by name. And
+  `file:///C:/team/registry`, which is how the address of a file is
+  written everywhere else, named no path at all. Both are read now
+  ([ADR 0008](docs/adr/0008-plugin-registry.md), amended). Nothing
+  changes on Linux and macOS.
+
 ## [0.40.0]
 
 The servers a client knows

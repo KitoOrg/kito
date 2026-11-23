@@ -213,3 +213,24 @@ and `enable`, and the web client's Plugins page, leave out what is not
 for a server; `kito plugin add` and `enable` what is not for a
 repository. A listing without `runs`, from before, is taken to run
 anywhere.
+
+## Amendment, 2026-11-23: the address of a directory, on Windows
+
+A registry given as `file://` and a path was read on Windows only when
+the path was one Windows works out itself. The one test that still
+failed there showed it: a server whose directory was named in full
+(`\\?\C:\…`, which is what asking Windows for a directory's own name
+answers, and so what a program that was told a directory passes on)
+listed nothing of its registry. Windows reads such a path as it is
+written, and the `/index.json` that is added to a registry's address
+was the name of nothing. `file:///C:/…`, the form such an address has
+everywhere else, did not work either: what is left of it, `/C:/…`, is
+no path on Windows.
+
+On Windows, in the path of a `file://` address, every `/` is now a `\`,
+and a `/` before a drive's letter is left out: `file://C:\registry`,
+`file://\\?\C:\registry` and `file:///C:/registry` are one directory.
+No name on Windows can have a `/` in it, so nothing that was read
+before is read differently. Elsewhere the path is taken as it is
+written, as before. Nothing of an address is decoded on any system: a
+path with a space in it is written with the space.
