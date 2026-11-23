@@ -18,7 +18,7 @@ use axum::extract::{Path as Segment, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -32,6 +32,11 @@ use std::sync::Arc;
 
 /// The cookie of a session.
 const COOKIE: &str = "kito_session";
+
+/// The address a request came from, as the connection says it: the
+/// browser's, or that of whatever passes requests on to this server.
+#[derive(Clone)]
+struct Peer(String);
 /// The cookie of somebody on their way to sign in and back: what the
 /// plugin handed out when they left, for ten minutes. Served securely it
 /// has the `__Host-` prefix, which a browser takes only from this host
@@ -133,7 +138,21 @@ fn pairs(query: &str) -> BTreeMap<String, String> {
 }
 
 fn said(status: StatusCode, message: &str) -> Response {
+    let message = match status {
+        StatusCode::INTERNAL_SERVER_ERROR => went_wrong(message),
+        _ => message.to_owned(),
+    };
     (status, [(header::CACHE_CONTROL, "no-store")], Json(json!({ "error": message }))).into_response()
+}
+
+/// What a browser is told when the server failed it: a text of its own
+/// that names nothing of where it is. Why is said on its standard error,
+/// where whoever runs it reads (`its log says why`).
+fn went_wrong(why: &str) -> String {
+    match why == crate::state::UNREADABLE || why == crate::state::COULD_NOT {
+        true => why.to_owned(),
+        false => crate::state::could_not(format_args!("{why}")),
+    }
 }
 
 fn answered(value: Value) -> Response {
@@ -167,8 +186,11 @@ impl Who {
 impl Http {
     /// The server as it is now: people and repositories added since it
     /// started count for a request made now.
+    ///
+    /// When it cannot be read, why is said on this machine and the answer
+    /// says only that: what the server says of itself names its directory.
     fn server(&self) -> Result<Server, String> {
-        Server::open(&self.dir)
+        Server::open_for_a_request(&self.dir)
     }
 
     fn who(&self, server: &Server, headers: &HeaderMap) -> Option<Who> {
@@ -394,24 +416,33 @@ struct Opening {
 
 /// `POST /-/session`: a session for whoever holds a token, kept in a
 /// cookie from then on.
-async fn open_session(State(http): State<Arc<Http>>, Json(opening): Json<Opening>) -> Response {
+async fn open_session(
+    State(http): State<Arc<Http>>,
+    Extension(peer): Extension<Peer>,
+    Json(opening): Json<Opening>,
+) -> Response {
     let server = match http.server() {
         Ok(server) => server,
         Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
     // The same answer for no token and for a wrong one; and for one that
     // was theirs when it was looked at and is not when the session is
-    // written (changed meanwhile).
-    let token = opening.token.trim();
-    let theirs = |now: &Server| now.user_of(token).map(|(name, _)| name);
-    let opened = match theirs(&server) {
-        Some(name) => {
-            match server.open_session(&name, |now| theirs(now).is_some_and(|still| still == name)) {
-                Ok(id) => id.map(|id| (name, id)),
-                Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
-            }
-        }
-        None => None,
+    // written (changed meanwhile). The lock is waited for off the thread
+    // that serves, as everywhere else.
+    let opened =
+        tokio::task::spawn_blocking(move || -> Result<(Server, Option<(String, String)>), String> {
+            let token = opening.token.trim();
+            let theirs = |now: &Server| now.user_of(token).map(|(name, _)| name);
+            let Some(name) = theirs(&server) else { return Ok((server, None)) };
+            let still = |now: &Server| theirs(now).is_some_and(|still| still == name);
+            let id = server.open_session(&name, ("a token", Some(&peer.0)), still)?;
+            Ok((server, id.map(|id| (name, id))))
+        })
+        .await;
+    let (server, opened) = match opened {
+        Ok(Ok(opened)) => opened,
+        Ok(Err(e)) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => return said(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let Some((name, id)) = opened else {
         crate::audit::record(
@@ -442,8 +473,9 @@ async fn open_session(State(http): State<Arc<Http>>, Json(opening): Json<Opening
 async fn close_session(State(http): State<Arc<Http>>, headers: HeaderMap) -> Response {
     if let Some(id) = cookie(&headers, COOKIE).map(str::to_owned) {
         let dir = http.dir.clone();
-        // The plugins that listen are told, which may take them a moment.
-        let ended = tokio::task::spawn_blocking(move || Server::open(&dir)?.end_session(&id)).await;
+        // The lock is waited for off the thread that serves.
+        let ended =
+            tokio::task::spawn_blocking(move || Server::open_for_a_request(&dir)?.end_session(&id)).await;
         match ended {
             Ok(Ok(())) => {}
             Ok(Err(why)) => return said(StatusCode::INTERNAL_SERVER_ERROR, &why),
@@ -588,12 +620,17 @@ async fn begin_sign_in(
 /// browser brought back for the link, and `sent` what the session it
 /// sent, if it sent one, hashes to. Answers what to tell them; `Err`: why
 /// nothing was linked.
+///
+/// What is kept of it says through which session it came, how that session
+/// was opened and from where, and where the browser came back from: the
+/// one who holds a person's token can attach an account to them, and it
+/// must be possible to tell afterwards that they did (ADR 0006, amended).
 fn link_account(
     server: &Server,
     method: &str,
     told: &Value,
     value: &str,
-    sent: Option<String>,
+    (sent, peer): (Option<String>, &Peer),
 ) -> Result<String, (StatusCode, String)> {
     let refused = |why: String| (StatusCode::FORBIDDEN, why);
     let failed = |why: String| (StatusCode::INTERNAL_SERVER_ERROR, why);
@@ -616,25 +653,50 @@ fn link_account(
     let identity = identity_of(method, &answer).map_err(refused)?;
     // The plugin took its time: whether they are signed in still is asked
     // where the link is made, on the server as it is then.
-    let mut now = Server::open(&server.dir).map_err(failed)?;
+    let mut now = Server::open_for_a_request(&server.dir).map_err(failed)?;
+    let opened = now.session_opened(&session);
+    let written = identity.written();
+    let (kept, told) = link_said(&name, &identity, opened, &peer.0);
     let linked = now
         .change(|change| match change.session_user(&session).as_deref() == Some(name.as_str()) {
-            true => change.link(&name, &identity),
+            // Kept and queued with the change: the plugins hear what was
+            // linked, the log keeps how too.
+            true => {
+                let linked = change.link(&name, &identity)?;
+                if linked {
+                    change.then_tell_kept("identity_linked", kept, told);
+                }
+                Ok(linked)
+            }
             false => Err(gone.to_owned()),
         })
         .map_err(refused)?;
-    let written = identity.written();
     match linked {
-        true => {
-            // Kept now, and told once the page is on its way.
-            let what = format!("{name}: {written}");
-            let event = json!({ "user": name, "identity": identity.key(), "by": name, "what": what });
-            now.tell_after(vec![("identity_linked", event)]);
-            Ok(format!("Whoever signs in as {written} is {name} from now on."))
-        }
+        true => Ok(format!("Whoever signs in as {written} is {name} from now on.")),
         // Theirs already: nothing to change, and nothing to refuse.
         false => Ok(format!("{written} is {name} already.")),
     }
+}
+
+/// What is kept of a link made in a browser, and what the plugins are
+/// told of it: the log has the addresses it came from, the plugins do
+/// not. `opened` is how the session it came through was opened, and
+/// from where (`Server::session_opened`); `peer` where the browser came
+/// back from.
+fn link_said(
+    name: &str,
+    identity: &crate::state::Identity,
+    opened: Option<(String, Option<String>)>,
+    peer: &str,
+) -> (Value, Value) {
+    let what = format!("{name}: {}", identity.written());
+    let (through, from) = opened.unwrap_or_else(|| ("opened before sessions said how".to_owned(), None));
+    let how = format!("in a browser, through a session of {name} {through}");
+    let from = from.map(|from| format!(" from {from}")).unwrap_or_default();
+    let kept = format!("{what}, in a browser at {peer}, through a session of {name} {through}{from}");
+    let kept = json!({ "user": name, "by": name, "what": kept });
+    let told = json!({ "user": name, "identity": identity.key(), "by": name, "what": what, "how": how });
+    (kept, told)
 }
 
 /// `GET /-/sign-in/<method>/callback`: the browser is back from the
@@ -646,6 +708,7 @@ async fn finish_sign_in(
     State(http): State<Arc<Http>>,
     Segment(method): Segment<String>,
     RawQuery(query): RawQuery,
+    Extension(peer): Extension<Peer>,
     headers: HeaderMap,
 ) -> Response {
     let server = match http.server() {
@@ -673,13 +736,18 @@ async fn finish_sign_in(
     let mut response = match link {
         Some(value) => {
             let sent = cookie(&headers, COOKIE).map(hash_of);
-            let linked =
-                tokio::task::spawn_blocking(move || link_account(&server, &method, &told, &value, sent))
-                    .await;
+            let linked = tokio::task::spawn_blocking(move || {
+                link_account(&server, &method, &told, &value, (sent, &peer))
+            })
+            .await;
             match linked {
                 Ok(Ok(happened)) => page("Linked", &happened, "Go on", true).into_response(),
                 // A page, not JSON: a person reads it.
                 Ok(Err((status, why))) => {
+                    let why = match status {
+                        StatusCode::INTERNAL_SERVER_ERROR => went_wrong(&why),
+                        _ => why,
+                    };
                     let happened = format!("Nothing was linked: {why}.");
                     (status, page("Not linked", &happened, "Go back", false)).into_response()
                 }
@@ -697,8 +765,9 @@ async fn finish_sign_in(
                     let name = server.signed_in(&identity).map_err(|why| (StatusCode::FORBIDDEN, why))?;
                     // Theirs still when the session is written: not
                     // unlinked while the provider was asked.
+                    let with = identity.written();
                     let token = server
-                        .open_session(&name, |now| now.signs_in_as(&identity, &name))
+                        .open_session(&name, (&with, Some(&peer.0)), |now| now.signs_in_as(&identity, &name))
                         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
                         .ok_or_else(|| (StatusCode::FORBIDDEN, Server::nobody(&identity)))?;
                     Ok((token, name, server.config.sign_in.days * 24 * 3600))
@@ -1159,8 +1228,8 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
                 let router = router.clone();
                 tokio::spawn(async move {
                     loop {
-                        let Ok((stream, _)) = local.accept().await else { continue };
-                        let router = router.clone();
+                        let Ok((stream, peer)) = local.accept().await else { continue };
+                        let router = router.clone().layer(Extension(Peer(peer.ip().to_string())));
                         tokio::spawn(async move {
                             let service = hyper_util::service::TowerToHyperService::new(router);
                             let serving = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -1170,8 +1239,10 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
                 });
             }
             loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
-                let (router, tls) = (router.clone(), tls.clone());
+                let Ok((stream, peer)) = listener.accept().await else { continue };
+                // Where each request of the connection came from, for what is kept of it.
+                let router = router.clone().layer(Extension(Peer(peer.ip().to_string())));
+                let tls = tls.clone();
                 tokio::spawn(async move {
                     let service = hyper_util::service::TowerToHyperService::new(router);
                     let serving = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -1195,6 +1266,32 @@ pub fn serve(server: &Server, address: &str, plain: bool) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plugins_hear_of_a_link_without_the_addresses_the_log_keeps() {
+        let identity = crate::state::Identity {
+            provider: "hello".to_owned(),
+            subject: "id-mallory".to_owned(),
+            login: "mallory".to_owned(),
+            name: None,
+            email: None,
+        };
+        let opened =
+            Some(("opened with a token on 2026-11-23 10:12:05 UTC".to_owned(), Some("203.0.113.9".into())));
+        let (kept, told) = link_said("bob", &identity, opened, "198.51.100.7");
+        assert_eq!(
+            kept["what"],
+            "bob: hello:mallory, in a browser at 198.51.100.7, through a session of bob opened with a token \
+             on 2026-11-23 10:12:05 UTC from 203.0.113.9"
+        );
+        assert_eq!(told["what"], "bob: hello:mallory");
+        assert_eq!(
+            told["how"],
+            "in a browser, through a session of bob opened with a token on 2026-11-23 10:12:05 UTC"
+        );
+        let told = told.to_string();
+        assert!(!told.contains("198.51.100.7") && !told.contains("203.0.113.9"), "{told}");
+    }
 
     #[test]
     fn the_sign_in_cookie_is_named_for_how_the_server_is_served() {

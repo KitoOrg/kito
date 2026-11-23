@@ -344,6 +344,12 @@ itself may give the files it starts with instead: `files` of
 `server.repo_add`, at most 32 texts of 256 KiB each, with their paths
 ([ADR 0018](docs/adr/0018-repositories-from-afar.md), amended).
 
+An archived repository keeps its name: no other is added under it until
+it is brought back or deleted. A server that made two of one name before
+0.39.5 lists the name among both in `kito repos all`; an owner who
+deletes one says which (`kito repos delete backend --confirm backend
+--archived`, or `--live`).
+
 ### Search and numbers
 
 ```bash
@@ -1039,6 +1045,7 @@ would leave them with no way to sign in is refused.
 kito-server --dir /srv/kito user link bob github:bob   # he keeps his token
 kito-server --dir /srv/kito user unlink bob github
 kito-server --dir /srv/kito user token bob             # a new one, printed once
+kito-server --dir /srv/kito user token bob --alone     # it leaked: a new one, and nothing else
 kito-server --dir /srv/kito user token bob --remove    # sign-in only
 kito-server --dir /srv/kito user list                  # bob [token, github:bob] (member): ...
 ```
@@ -1053,8 +1060,15 @@ kito people unlink bob github
 kito people token bob             # prints the new token once
 kito people token                 # your own: this directory goes on with it
 kito people token --remove        # your own, taken away
+kito people token bob --alone     # bob's leaked: every identity unlinked too
 kito people unlink github         # your own
 ```
+
+A token is the person: whoever holds it can sign in to the server's
+pages with it and link an account of their own, and a new token does
+not take that account away. A new token says how the person signs in
+afterwards; when one leaked, `--alone` gives a new token, unlinks every
+identity and ends every session at once, and says what it unlinked.
 
 An account of your own is linked by signing in to it, from the server's
 pages (`/-/sign-in/github?link=1`): naming a login proves nothing. A new

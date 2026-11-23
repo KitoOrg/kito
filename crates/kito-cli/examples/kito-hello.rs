@@ -18,8 +18,10 @@
 //! that does not exist.
 //!
 //! For a server (ADR 0006): `kito-hello server-event` writes a line for
-//! the event in a file of its own under the server's directory, and
-//! fails for one that says `explode`; `kito-hello greet [...]`, a command
+//! the event in a file of its own under the server's directory, fails
+//! for one that says `explode`, and for one that says `linger` leaves a
+//! child behind that holds its output (`kito-hello sleep <seconds>`);
+//! `kito-hello greet [...]`, a command
 //! it adds to `kito-server`, says where it runs and what it was told.
 //! `kito-hello serve-pages` serves one page, which says what the server
 //! told it with the request, until its standard input closes.
@@ -53,6 +55,11 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("exit") => ExitCode::from(args.get(1).and_then(|code| code.parse().ok()).unwrap_or(0u8)),
+        Some("sleep") => {
+            let seconds = args.get(1).and_then(|seconds| seconds.parse().ok()).unwrap_or(1);
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            ExitCode::SUCCESS
+        }
         Some("ask") => {
             let method = args.get(1).map(String::as_str).unwrap_or("ping");
             let params =
@@ -157,6 +164,12 @@ fn main() -> ExitCode {
             if text("what").contains("explode") {
                 eprintln!("hello: it exploded");
                 return ExitCode::from(1);
+            }
+            // For one that says `linger` it leaves a child behind, which
+            // keeps what it prints open for 20 seconds.
+            if text("what").contains("linger") {
+                let me = std::env::current_exe().unwrap_or_default();
+                let _ = std::process::Command::new(me).args(["sleep", "20"]).spawn();
             }
             let dir = PathBuf::from(said("KITO_SERVER_DIR")).join("plugins/hello");
             let _ = std::fs::create_dir_all(&dir);

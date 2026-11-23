@@ -167,3 +167,81 @@ What follows from it:
   lock for more than five seconds, was taken over, and lost it between
   its last look and the moment it puts its file in place. Nothing holds
   the lock that long: what is slow is outside it.
+
+## Amended 2026-11-23 (0.39.5): the lock, and what the plugins are told
+
+Found when 0.39.3 was reviewed a second time. A lock older than five
+seconds was taken by removing a file: two that waited could both think
+they had it, and a holder that stalled lost it while it lived.
+`write_sessions` looked only before it staged, under one fixed name, so
+a sign-out answered as made could be written back; two holders of the
+audit log's lock chained to the same line, and `audit verify` then said
+the log was tampered with. The thread that tells the plugins could die
+or stick, and some events went to them on another way, out of order.
+
+- **The operating system holds the lock.** `.lock` is a file that stays;
+  it is locked (`flock` on Unix, `LockFileEx` on Windows, through the
+  standard library) and let go when its holder closes it or its process
+  ends, however it ends. Nothing is taken over: a holder that stalls
+  keeps it, whoever waits is told after two seconds as before, and after
+  a crash nobody waits. What a lock said of whose it was, its age, and
+  the look before writing are gone, and so is the window the last point
+  of the amendment above leaves open. Within a process each taker opens
+  the file anew, so threads exclude each other as processes do.
+- **The same for what is written beside the configuration**: the audit
+  log (`audit/.lock`), when each person was last here (`seen/.lock`) and
+  the history of settings (`settings/.lock`) are read, changed and
+  written under a lock of their own, each staged under a name of its
+  own. `sessions.toml` is staged as `server.toml` is
+  (`sessions.toml.<pid>-<n>.new`) and swept the same way. A repository
+  is archived and brought back with the server's lock held, as it is
+  renamed and deleted.
+- **Sessions a change ended stay ended**, when the change is then not
+  written (`server.toml` changed meanwhile, a full disk): that is kept in
+  the log and told, and whoever asked reads it (`…: nothing was written;
+  ask again; 2 sessions of bob had already ended`).
+- **What the plugins are told, and in what order.** Every event is
+  kept in the audit log before whoever asked is answered, and queued; one
+  thread of the process tells them, one at a time, in the order they
+  were queued. An event of a change (of the configuration, the sessions,
+  the people, a repository added, archived, brought back, renamed or
+  deleted) has its line written and its place in the queue taken while
+  the lock of what made it is still held: inside the change where there
+  is one (`Change::then_tell`), before the lock is let go where the
+  operation holds it itself. The audit log's lock is taken inside the
+  server's, never the other way. What holds, then:
+  - **The audit log has the one order** in which the server was changed,
+    across all its processes: every such line is written with the
+    server's lock held. A plugin that must know what came first reads
+    the log.
+  - **The plugins hear events in the order they were made within one
+    process.** The serving server, each `kito-server stdio` (a client
+    over SSH) and each command on the server's machine has its own
+    queue, and the runs of their plugins are not ordered against one
+    another. Events that are no change of the server (a sign-in, a
+    plugin installed, a backup made, a plugin that failed) are kept and
+    told when they happen, in no order against the changes.
+  - The plugins may hear of a change while its answer is on its way;
+    they hear no token.
+  - A plugin's run is bounded as a whole by its timeout, and what it
+    prints is read for a second more once it has ended, its deadline
+    passed or not (a child it leaves behind holds nobody up, and one
+    that ends near its time loses nothing); nothing in that thread stops
+    on a standard error that is gone; a process that leaves waits for
+    what it queued, two minutes in all, then says on its standard error
+    which events it gave up on, and goes. An event the process did not
+    get to tell before it stopped is in the audit log only. A plugin that
+    fails to hear of `plugin_failed` is kept, and not told on: two that
+    failed on it would tell each other for ever.
+- **What cannot be read or written is said without where the server
+  is.** When `server.toml` cannot be read, a request over HTTP or a
+  client's connection is answered `the server's configuration cannot be
+  read just now: try again`; when it or the sessions cannot be written,
+  and wherever HTTP answers 500, `the server could not do this just now:
+  its log says why`. Why, with the path, is said on the server's
+  standard error.
+- **When a person was last here is best done**: it is noted if nobody
+  holds its lock at that moment, and else at a later request, never
+  waited for on a thread that answers.
+- `POST /-/session` waits for the lock off the threads that answer, as
+  every other request that may wait for it.

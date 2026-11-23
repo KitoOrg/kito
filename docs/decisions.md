@@ -2004,3 +2004,132 @@ stay beside it, and the file is asked about (a conflict of kind
 The check that takes a line merge (D-183) also asks that no symbol be
 two definitions: a function one side renamed and moved, and the other
 moved elsewhere, is in a line merge under both its names.
+
+### D-190 · A token is the person, and a token that leaked is given alone
+Whoever holds a person's token can attach an account of their own to
+them from a browser, and a new token does not take it away
+([ADR 0006](adr/0006-server-plugins.md), amended): the claim of 0.39.3
+that refusing to link by name stops it was wrong. The flow stays, since
+somebody who has only a token must be able to link an account. A new
+token now says how the person signs in afterwards and, while an
+identity remains, what to do if it leaked; `--alone` (`alone: true`)
+gives a new token, unlinks every identity and ends every session in one
+change, and names what it took away. A link made in a browser keeps in
+the audit log through which session it came, and how, when and from
+where that session was opened. `--alone` is its own command rather than
+what a new token always does: replacing a token is also routine, and
+then the identities a person linked themselves are theirs to keep.
+
+### D-191 · Locks the operating system holds
+A lock was a file that said whose it was, taken over after five
+seconds; two that waited could both take it, and a holder that stalled
+lost it while it lived ([ADR 0014](adr/0014-roles.md), amended). The
+server's lock, the audit log's, and the new ones of `seen/` and
+`settings/` are now held through the standard library (`File::lock`,
+stable since Rust 1.89; the workspace builds with 1.90 at least) on a
+file that is never removed: let go when it is closed or its process
+ends, never taken over, nothing to wait for after a crash. No
+dependency was added.
+
+### D-192 · One way to the plugins, bounded
+Some events were told on the request's thread and others queued, so a
+plugin could hear that dave was removed before he was added; the thread
+that told the queued ones could die on a standard error that was gone,
+or stick on a plugin whose child held its output
+([ADR 0014](adr/0014-roles.md), amended). Every event is now kept at
+once and queued, in a serving process and in a command alike, and told
+in order by one thread that nothing stops: what waits is taken off in a
+guard that runs whatever happens, nothing there panics on a write that
+fails, and a plugin's run is bounded as a whole. A process that leaves
+waits for what it queued for two minutes at most, and
+says what it gave up on.
+
+### D-193 · Sessions a failed change ended are said
+A change that ended sessions and was then not written said that nothing
+was written, and nobody heard that the sessions had ended. They stay
+ended (they must: they may have been opened with what was being taken
+away), so it is kept in the log, told, and added to the error.
+
+### D-194 · What is deleted is the repository named
+The purge of an archived repository deleted a repository in use of the
+same name, since 0.36.0 ([ADR 0018](adr/0018-repositories-from-afar.md),
+amended). Every deletion now says which of the two it means: the purge
+the archived one, an owner by `--archived`, `--live` or `archived:
+true|false`, and with nothing said the only one there is; two and
+nothing said is refused rather than guessed.
+
+### D-195 · What is written beside the configuration is written alone too
+When people were last here and the history of settings were read,
+changed and written by whoever came, under fixed names: two at once lost
+a line. Archiving and bringing back moved directories with no lock. Each
+now has a lock and staged files of its own name. A configuration that
+cannot be read is said over HTTP without the server's directory, which
+goes to its standard error; and `POST /-/session` waits for the lock off
+the threads that answer.
+
+### D-196 · A name is one repository's
+What people are given, old names, the history of settings and the
+kitchens that name a repository are all said under its name. A
+repository added under the name of an archived one took them all: it
+was open to whoever had the archived one, since 0.36.0
+([ADR 0018](adr/0018-repositories-from-afar.md), amended). Rather than
+key all of these by something other than the name, a name is one
+repository's, an archived one's too: adding under it is refused, the
+name is taken with the lock held, and a repository deleted leaves
+nothing under its name (no history, nobody's kitchen). Pairs made
+before 0.39.5 stay readable: what was given under the name counts for
+the one in use.
+
+### D-197 · Nothing of a deletion or an archive is undone or guessed
+A deletion moved its directory aside before the configuration was
+written, and moved it back after the lock was let go, ignoring a
+failure: a repository could be swept while its owner read that nothing
+changed. It is now one lock, in one order (written, then moved, never
+moved back), and what is moved aside is always swept. Archiving wrote
+its date after the move, and a missing date read as 1970, which is due:
+the date now comes first, a missing one is never due and is dated by
+the purge when it finds it, and the purge looks again, with the lock
+held, at each one it is about to delete.
+
+### D-198 · A client asks which only of a server that hears it
+An older server ignores `archived` and deletes the repository in use.
+The greeting already says the server's version (`server`), so the
+client keeps it and refuses `--archived` and `--live` before sending
+anything when the server is not known to be 0.39.5 or later.
+
+### D-199 · Told in the order made, under the change's lock
+Two people's changes were kept and queued after each change let its
+lock go, so they could be heard in the other order. What a change tells
+is now kept and queued while it holds the lock; the audit log's lock is
+taken inside, never the other way, so no order of locks is added. The
+plugins may then hear of a change while its answer is on its way; they
+hear no token, and the answer does not wait for them. `told` waits two
+minutes in all rather than ten minutes from the last thing told.
+
+### D-200 · Nothing is built under its name
+A repository took its name first (a directory made under the lock) and
+was filled after: a half-made one counted as a repository once Kito had
+written its format, and an addition or an upload that failed removed
+whatever had the name by then, another's repository too
+([ADR 0018](adr/0018-repositories-from-afar.md), amended). Every way of
+making one now builds it in `repos/.adding-<name>-<random>` and, whole
+and closed, gives it its name in one step under the lock; what fails
+removes only what it made. Neither Kito's store nor git's clone keeps
+the directory it was made in, so the move is all there is to it, as for
+a rename. A rename that is not written is put back under the same lock.
+
+### D-201 · A deleted repository is put beside where it was
+Round two put it in the server's directory; where `repos/` is on another
+disk the move failed every time, after nobody was given the repository
+any more. It goes to `.deleted-…` beside where it was, and what is left
+of its name (history, kitchens) is taken away under the lock of the
+deletion, before another repository can take the name. A move that fails
+leaves a line in the audit log.
+
+### D-202 · One order is the log's; plugins hear their process's
+Every event of a change, a repository's too, is kept and queued with
+the lock of what made it held. That orders the audit log across all of
+a server's processes; it orders what plugins hear only within one
+process, since each tells its own. This is what ADR 0014 says now,
+rather than an order across processes that was never kept: a plugin
+that needs it reads the log.

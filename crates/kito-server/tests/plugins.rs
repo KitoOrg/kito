@@ -201,6 +201,62 @@ fn a_plugin_is_told_what_happens_on_the_server() {
     }
 }
 
+/// A command of the server, run until it ends or for `within` at most:
+/// whether it ended by then, and how it ended. `closed`: its standard
+/// error is closed before it writes anything there, as when the SSH
+/// connection of `kito-server stdio` has gone.
+fn within(dir: &Path, args: &[&str], within: std::time::Duration, closed: bool) -> Option<bool> {
+    use std::process::Stdio;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kito-server"));
+    command
+        .arg("--dir")
+        .arg(dir)
+        .args(args)
+        .env("KITOD_BIN", kitod())
+        .env("KITO_CONFIG_DIR", dir.join(".personal-config"))
+        .stdout(Stdio::null())
+        .stderr(if closed { Stdio::piped() } else { Stdio::null() });
+    let mut child = command.spawn().unwrap();
+    drop(child.stderr.take());
+    let asked = std::time::Instant::now();
+    while asked.elapsed() < within {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status.success());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
+#[test]
+fn a_plugin_that_leaves_a_child_or_a_stderr_that_is_gone_stops_nothing() {
+    let (tmp, dir) = new_server();
+    let source = hello_plugin(tmp.path(), HELLO);
+    ok(&dir, &["plugin", "add", "--path", source.to_str().unwrap()]);
+    ok(&dir, &["plugin", "enable", "hello"]);
+    let log = dir.join("plugins/hello/events.log");
+    let told = || fs::read_to_string(&log).unwrap_or_default();
+    let second = std::time::Duration::from_secs(1);
+
+    // It leaves a child behind that keeps its output open for 20 seconds:
+    // it was told, and the command goes on long before that.
+    assert_eq!(within(&dir, &["user", "add", "linger"], second * 10, false), Some(true));
+    assert!(told().contains("user_added linger (member)"), "{}", told());
+    // And the next is told as well.
+    ok(&dir, &["user", "add", "dave"]);
+    assert!(told().contains("user_added dave (member)"), "{}", told());
+
+    // Nobody reads what the server says any more: a plugin that fails is
+    // said nowhere, the next event is told, and the command ends.
+    assert_eq!(within(&dir, &["user", "add", "explode"], second * 10, true), Some(true));
+    assert_eq!(within(&dir, &["user", "add", "erin"], second * 10, true), Some(true));
+    assert!(told().contains("user_added erin (member)"), "{}", told());
+    let listed = ok(&dir, &["user", "list"]);
+    assert!(listed.contains("explode") && listed.contains("erin"), "{listed}");
+}
+
 const LEAVES: &str = r#"name = "hello"
 version = "0.9.0"
 api = 2

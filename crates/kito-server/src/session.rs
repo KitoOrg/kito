@@ -397,7 +397,9 @@ fn sign_in(server: &Server, asked: &Value, reader: &mut dyn BufRead, writer: &mu
         let server = &now;
         let opened = server.signed_in(&identity).and_then(|name| {
             // Theirs still when the session is written: not unlinked meanwhile.
-            let token = server.open_session(&name, |now| now.signs_in_as(&identity, &name))?;
+            let with = (identity.written(), None);
+            let token =
+                server.open_session(&name, (&with.0, with.1), |now| now.signs_in_as(&identity, &name))?;
             token.map(|token| (token, name)).ok_or_else(|| Server::nobody(&identity))
         });
         return match opened {
@@ -778,7 +780,7 @@ pub fn people(
             .ok_or((rpc::INVALID_PARAMS, format!("missing parameter `{key}`")))
     };
     // What changed since this client connected counts.
-    let mut now = Server::open(&server.dir).map_err(|e| (rpc::INTERNAL_ERROR, e))?;
+    let mut now = Server::open_for_a_request(&server.dir).map_err(|e| (rpc::INTERNAL_ERROR, e))?;
     let admin = user.is_admin();
     let owner = user.server_role == ServerRole::Owner;
     // And what changes while this is answered: nothing is changed for
@@ -840,6 +842,10 @@ pub fn people(
                 Some(word) => Some(Role::of_word(word).map_err(|why| (rpc::INVALID_PARAMS, why))?),
                 None => None,
             };
+            let what = match given {
+                Some(given) => format!("{person} may {} in {repo}", given.word()),
+                None => format!("{person} may no longer use {repo}"),
+            };
             let changed = now.change(|change| -> Result<bool, No> {
                 // Theirs to say still, by what they may do here now.
                 who.standing(change)?;
@@ -853,15 +859,12 @@ pub fn people(
                         ),
                     ));
                 }
-                Ok(change.grant(person, repo, given)?)
+                let changed = change.grant(person, repo, given)?;
+                if changed {
+                    change.then_tell("role_changed", json!({ "user": person, "repo": repo, "role": given.map(Role::word), "by": name, "what": what }));
+                }
+                Ok(changed)
             })?;
-            let what = match given {
-                Some(given) => format!("{person} may {} in {repo}", given.word()),
-                None => format!("{person} may no longer use {repo}"),
-            };
-            if changed {
-                now.tell("role_changed", json!({ "user": person, "repo": repo, "role": given.map(Role::word), "by": name, "what": what }));
-            }
             Ok(json!({ "user": person, "repo": repo, "role": given.map(Role::word), "changed": changed }))
         }
         // How a person signs in: their own to change, whatever their role.
@@ -898,7 +901,11 @@ pub fn people(
                     "a repository comes from a git address or from the files given, not both".to_owned(),
                 ));
             }
-            let with = match from {
+            // Told as it takes its name, with the lock that gives it held.
+            let added = |with: String| {
+                vec![("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{with}") }))]
+            };
+            match from {
                 // An address elsewhere: not a directory of the server's own machine.
                 Some(url) if !is_remote_git(url.trim()) => {
                     return Err(refused(format!(
@@ -907,24 +914,25 @@ pub fn people(
                     )))
                 }
                 Some(url) => {
-                    now.add_repo_from_git(&repo, url.trim(), token).map_err(refused)?;
-                    format!(" from {url}")
+                    let told = added(format!(" from {url}"));
+                    now.add_repo_from_git(&repo, url.trim(), token, told)
+                        .map_err(|why| refused(now.without_dir(why)))?;
                 }
                 None => {
                     let files = first_files(params)?;
-                    now.add_repo(&repo, None, files.as_ref(), false).map_err(refused)?;
-                    match params.get("files").and_then(Value::as_array).map_or(0, Vec::len) {
+                    let with = match params.get("files").and_then(Value::as_array).map_or(0, Vec::len) {
                         0 => String::new(),
                         1 => ", with 1 file given".to_owned(),
                         given => format!(", with {given} files given"),
-                    }
+                    };
+                    now.add_repo_told(&repo, None, files.as_ref(), false, added(with))
+                        .map_err(|why| refused(now.without_dir(why)))?;
                 }
             };
             // Whoever adds it maintains it: given once it is there, to
             // whoever is an admin still (`only_while`), however long the
             // clone took.
             let _ = now.grant(name, &repo, Some(Role::Maintain));
-            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}{with}") }));
             Ok(json!({ "name": repo }))
         }
         "server.repo_upload_begin" => {
@@ -960,10 +968,13 @@ pub fn people(
                     "a repository comes from what was sent or from the files given, not both".to_owned(),
                 ));
             }
+            let what = format!("{repo}, sent from {name}'s machine ({kind})");
+            let told = vec![("repo_added", json!({ "repo": repo, "by": name, "what": what }))];
+            // Made aside, and given its name once it is whole (ADR 0018,
+            // amended): what fails takes away what was made here, and
+            // nothing that has the name.
             let result = (|| -> Result<(), String> {
-                if now.repo(&repo).is_some() || now.dir.join("archived").join(&repo).exists() {
-                    return Err(format!("the server already has something called `{repo}`"));
-                }
+                now.name_free(&repo)?;
                 match kind {
                     // A Kito repository as it was on the machine it came from.
                     "kito" => {
@@ -972,34 +983,38 @@ pub fn people(
                             .ok_or("the key of the upload is not one")?;
                         let mut fixed = [0u8; 32];
                         fixed.copy_from_slice(&key);
-                        crate::state::check_repo_name(&repo)?;
-                        let root = now.dir.join("repos").join(&repo);
-                        let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                        if let Err(why) = kitod::archive::read(file, &fixed, &root) {
-                            let _ = std::fs::remove_dir_all(&root);
+                        let aside = now.adding_dir(&repo)?;
+                        let read = std::fs::File::open(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|file| kitod::archive::read(file, &fixed, &aside).map(|_| ()))
+                            .and_then(|()| {
+                                match aside.join(kito_store::STORE_DIR).join("format").is_file() {
+                                    true => Ok(()),
+                                    false => Err("what was sent is not a Kito repository".to_owned()),
+                                }
+                            });
+                        if let Err(why) = read {
+                            let _ = std::fs::remove_dir_all(&aside);
                             return Err(why);
                         }
-                        if now.repo(&repo).is_none() {
-                            let _ = std::fs::remove_dir_all(&root);
-                            return Err("what was sent is not a Kito repository".into());
-                        }
-                        Ok(())
+                        now.take_name(&repo, &aside, told).map(|_| ())
                     }
                     // A git repository, as a bundle of its history.
-                    "git" => now.add_repo(&repo, Some(&path.to_string_lossy()), None, true).map(|_| ()),
+                    "git" => {
+                        now.add_repo_told(&repo, Some(&path.to_string_lossy()), None, true, told).map(|_| ())
+                    }
                     other => Err(format!("`{other}`: an upload is `kito` or `git`")),
                 }
             })();
             let _ = std::fs::remove_file(&path);
-            result.map_err(refused)?;
+            // Where the server keeps what was sent is not said to whoever sent it.
+            result.map_err(|why| refused(now.without_dir(why)))?;
             let _ = now.grant(name, &repo, Some(Role::Maintain));
-            now.tell("repo_added", json!({ "repo": repo, "by": name, "what": format!("{repo}, sent from {name}'s machine ({kind})") }));
             Ok(json!({ "name": repo }))
         }
         "server.repo_archive" => {
             let repo = text("name")?.to_owned();
-            now.archive_repo(&repo, name).map_err(refused)?;
-            now.tell("repo_archived", json!({ "repo": repo, "by": name, "what": format!("{repo}, deleted in {} days", crate::state::KEEP_ARCHIVED_DAYS) }));
+            now.archive_repo(&repo, Some(name)).map_err(refused)?;
             Ok(json!({ "name": repo }))
         }
         "server.repo_unarchive" | "server.repo_delete" if !owner => {
@@ -1007,8 +1022,7 @@ pub fn people(
         }
         "server.repo_unarchive" => {
             let repo = text("name")?.to_owned();
-            now.unarchive_repo(&repo).map_err(refused)?;
-            now.tell("repo_unarchived", json!({ "repo": repo, "by": name, "what": repo }));
+            now.unarchive_repo(&repo, Some(name)).map_err(refused)?;
             Ok(json!({ "name": repo }))
         }
         "server.repo_delete" => {
@@ -1019,17 +1033,20 @@ pub fn people(
                     format!("to delete `{repo}`, give its name again as `confirm`"),
                 ));
             }
-            now.delete_repo(&repo).map_err(refused)?;
-            now.tell("repo_deleted", json!({ "repo": repo, "by": name, "what": repo }));
-            Ok(json!({ "name": repo }))
+            // Which of the name: the archived one, or the one in use.
+            use crate::state::Which;
+            let asked = match params.get("archived") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(true)) => Some(Which::Archived),
+                Some(Value::Bool(false)) => Some(Which::Live),
+                Some(_) => return Err((rpc::INVALID_PARAMS, "`archived` is true or false".to_owned())),
+            };
+            let archived = now.delete_repo(&repo, asked, Some(name)).map_err(refused)? == Which::Archived;
+            Ok(json!({ "name": repo, "archived": archived }))
         }
         "server.repo_rename" => {
             let (from, to) = (text("from")?.to_owned(), text("to")?.to_owned());
-            now.rename_repo(&from, &to).map_err(refused)?;
-            now.tell(
-                "repo_renamed",
-                json!({ "repo": to, "by": name, "what": format!("{from} is {to} now") }),
-            );
+            now.rename_repo(&from, &to, Some(name)).map_err(refused)?;
             Ok(json!({ "from": from, "name": to }))
         }
         // The audit log and the backups (ADR 0017), for admins.
@@ -1106,13 +1123,16 @@ pub fn people(
                 if given >= ServerRole::Admin && !owner {
                     return Err(No(rpc::REFUSED, owners_name.to_owned()));
                 }
-                Ok(change.add_user(person, email, &[], given, identity.as_ref())?)
+                let token = change.add_user(person, email, &[], given, identity.as_ref())?;
+                // Kept and queued in the order the changes were made; the
+                // plugins hear no token.
+                let what = format!("{person} ({})", given.word());
+                change.then_tell(
+                    "user_added",
+                    json!({ "user": person, "role": given.word(), "by": name, "what": what }),
+                );
+                Ok(token)
             })?;
-            // Kept now, and told once the answer is on its way: it has
-            // their token, which is said this once.
-            let what = format!("{person} ({})", given.word());
-            let added = json!({ "user": person, "role": given.word(), "by": name, "what": what });
-            now.tell_after(vec![("user_added", added)]);
             // What they connect with: the port the server listens on, its certificate.
             let how = clients(&now);
             Ok(
@@ -1138,18 +1158,24 @@ pub fn people(
                     return Err(No(rpc::REFUSED, why));
                 }
                 match given {
-                    None => Ok(change.remove_user(person)?),
+                    None => {
+                        change.remove_user(person)?;
+                        change.then_tell("user_removed", json!({ "user": person, "by": name, "what": person }));
+                        Ok(())
+                    }
                     Some(given) if given >= ServerRole::Admin && !owner => {
                         Err(No(rpc::REFUSED, owners_name.to_owned()))
                     }
-                    Some(given) => Ok(change.set_server_role(person, given)?),
+                    Some(given) => {
+                        change.set_server_role(person, given)?;
+                        change.then_tell("role_changed", json!({ "user": person, "server_role": given.word(), "by": name, "what": format!("{person}: {}", given.word()) }));
+                        Ok(())
+                    }
                 }
             })?;
             let Some(given) = given else {
-                now.tell("user_removed", json!({ "user": person, "by": name, "what": person }));
                 return Ok(json!({ "user": person, "removed": true }));
             };
-            now.tell("role_changed", json!({ "user": person, "server_role": given.word(), "by": name, "what": format!("{person}: {}", given.word()) }));
             Ok(json!({ "user": person, "role": given.word() }))
         }
         _ => Err((
@@ -1229,59 +1255,87 @@ fn change_sign_in(
         }
     };
     may(now)?;
-    // What happened is kept before the answer, and told to the plugins
-    // once the answer is on its way (`tell_after`): the change, then each
-    // session it ended. A plugin that is slow holds no token back.
+    // What happened is kept and queued for the plugins in the change that
+    // made it (`then_tell`), in the order the changes were made: the
+    // change, then each session it ended. They are told on a thread of
+    // their own: a plugin that is slow holds no token back.
     match method {
         "server.people_link" => {
             let identity = now.look_up(text("identity")?).map_err(|why| (rpc::REFUSED, why))?;
             // The plugin took its time: who may is asked again, where the
             // link is made.
-            let linked = now.change(|change| -> Result<bool, No> {
+            now.change(|change| -> Result<(), No> {
                 may(change)?;
-                Ok(change.link(person, &identity)?)
+                if change.link(person, &identity)? {
+                    let what = format!("{person}: {}", identity.written());
+                    let event =
+                        json!({ "user": person, "identity": identity.key(), "by": name, "what": what });
+                    change.then_tell("identity_linked", event);
+                }
+                Ok(())
             })?;
-            if linked {
-                let what = format!("{person}: {}", identity.written());
-                let event = json!({ "user": person, "identity": identity.key(), "by": name, "what": what });
-                now.tell_after(vec![("identity_linked", event)]);
-            }
         }
         "server.people_unlink" => {
             let way = text("method")?;
-            let (login, ended) = now.change(|change| -> Result<(String, usize), No> {
+            now.change(|change| -> Result<(), No> {
                 may(change)?;
-                Ok(change.unlink(person, way, who.session())?)
+                let (login, ended) = change.unlink(person, way, who.session())?;
+                let event = json!({ "user": person, "by": name, "what": format!("{person}: {login}") });
+                change.then_tell_all(Server::with_sessions_ended(
+                    ("identity_unlinked", event),
+                    person,
+                    ended,
+                ));
+                Ok(())
             })?;
-            let event = json!({ "user": person, "by": name, "what": format!("{person}: {login}") });
-            now.tell_after(Server::with_sessions_ended(("identity_unlinked", event), person, ended));
         }
         _ => {
-            let remove = match params.get("remove") {
-                None | Some(Value::Null) => false,
-                Some(Value::Bool(remove)) => *remove,
-                Some(_) => return Err((rpc::INVALID_PARAMS, "`remove` is true or false".to_owned())),
+            let yes_or_no = |key: &str| match params.get(key) {
+                None | Some(Value::Null) => Ok(false),
+                Some(Value::Bool(yes)) => Ok(*yes),
+                Some(_) => Err((rpc::INVALID_PARAMS, format!("`{key}` is true or false"))),
             };
-            if !remove {
-                let (token, replaced, ended) = now.change(|change| -> Result<(String, bool, usize), No> {
-                    may(change)?;
-                    Ok(change.change_token(person, who.session())?)
-                })?;
-                let what = match replaced {
-                    true => person.to_owned(),
-                    false => format!("{person}, who had none"),
-                };
-                let event = json!({ "user": person, "replaced": replaced, "by": name, "what": what });
-                now.tell_after(Server::with_sessions_ended(("token_changed", event), person, ended));
-                // Said this once, to whoever asked: the server keeps what it hashes to.
-                return Ok(json!({ "user": person, "token": token }));
+            let (remove, alone) = (yes_or_no("remove")?, yes_or_no("alone")?);
+            if alone && remove {
+                return Err((
+                    rpc::INVALID_PARAMS,
+                    "`alone` is a new token and nothing else, and `remove` takes the token away: one or the \
+                     other"
+                        .to_owned(),
+                ));
             }
-            let ended = now.change(|change| -> Result<usize, No> {
+            if alone {
+                return token_alone(now, who, person, &may);
+            }
+            if !remove {
+                let token = now.change(|change| -> Result<String, No> {
+                    may(change)?;
+                    let (token, replaced, ended) = change.change_token(person, who.session())?;
+                    let what = match replaced {
+                        true => person.to_owned(),
+                        false => format!("{person}, who had none"),
+                    };
+                    let event = json!({ "user": person, "replaced": replaced, "by": name, "what": what });
+                    change.then_tell_all(Server::with_sessions_ended(
+                        ("token_changed", event),
+                        person,
+                        ended,
+                    ));
+                    Ok(token)
+                })?;
+                // Said this once, to whoever asked: the server keeps what it hashes to. And
+                // how they sign in besides: a token replaced does not take away an identity
+                // whoever held it may have attached.
+                let logins = now.config.users.get(person).map(|them| them.logins.clone()).unwrap_or_default();
+                return Ok(json!({ "user": person, "token": token, "logins": logins }));
+            }
+            now.change(|change| -> Result<(), No> {
                 may(change)?;
-                Ok(change.remove_token(person, who.session())?)
+                let ended = change.remove_token(person, who.session())?;
+                let event = json!({ "user": person, "by": name, "what": person });
+                change.then_tell_all(Server::with_sessions_ended(("token_removed", event), person, ended));
+                Ok(())
             })?;
-            let event = json!({ "user": person, "by": name, "what": person });
-            now.tell_after(Server::with_sessions_ended(("token_removed", event), person, ended));
             return Ok(json!({ "user": person, "token": null }));
         }
     }
@@ -1291,6 +1345,25 @@ fn change_sign_in(
         "token": them.is_some_and(User::has_token),
         "logins": them.map(|them| them.logins.clone()).unwrap_or_default(),
     }))
+}
+
+/// `server.people_token { user, alone: true }`: for a token that leaked, a
+/// new token and nothing else to sign in with (`Change::token_alone`), for
+/// whoever may give the person a new token. The answer and the audit log
+/// name the identities taken away.
+fn token_alone(
+    now: &mut Server,
+    who: &Asker,
+    person: &str,
+    may: &dyn Fn(&Server) -> Result<(), No>,
+) -> Result<Value, (i64, String)> {
+    let (token, unlinked) = now.change(|change| -> Result<(String, Vec<String>), No> {
+        may(change)?;
+        let (token, unlinked, replaced, ended) = change.token_alone(person, who.session())?;
+        change.then_tell_all(Server::alone_events(person, Some(who.name), (&unlinked, replaced), ended));
+        Ok((token, unlinked))
+    })?;
+    Ok(json!({ "user": person, "token": token, "logins": [], "unlinked": unlinked }))
 }
 
 /// Whether a request gives a new repository files to start with.
@@ -1590,6 +1663,74 @@ mod tests {
         let gone = json!({ "name": "shop", "confirm": "shop" });
         let (_, why) = people(&began, &who, None, None, "server.repo_delete", &gone).unwrap_err();
         assert_eq!(why, "carol is no longer an owner of this server: nothing was changed");
+        crate::state::told();
+    }
+
+    #[test]
+    fn what_people_change_at_once_is_told_in_the_order_it_was_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = Server::init(dir.path()).unwrap();
+        let ada = server.add_user("ada", None, &[], ServerRole::Owner, None).unwrap().unwrap();
+        let rose = server.add_user("rose", None, &[], ServerRole::Owner, None).unwrap().unwrap();
+        // For each person, one owner adds them while another removes them
+        // as soon as they are there; and each change takes its time
+        // between being written and what it tells.
+        std::fs::write(dir.path().join("pause-telling-in-the-tests"), "").unwrap();
+        let people: Vec<String> = (0..24).map(|n| format!("p{n}")).collect();
+        let asking = |token: String, method: &'static str, person: String| {
+            let dir = dir.path().to_owned();
+            std::thread::spawn(move || {
+                for _ in 0..4000 {
+                    if asks(&dir, &token, method, json!({ "user": person })).is_ok() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                panic!("{method} {person} was never made");
+            })
+        };
+        let threads: Vec<_> = people
+            .iter()
+            .flat_map(|person| {
+                [
+                    asking(ada.clone(), "server.people_add", person.clone()),
+                    asking(rose.clone(), "server.people_remove", person.clone()),
+                ]
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        // The plugins are given each person's addition before their
+        // removal, and so does the audit log keep them.
+        let here = server.dir.clone();
+        let queued: Vec<(String, String)> = crate::state::tests::queued()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(dir, _, _)| *dir == here)
+            .map(|(_, kind, event)| (kind.clone(), event["user"].as_str().unwrap_or_default().to_owned()))
+            .collect();
+        let kept = crate::audit::read(&here, &crate::audit::Filter { limit: 1000, ..Default::default() });
+        let mut kept: Vec<(String, String)> = kept
+            .iter()
+            .filter(|line| line["kind"] == "user_added" || line["kind"] == "user_removed")
+            .map(|line| {
+                let what = line["what"].as_str().unwrap_or_default();
+                (
+                    line["kind"].as_str().unwrap_or_default().to_owned(),
+                    what.split(' ').next().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        kept.reverse();
+        for person in &people {
+            let of = |list: &[(String, String)]| -> Vec<String> {
+                list.iter().filter(|(_, who)| who == person).map(|(kind, _)| kind.clone()).collect()
+            };
+            assert_eq!(of(&queued), ["user_added", "user_removed"], "{person}");
+            assert_eq!(of(&kept), ["user_added", "user_removed"], "{person}");
+        }
         crate::state::told();
     }
 }

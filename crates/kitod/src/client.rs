@@ -169,6 +169,9 @@ pub struct Client {
     /// The process a connection made through a command goes through.
     child: Option<std::process::Child>,
     next_id: u64,
+    /// The version of Kito the server said it is when it was greeted;
+    /// none: a daemon, or a server that does not say.
+    server: Option<String>,
 }
 
 impl Drop for Client {
@@ -204,6 +207,7 @@ impl Client {
             writer: Box::new(writer),
             child: None,
             next_id: 1,
+            server: None,
         })
     }
 
@@ -227,7 +231,7 @@ impl Client {
                         (Box::new(BufReader::new(stream)), Box::new(writer))
                     }
                 };
-                Client { reader, writer, child: None, next_id: 1 }
+                Client { reader, writer, child: None, next_id: 1, server: None }
             }
             (None, [program, args @ ..]) => {
                 let mut child = Command::new(program)
@@ -244,6 +248,7 @@ impl Client {
                     writer: Box::new(stdin),
                     child: Some(child),
                     next_id: 1,
+                    server: None,
                 }
             }
             (None, []) => {
@@ -290,9 +295,17 @@ impl Client {
         }
         let answer = client.say(remote, &json!({ "hello": hello }))?;
         match answer.get("ok") {
-            Some(_) => Ok(client),
+            Some(ok) => {
+                client.server = ok["server"].as_str().map(str::to_owned);
+                Ok(client)
+            }
             None => Err(ClientError::Protocol(format!("unexpected greeting: {answer}"))),
         }
+    }
+
+    /// The version of Kito the server said it is, when it was greeted.
+    pub fn server_version(&self) -> Option<&str> {
+        self.server.as_deref()
     }
 
     /// Signs in to a server in one of the ways its plugins offer (ADR

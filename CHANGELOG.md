@@ -4,6 +4,114 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.5]
+
+The server, after its second review. 0.39.3 was reviewed again before a
+release; this is what that review asked to have fixed, and one fault
+found on the way that was there before.
+
+**The purge of an archived repository deleted a live one of its name.**
+There since 0.36.0, which added archiving. `shop` archived, somebody
+adds a new `shop`, and when the archived one's 30 days were over the
+serving server deleted the new one, its lanes and all; the archived one
+went at the next hourly pass. The purge now deletes the archived
+repository and nothing else; an owner's `repo delete` says which of the
+two it means, and is refused when it could be either
+([ADR 0018](docs/adr/0018-repositories-from-afar.md), amended).
+
+**A repository added under an archived one's name was open to whoever
+had the archived one.** Also there since 0.36.0. What people are given,
+old names, the history of settings and the kitchens that name a
+repository are said under its name: a new `shop` added while an old
+`shop` was archived was at once usable by everybody given the old one,
+reached by its old names, the kitchen of the repositories that had the
+old one as kitchen, and showed the old one's history. A name is now one
+repository's, an archived one's too: adding a repository under it is
+refused (`kito-server repo add`, `kito repos add`, `server.repo_add`).
+A repository deleted leaves nothing under its name: nobody given it, no
+history, nobody's kitchen. **To check a server**: `kito repos all` (or
+`server.repos_all`) on it; a name listed both among the repositories and
+among the archived ones is such a pair. Look at who may use the one in
+use, and which repositories have it as kitchen.
+
+**Whether a server was hit** by the purge: in its audit log (`kito-server audit
+--kind repo --limit 2000`), a repository was lost if a `repo_deleted`
+line saying `<name>, archived 30 days ago` comes after a `repo_added`
+line of the same name that is itself after the `repo_archived` line of
+that name. Two such purge lines for one name, an hour or so apart, say
+the same. What was lost is in the backups made before the purge
+(`kito-server restore <archive> --to <empty directory>`, then its
+`repos/<name>` put back).
+
+- **A token that leaked.** Whoever holds somebody's token can link an
+  account of their own to them from a browser, and a new token did not
+  undo that ([ADR 0006](docs/adr/0006-server-plugins.md), amended; the
+  0.39.3 amendment said otherwise, wrongly):
+  - `kito-server user token` and `kito people token` say how the person
+    signs in afterwards, and, while they keep an identity, what to do if
+    the token was replaced because somebody else had it.
+    `server.people_token` answers `logins` beside `token`.
+  - `kito-server user token <name> --alone`, `kito people token
+    [<name>] --alone` and `server.people_token { user, alone: true }`
+    give a new token and nothing else: every identity unlinked, every
+    session ended but the one asking, in one change. The answer and the
+    audit log name the identities taken away. Not with `--remove`.
+  - A link made in a browser is kept in the audit log with the session
+    it came through, what that session was opened with, when and from
+    which address.
+- **The thread that tells the plugins could die or stick.** A plugin
+  that left a child holding its output stuck it, and a server whose
+  standard error was gone (`kito-server stdio` after its SSH connection
+  left) killed it, and then never exited. A plugin's run is now bounded
+  as a whole, nothing in that thread stops on a write that fails, and a
+  process that leaves waits for the plugins two minutes at most, then
+  says what it gave up on
+  ([ADR 0014](docs/adr/0014-roles.md), amended).
+- **Plugins hear events in the order they were made, within one server
+  process.** Some events went to them at once and others were queued: a
+  plugin could hear that dave was removed, then that he was added, and
+  keep him. Every event of a change now has its audit line written and
+  its place in the queue taken while the lock of that change is held.
+  Each process (the serving server, each `kito-server stdio`, each
+  command on the server's machine) tells its own plugins, unordered
+  against the others; the audit log has the one order for all, and a
+  plugin that needs it reads the log.
+- **The lock is held by the operating system.** A lock older than five
+  seconds was taken over by removing a file: two waiting could both have
+  it, a sign-out answered as made could be written back, and two writers
+  of the audit log chained to the same line (`audit verify` then said it
+  was tampered with). The server's lock and the audit log's are now
+  locks of the system on files that stay: never taken over, and free at
+  once when a process dies. `sessions.toml` is staged under a name of its
+  own, as `server.toml` is.
+- **Sessions a change ended are said when the change is not written**:
+  kept in the audit log, told, and in the error (`…; 2 sessions of bob
+  had already ended`).
+- When people were last here and the history of settings are written
+  under a lock, so that two at once no longer lose a line; archiving and
+  bringing back a repository take the server's lock.
+- **A repository is made aside and takes its name when it is whole.**
+  An upload that failed removed `repos/<name>` whoever it belonged to,
+  and a failed addition removed whatever had the name by then: another's
+  repository could go. A rename that could not be written was moved back
+  after the lock was let go. Both are done under the lock now, and what
+  fails takes away only what it made.
+- **A deletion is written before anything is moved**, and nothing is
+  moved back: a repository could end moved aside, swept a minute later,
+  and its owner told that nothing changed. What is moved aside stays on
+  the disk it was on. An archived repository whose date could not be
+  read was due at once; it is now dated when the purge finds it, and
+  archiving writes the date before it moves anything. `kito repos delete
+  --archived | --live` is refused against a server older than 0.39.5,
+  which would delete the one in use.
+- When `server.toml` cannot be read, or it or the sessions cannot be
+  written, or what was sent to make a repository cannot be read, HTTP
+  and the clients' port say so without the server's directory, which
+  goes to its standard error. The plugins are no longer given a
+  browser's address with a link.
+- `POST /-/session` waits for the lock off the threads that answer
+  requests.
+
 ## [0.39.4]
 
 What tests on real merges found. Open-source projects' own merges were

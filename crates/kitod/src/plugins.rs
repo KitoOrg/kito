@@ -384,9 +384,53 @@ pub fn run_plugin(
     run_program(program, args, root, &envs, input, timeout)
 }
 
+/// How long what a plugin printed is still read for once it has ended:
+/// a child it left behind may hold its output open for as long as it
+/// lives, and what the plugin itself printed is there by then.
+const READ_AFTER_IT_ENDED: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What is read of a pipe on a thread of its own, as it comes; and a
+/// word from that thread when the pipe is closed.
+struct Reading {
+    said: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    closed: std::sync::mpsc::Receiver<()>,
+}
+
+impl Reading {
+    fn of(pipe: Option<Box<dyn std::io::Read + Send>>) -> Reading {
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (closing, closed) = std::sync::mpsc::channel();
+        let kept = said.clone();
+        std::thread::spawn(move || {
+            let (mut pipe, mut buffer) = (pipe, [0u8; 8192]);
+            while let Some(pipe) = pipe.as_mut() {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        kept.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&buffer[..read])
+                    }
+                }
+            }
+            let _ = closing.send(());
+        });
+        Reading { said, closed }
+    }
+
+    /// What was read when the pipe closed, or by `until`, whichever is first.
+    fn until(self, until: std::time::Instant) -> Vec<u8> {
+        let _ = self.closed.recv_timeout(until.saturating_duration_since(std::time::Instant::now()));
+        std::mem::take(&mut *self.said.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
 /// Runs a program of a plugin in `dir`, with `envs` and the version of
 /// the API in its environment and `input` on its standard input, and
 /// returns what it printed. `Err`: why it failed.
+///
+/// The run is bounded as a whole: the program by `timeout`, what it is
+/// told with it, and what it prints by a second more once it has ended.
+/// One that does not read its input, or leaves a child behind that keeps
+/// its output open, holds nobody up.
 pub fn run_program(
     program: &Path,
     args: &[&str],
@@ -407,23 +451,16 @@ pub fn run_program(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{}: {e}", program.display()))?;
-    // What it prints is read while it runs: a pipe that fills stops it.
-    let reader = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut said = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut said);
-            }
-            said
-        })
-    };
-    let printed = reader(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let errors = reader(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    if let Some(mut pipe) = child.stdin.take() {
-        // One that does not read what it is told is its own business.
-        let _ = pipe.write_all(input);
-    }
     let deadline = std::time::Instant::now() + timeout;
+    // What it prints is read while it runs: a pipe that fills stops it.
+    let printed = Reading::of(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let errors = Reading::of(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    if let Some(mut pipe) = child.stdin.take() {
+        // One that does not read what it is told is its own business:
+        // told on a thread of its own, which ends when the program does.
+        let input = input.to_vec();
+        std::thread::spawn(move || pipe.write_all(&input));
+    }
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -436,7 +473,10 @@ pub fn run_program(
             Err(e) => return Err(e.to_string()),
         }
     };
-    let (printed, errors) = (printed.join().unwrap_or_default(), errors.join().unwrap_or_default());
+    // Read for a second once it has ended, its deadline passed or not:
+    // one that ends near it does not lose the end of what it said.
+    let until = std::time::Instant::now() + READ_AFTER_IT_ENDED;
+    let (printed, errors) = (printed.until(until), errors.until(until));
     if status.success() {
         return Ok(printed);
     }
@@ -1101,5 +1141,31 @@ mod tests {
         write_config(dir.path(), "web", None).unwrap();
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
         assert!(!text.contains("web"), "{text}");
+    }
+
+    #[test]
+    #[cfg(unix)] // A shell stands for the plugin.
+    fn a_plugin_s_run_is_bounded_whatever_it_leaves_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = Path::new("/bin/sh");
+        let second = std::time::Duration::from_secs(1);
+        let run = |script: &str, input: &[u8], within: u64| {
+            let asked = std::time::Instant::now();
+            let ran = run_program(shell, &["-c", script], dir.path(), &[], input, second * within as u32);
+            (ran, asked.elapsed())
+        };
+        // A child it leaves keeps its output open: what it printed is
+        // what it said, once it has ended.
+        let (ran, took) = run("sleep 20 & echo said", b"", 15);
+        assert_eq!(ran, Ok(b"said\n".to_vec()));
+        assert!(took < second * 5, "{took:?}");
+        // One that reads nothing of a long input is stopped when its time is up.
+        let (ran, took) = run("sleep 20", &vec![b'x'; 1 << 20], 1);
+        assert_eq!(ran, Err("still running after 1 s: stopped".to_owned()));
+        assert!(took < second * 5, "{took:?}");
+        // One that ends just before its time is up is read for a second
+        // more all the same: what is said then is not lost.
+        let (ran, _) = run("(sleep 1.3; echo after) & sleep 0.8; echo said", b"", 1);
+        assert_eq!(ran, Ok(b"said\nafter\n".to_vec()));
     }
 }

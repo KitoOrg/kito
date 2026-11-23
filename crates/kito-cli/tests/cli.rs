@@ -1899,6 +1899,15 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert!(all.contains("pushed") && all.contains("shop2                archived by rose"), "{all}");
     assert!(all.contains("fromgit              is shop2 now"), "{all}");
     assert!(!kito(&admin, &["repos", "delete", "shop2", "--confirm", "shop2"]).status.success());
+    // An archived repository's name is its still.
+    let taken = kito(&admin, &["repos", "add", "shop2"]);
+    let said = String::from_utf8_lossy(&taken.stderr).into_owned();
+    assert!(!taken.status.success() && said.contains("an archived repository is called `shop2`"), "{said}");
+    // This server hears which of two is meant: it is asked, and answers
+    // as it does to an admin.
+    let which = kito(&admin, &["repos", "delete", "shop2", "--confirm", "shop2", "--archived"]);
+    let said = String::from_utf8_lossy(&which.stderr).into_owned();
+    assert!(!which.status.success() && said.contains("only an owner"), "{said}");
 
     // Copies of lanes are for directories connected to a server.
     let own = base.join("own");
@@ -2730,7 +2739,7 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     // name he is himself.
     let said = json(&bobdir, &["--json", "people", "token"]);
     let newer = said["token"].as_str().unwrap().to_owned();
-    assert_eq!(said, serde_json::json!({ "user": "bob", "token": newer, "kept_here": true }));
+    assert_eq!(said, serde_json::json!({ "user": "bob", "token": newer, "logins": [], "kept_here": true }));
     assert!(kept_in(&bobdir).contains(&newer) && !kept_in(&bobdir).contains(&new));
     let said = ok(&bobdir, &["people", "token", "bob"]);
     assert!(said.contains("Your new token on") && said.contains("This directory has it."), "{said}");
@@ -2778,6 +2787,34 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     assert!(errors(&kito(&bobdir, &["repos"])).contains(unknown));
     assert!(!kept_in(&adadir).contains(&given) && ok(&adadir, &["repos"]).contains("shop"));
     ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &given]);
+
+    // A new token takes no identity away: whoever held the one before may
+    // have attached an account of theirs to him. She is told what is left,
+    // and what to do if it leaked.
+    ok(&adadir, &["people", "link", "bob", "hello:bob"]);
+    let said = ok(&adadir, &["people", "token", "bob"]);
+    let left = "bob signs in with a token or as hello:bob.\nIf the token was replaced because somebody else \
+                had it: look at each identity (hello:bob) and unlink what is not bob's (`kito people unlink \
+                bob <method>`), or `kito people token bob --alone`.";
+    assert!(said.contains(left), "{said}");
+    // Given alone, it is all he signs in with: every identity is unlinked.
+    let said = ok(&adadir, &["people", "token", "bob", "--alone"]);
+    let alone = "Unlinked: hello:bob. The token is all bob signs in with now, and their sessions ended.";
+    assert!(said.contains(alone), "{said}");
+    assert!(people(&adadir).contains(&"bob member shop (write); signs in with a token".to_owned()));
+    let said = no(&adadir, &["people", "token", "bob", "--alone", "--remove"]);
+    assert!(said.contains("cannot be used with"), "{said}");
+    ok(
+        &base,
+        &[
+            "connect",
+            &address,
+            "shop",
+            "bob-dir",
+            "--token",
+            &token_in(&ok(&adadir, &["people", "token", "bob", "--alone"])),
+        ],
+    );
 
     // With an identity too, he takes his token away from the directory
     // that connects with it, which is told how to go on: by signing in.

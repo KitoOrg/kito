@@ -289,6 +289,8 @@ for roles), and each person for themselves.
   naming a login**, unless they could change that person anyway. A
   login named proves nothing: whoever held bob's token for a minute
   would attach an account of their own to bob, and be bob for good.
+  (They can all the same, by signing in to it from a browser with a
+  session that token opened: see "a token that leaked", below.)
 - **Who asks is looked at again where the change is made**, on the
   configuration as it is then (ADR 0014, amended): what the request
   came with is theirs still (their token was not changed or taken away,
@@ -426,3 +428,61 @@ What follows from it:
 - The plugins hear of a change of how somebody signs in once it was
   made and answered: after the fact, as every event is told, and for
   these after the answer too. The audit log has it before either.
+
+## Amendment, 2026-11-23: a token that leaked
+
+Found when 0.39.3 was reviewed a second time. The amendment above says
+that nobody linking themselves by naming a login stops "whoever held
+bob's token for a minute". It does not: a token is the person. Whoever
+holds bob's token opens a session with it in a browser, goes to
+`/-/sign-in/<method>?link=1`, signs in to an account of their own, and
+is told that whoever signs in as it is bob from now on (an identity of
+that way bob had, they unlink first: that is bob's to ask). When bob's
+token is then replaced, the sessions end and the identity stays, and
+the stranger signs in as bob. A person who has only a token must be able
+to link an account, so the flow stays. What is true, and what changes:
+
+- **A token is the person, and so is an account linked with it.**
+  Replacing a token does not detach what was attached with it.
+- **A new token says how the person signs in afterwards**, wherever it
+  is asked: `kito-server user token` and `kito people token` print it as
+  `link` and `unlink` do (`bob signs in with a token or as
+  github:mallory.`), and while an identity remains they add a line: if
+  the token was replaced because somebody else had it, look at each
+  identity and unlink what is not theirs, or give a token alone.
+  `server.people_token` answers `logins` beside `token`.
+- **A token alone, for one that leaked**: `kito-server user token
+  <name> --alone`, `kito people token [<name>] --alone`,
+  `server.people_token { user, alone: true }`, for whoever may give the
+  person a new token. A new token; every identity of the person
+  unlinked, whoever linked it; every session of theirs ended but the one
+  the request came through: one change. It is refused together with
+  `--remove` (`remove: true`).
+
+  ```text
+  server.people_token  { user, alone: true }  →  { user, token: "kito_…", logins: [], unlinked: ["github:mallory"] }
+  ```
+
+  Kept and told: `token_changed` with `alone: true` and `unlinked`, whose
+  line names them (`bob, alone: github:mallory unlinked`); then
+  `identity_unlinked` for each, and `session_ended` for each session.
+- **A link made in a browser says through what it came.** A session
+  keeps what it was opened with (`a token`, `github:bob`), when, and the
+  address it was asked from. `identity_linked` from a browser keeps in
+  the audit log through which person's session the link came, how and
+  when that session was opened, and where the browser came back from:
+  `bob: github:mallory, in a browser at 198.51.100.7, through a session
+  of bob opened with a token on 2026-11-23 10:12:05 UTC from
+  203.0.113.9`. The plugins hear `what` as before, and in `how` the same
+  without the addresses, which stay in the log. A
+  session opened before 0.39.5 says it was `opened before sessions said
+  how`. The address is the connection's: behind a proxy, the proxy's.
+
+What follows from it: whoever replaces a token because it leaked gives
+it alone, or reads the identities the answer names and unlinks what is
+not the person's. And since a token is the person, whoever holds it can
+ask for a token alone first, through a session they opened with an
+identity of their own, and lock the person out: an admin puts that
+right with `--alone` too, which gives the person a token of their own
+again and takes the stranger's identity away. The audit log tells, afterwards, that an account was
+linked through a session opened with a token, and when.

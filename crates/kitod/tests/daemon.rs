@@ -286,9 +286,10 @@ fn changes_the_watcher_cannot_see_are_found_by_scanning() {
     assert_eq!(found["ops"], 1);
     let after = status(&mut client).watcher;
     assert!(after.events_unreliable && after.missed_by_watcher == 1, "{after:?}");
-    // At least once a second, and far more often than the normal minute
-    // (the exact value follows how long a scan takes on this machine).
-    assert!((1000..10_000).contains(&after.rescan_interval_ms), "{after:?}");
+    // At least once a second, and far more often than the normal minute:
+    // twenty times what the last scan took, and a scan takes half a second
+    // on a machine that runs every other test at the same time.
+    assert!((1000..20_000).contains(&after.rescan_interval_ms), "{after:?}");
 
     // Later changes arrive by themselves, without events and without sync.
     std::thread::sleep(Duration::from_millis(1200));

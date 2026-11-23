@@ -707,7 +707,7 @@ fn a_token_is_changed_by_its_person_and_by_whoever_may_change_them() {
     assert!(open.call_value("status", json!({})).is_ok());
     let given = admin.call_value("server.people_token", json!({ "user": "bob" })).unwrap();
     let new = token_of(&given);
-    assert_eq!(given, json!({ "user": "bob", "token": new }));
+    assert_eq!(given, json!({ "user": "bob", "token": new, "logins": [] }));
     assert!(new.starts_with("kito_") && new.len() == 5 + 64 && new != world.bob, "{new}");
     assert!(open.call_value("status", json!({})).is_err());
     assert_eq!(refusal(Client::remote(&remote(&address, &world.bob, "shop"), true)), unknown);
@@ -1059,9 +1059,21 @@ fn what_changes_the_server_is_kept_in_a_chain_and_the_server_is_backed_up_whole(
     );
 }
 
+/// Whether any file under `dir` says `text`.
+fn says(dir: &Path, text: &str) -> bool {
+    fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| match entry.path().is_dir() {
+        true => says(&entry.path(), text),
+        false => fs::read(entry.path())
+            .is_ok_and(|bytes| bytes.windows(text.len()).any(|seen| seen == text.as_bytes())),
+    })
+}
+
 #[test]
 fn admins_add_archive_rename_and_owners_delete_repositories() {
     let mut world = World::new();
+    // A repository cloned and imported where it was made aside keeps
+    // nothing of that place: not git, not Kito.
+    assert!(!says(&world.repo("shop"), ".adding-"), "the repository names where it was made");
     let rose = token_in(&ok(&world.dir, &["user", "add", "rose", "--role", "admin"]));
     let olga = token_in(&ok(&world.dir, &["user", "add", "olga", "--role", "owner"]));
     let address = world.serve();
@@ -1132,6 +1144,19 @@ fn admins_add_archive_rename_and_owners_delete_repositories() {
     let said = upload(&mut admin, b"not an archive", "site3", "kito", Some(&key)).unwrap_err().to_string();
     assert!(!world.repo("site3").exists(), "{said}");
     assert!(fs::read_dir(world.dir.join("uploads")).unwrap().next().is_none());
+    // Under a name somebody is still making a repository with (its
+    // directory there, not yet whole), an upload is refused, and takes
+    // nothing of theirs away.
+    fs::create_dir_all(world.repo("site4")).unwrap();
+    fs::write(world.repo("site4").join("being-made"), "kept").unwrap();
+    let said = upload(&mut admin, &fs::read(&packed).unwrap(), "site4", "kito", Some(&key)).unwrap_err();
+    assert!(said.to_string().contains("already has something called `site4`"), "{said}");
+    assert_eq!(fs::read_to_string(world.repo("site4").join("being-made")).unwrap(), "kept");
+    fs::remove_dir_all(world.repo("site4")).unwrap();
+    // What went wrong with what was sent is said without where the server is.
+    let said = upload(&mut admin, b"not a bundle", "site5", "git", None).unwrap_err().to_string();
+    assert!(said.contains("git clone") && !said.contains(world.dir.to_str().unwrap()), "{said}");
+    assert!(!world.repo("site5").exists());
 
     // Renamed: the old name still reaches it.
     admin.call_value("server.repo_rename", json!({ "from": "shop2", "to": "shop3" })).unwrap();
@@ -1174,6 +1199,28 @@ fn admins_add_archive_rename_and_owners_delete_repositories() {
     ok(&world.dir, &["repo", "archive", "journal"]);
     assert!(refused(&world.dir, &["repo", "delete", "journal", "--confirm", "notes"])
         .contains("--confirm journal"));
+    // Its name is its still: no other `journal` is added, on the server's
+    // machine or from afar.
+    let taken = "an archived repository is called `journal`: bring it back, delete it, or give this one \
+                 another name";
+    assert!(refused(&world.dir, &["repo", "add", "journal"]).contains(taken));
+    let said = owner.call_value("server.repo_add", json!({ "name": "journal" })).unwrap_err().to_string();
+    assert!(said.contains(taken), "{said}");
+    assert!(!world.repo("journal").exists());
+    // A server before 0.39.5 could have made two: which one is deleted is
+    // said, and only that one goes.
+    ok(&world.dir, &["repo", "add", "journal2"]);
+    fs::rename(world.repo("journal2"), world.repo("journal")).unwrap();
+    let both = refused(&world.dir, &["repo", "delete", "journal", "--confirm", "journal"]);
+    assert!(both.contains("and an archived one of that name: say which"), "{both}");
+    let said = ok(&world.dir, &["repo", "delete", "journal", "--confirm", "journal", "--archived"]);
+    assert!(said.contains("The archived `journal` is deleted."), "{said}");
+    assert!(!world.dir.join("archived/journal").exists());
+    assert_eq!(fs::read_to_string(world.repo("journal").join("README.md")).unwrap(), "# journal2\n");
+    let asked = json!({ "name": "journal", "confirm": "journal", "archived": true });
+    let gone = owner.call_value("server.repo_delete", asked).unwrap_err().to_string();
+    assert!(gone.contains("no archived repository is called `journal`"), "{gone}");
+    assert!(world.repo("journal").is_dir());
     let audit = ok(&world.dir, &["audit"]);
     for kind in ["repo_added", "repo_renamed", "repo_archived", "repo_unarchived", "repo_deleted"] {
         assert!(audit.contains(kind), "{kind}: {audit}");

@@ -132,11 +132,15 @@ pub fn key_from(file: &Path) -> Result<[u8; 32], String> {
 }
 
 /// `true` for what an archive leaves out: its own folder, the key, the
-/// locks, sockets, and the indexes a repository rebuilds.
+/// locks, sockets, the indexes a repository rebuilds, and what is beside
+/// the repositories without being one: one deleted (`.deleted-…`), one
+/// being made (`.adding-…`).
 fn left_out(relative: &Path, backups: Option<&Path>) -> bool {
     let text = relative.to_string_lossy().replace('\\', "/");
     let name = relative.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let aside = ["repos/.deleted-", "repos/.adding-", "archived/.deleted-"];
     backups.is_some_and(|dir| relative.starts_with(dir))
+        || aside.iter().any(|aside| text.starts_with(aside))
         || text == KEY_FILE
         || text == CREDENTIALS
         || name == ".lock"
@@ -494,13 +498,19 @@ mod tests {
         std::fs::write(server.join("server.toml"), "listen = \"x\"\n").unwrap();
         std::fs::write(server.join("repos/shop/.kito/index/a"), "rebuilt").unwrap();
         std::fs::write(server.join("repos/shop/.kito/lock"), "").unwrap();
+        // Repositories whose deletion was written, not yet removed, and one
+        // being made that has no name yet.
+        for aside in ["repos/.deleted-notes-5f0e", "archived/.deleted-old-5f0e", "repos/.adding-new-5f0e"] {
+            std::fs::create_dir_all(server.join(aside).join(".kito")).unwrap();
+            std::fs::write(server.join(aside).join(".kito/format"), "1").unwrap();
+        }
         let big: Vec<u8> = (0..3 * kitod::archive::CHUNK).map(|i| (i % 251) as u8).collect();
         std::fs::write(server.join("repos/shop/big"), &big).unwrap();
         let (key, new) = key(&server).unwrap();
         assert!(new && !super::key(&server).unwrap().1);
         let out = tmp.path().join("one.kbak");
         let (files, _) = write_archive(&server, &out, &key, None).unwrap();
-        assert_eq!(files, 2, "the key, the index and the lock are left out");
+        assert_eq!(files, 2, "the key, the index, the lock and what is beside the repositories are left out");
 
         let to = tmp.path().join("back");
         assert_eq!(restore(std::fs::File::open(&out).unwrap(), &key, &to).unwrap(), 2);

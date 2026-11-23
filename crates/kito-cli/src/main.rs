@@ -302,6 +302,12 @@ enum ReposCmd {
         /// Its name again, to say it is meant
         #[arg(long, value_name = "NAME")]
         confirm: String,
+        /// The archived one of that name, when one in use has it too
+        #[arg(long, conflicts_with = "live")]
+        archived: bool,
+        /// The one in use, when an archived one has its name too
+        #[arg(long)]
+        live: bool,
     },
     /// Rename one: directories connected with the old name still reach it
     Rename { from: String, to: String },
@@ -358,6 +364,11 @@ enum PeopleCmd {
         /// Take the token away instead: sign-in only from then on
         #[arg(long)]
         remove: bool,
+        /// For a token that leaked: the new token is all they sign in
+        /// with. Every identity is unlinked, whoever linked it, and every
+        /// other session ends
+        #[arg(long, conflicts_with = "remove")]
+        alone: bool,
     },
 }
 
@@ -4002,8 +4013,8 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
             };
             client.call("server.people_unlink", json!({ "user": name, "method": method }))
         }
-        Some(PeopleCmd::Token { name, remove }) => {
-            return people_token(cli, remote, client, name.as_deref(), *remove)
+        Some(PeopleCmd::Token { name, remove, alone }) => {
+            return people_token(cli, remote, client, name.as_deref(), (*remove, *alone))
         }
     }
     .map_err(fail)?;
@@ -4073,16 +4084,17 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
     Ok(())
 }
 
-/// `kito people token [<name>] [--remove]`: a new token, or none. A new
-/// one of the person's own is written in this directory when a token is
-/// what it connects with, so that it keeps working; it is printed either
-/// way, this once.
+/// `kito people token [<name>] [--remove | --alone]`: a new token, or
+/// none; with `--alone`, a new token and nothing else to sign in with. A
+/// new one of the person's own is written in this directory when a token
+/// is what it connects with, so that it keeps working; it is printed
+/// either way, this once.
 fn people_token(
     cli: &Cli,
     mut remote: Remote,
     mut client: Client,
     name: Option<&str>,
-    remove: bool,
+    (remove, alone): (bool, bool),
 ) -> Outcome {
     let root = root_of(cli)?;
     // Whether the person named is who asks: asked before the token
@@ -4091,8 +4103,12 @@ fn people_token(
         None => true,
         Some(name) => client.call::<Value>("server.whoami", json!({})).map_err(fail)?["user"] == name,
     };
-    let mut said: Value =
-        client.call("server.people_token", json!({ "user": name, "remove": remove })).map_err(fail)?;
+    // Asked as before when not alone: a server before 0.39.5 knows no `alone`.
+    let asked = match alone {
+        true => json!({ "user": name, "alone": true }),
+        false => json!({ "user": name, "remove": remove }),
+    };
+    let mut said: Value = client.call("server.people_token", asked).map_err(fail)?;
     let person = said["user"].as_str().unwrap_or("?").to_owned();
     let token = said["token"].as_str().map(str::to_owned);
     // What this directory connects with: a person's token, or a session
@@ -4156,7 +4172,57 @@ fn people_token(
              need this one (`kito connect` them again with it)."
         ),
     }
+    // What else they sign in with, as the server said it: a new token
+    // does not take away an account whoever held the old one attached.
+    let logins: Vec<&str> =
+        said["logins"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let (ended, named) = match own {
+        true => ("your other sessions ended", String::new()),
+        false => ("their sessions ended", format!(" {person}")),
+    };
+    match (alone, said["unlinked"].as_array()) {
+        (true, None) => println!(
+            "This server does not give a token alone: the token was replaced, and every identity is as it \
+             was. Look at each, and unlink what is not theirs (`kito people unlink`)."
+        ),
+        (true, Some(unlinked)) => {
+            let unlinked: Vec<&str> = unlinked.iter().filter_map(Value::as_str).collect();
+            match unlinked.is_empty() {
+                true => println!("There was no identity to unlink: the token is all {person} signs in with."),
+                false => println!(
+                    "Unlinked: {}. The token is all {person} signs in with now, and {ended}.",
+                    unlinked.join(", ")
+                ),
+            }
+        }
+        (false, _) if said.get("logins").is_some() => {
+            let ways = std::iter::once("with a token".to_owned())
+                .chain(logins.iter().map(|login| format!("as {login}")));
+            println!("{person} signs in {}.", ways.collect::<Vec<_>>().join(" or "));
+            if !logins.is_empty() {
+                println!(
+                    "If the token was replaced because somebody else had it: look at each identity ({}) and \
+                     unlink what is not {person}'s (`kito people unlink{named} <method>`), or `kito people \
+                     token{named} --alone`.",
+                    logins.join(", ")
+                );
+            }
+        }
+        (false, _) => {}
+    }
     Ok(())
+}
+
+/// Whether a server of this version hears which of two repositories of
+/// one name is to be deleted (`archived`): 0.39.5 and later. One that says
+/// no version, or one that cannot be read, is taken to be older.
+fn hears_which(version: Option<&str>) -> bool {
+    let parts: Option<Vec<u64>> =
+        version.and_then(|version| version.split(['.', '-']).take(3).map(|part| part.parse().ok()).collect());
+    match parts.as_deref() {
+        Some([major, minor, patch]) => (*major, *minor, *patch) >= (0, 39, 5),
+        _ => false,
+    }
 }
 
 /// `kito audit` (ADR 0017): the server's, for its admins.
@@ -4337,10 +4403,13 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
                 );
             }
             for repo in all["archived"].as_array().into_iter().flatten() {
-                let gone =
-                    utc(repo["deleted_at_ms"].as_u64().unwrap_or(0)).chars().take(10).collect::<String>();
+                // One whose date the server cannot read is dated when it next looks.
+                let gone = match repo["deleted_at_ms"].as_u64() {
+                    Some(at) => format!("deleted on {}", utc(at).chars().take(10).collect::<String>()),
+                    None => "not dated yet".to_owned(),
+                };
                 println!(
-                    "{:<20} archived by {}, deleted on {gone}",
+                    "{:<20} archived by {}, {gone}",
                     repo["name"].as_str().unwrap_or("?"),
                     repo["by"].as_str().unwrap_or("?")
                 );
@@ -4405,8 +4474,19 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
         ReposCmd::Unarchive { name } => {
             client.call("server.repo_unarchive", json!({ "name": name })).map_err(fail)?
         }
-        ReposCmd::Delete { name, confirm } => {
-            client.call("server.repo_delete", json!({ "name": name, "confirm": confirm })).map_err(fail)?
+        ReposCmd::Delete { name, confirm, archived, live } => {
+            // Which of the name, when it is said. A server before 0.39.5
+            // would not hear it, and delete the one in use: it is not asked.
+            let mut asked = json!({ "name": name, "confirm": confirm });
+            if *archived || *live {
+                if !hears_which(client.server_version()) {
+                    return Err("this server is older than 0.39.5 and would delete the repository in use: \
+                                delete it on the server's machine"
+                        .into());
+                }
+                asked["archived"] = json!(*archived);
+            }
+            client.call("server.repo_delete", asked).map_err(fail)?
         }
         ReposCmd::Rename { from, to } => {
             client.call("server.repo_rename", json!({ "from": from, "to": to })).map_err(fail)?
@@ -4425,7 +4505,10 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
         ),
         ReposCmd::Archive { .. } => println!("`{name}` is archived: nobody reaches it, and it is deleted in 30 days."),
         ReposCmd::Unarchive { .. } => println!("`{name}` is back, as it was."),
-        ReposCmd::Delete { .. } => println!("`{name}` is deleted. The backups made before still have it."),
+        ReposCmd::Delete { .. } => match said["archived"] == true {
+            true => println!("The archived `{name}` is deleted. The backups made before still have it."),
+            false => println!("`{name}` is deleted. The backups made before still have it."),
+        },
         ReposCmd::Rename { from, .. } => println!("`{from}` is `{name}` now; what is connected to `{from}` still reaches it."),
         ReposCmd::All => {}
     }
@@ -5656,7 +5739,7 @@ fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_for, utc};
+    use super::{hears_which, remote_for, utc};
 
     #[test]
     fn every_command_of_the_help_is_in_one_group() {
@@ -5714,5 +5797,15 @@ mod tests {
         assert_eq!(utc(951_782_400_000), "2000-02-29 00:00:00");
         assert_eq!(utc(1_794_659_467_000), "2026-11-14 12:31:07");
         assert_eq!(utc(4_102_444_799_999), "2099-12-31 23:59:59");
+    }
+
+    #[test]
+    fn only_a_server_that_hears_which_is_asked_to_delete_one_of_two() {
+        for older in [None, Some(""), Some("0.39.4"), Some("0.36.0"), Some("0.9"), Some("next")] {
+            assert!(!hears_which(older), "{older:?}");
+        }
+        for newer in ["0.39.5", "0.39.10", "0.40.0", "1.0.0", "0.39.5-rc.1"] {
+            assert!(hears_which(Some(newer)), "{newer}");
+        }
     }
 }
