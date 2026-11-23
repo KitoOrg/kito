@@ -10,6 +10,9 @@ publish.workspace = true
 [lib]
 name = "kitod"
 path = "src/lib.rs"
+# Its documentation has no examples to run, and looking for some fails on
+# a build made after clippy's: `ureq` is found with another `rustls`.
+doctest = false
 
 [[bin]]
 name = "kitod"
