@@ -1308,12 +1308,18 @@ about = "Takes out what it set up"
 
 /// A registry of files that lists the plugin of the tests, in `dir`.
 fn registry_with_hello(dir: &Path) {
+    registry_of(dir, FROM_REGISTRY, "0.9.0", 2);
+}
+
+/// A registry of files, in `dir`, that lists the plugin of the tests at
+/// one version: the program of the tests, with the manifest given.
+fn registry_of(dir: &Path, manifest: &str, version: &str, api: u32) {
     let name = format!("kito-hello{}", std::env::consts::EXE_SUFFIX);
     let built = Path::new(env!("CARGO_BIN_EXE_kito-server")).with_file_name("examples").join(&name);
     let packed = dir.join("pack/kito-hello");
     fs::create_dir_all(&packed).unwrap();
     fs::copy(built, packed.join(&name)).unwrap();
-    fs::write(packed.join("kito-plugin.toml"), FROM_REGISTRY).unwrap();
+    fs::write(packed.join("kito-plugin.toml"), manifest).unwrap();
     let registry = dir.join("registry");
     fs::create_dir_all(registry.join("plugins")).unwrap();
     let archive = registry.join("hello.tar.gz");
@@ -1326,12 +1332,77 @@ fn registry_with_hello(dir: &Path) {
         .status();
     assert!(done.unwrap().success());
     let sum = kitod::registry::sha256_hex(&fs::read(&archive).unwrap());
-    let index = json!({ "registry": 1, "plugins": { "hello": { "about": "Says what it is told", "latest": "0.9.0" } } });
+    let index = json!({ "registry": 1, "plugins": { "hello": { "about": "Says what it is told", "latest": version } } });
     fs::write(registry.join("index.json"), index.to_string()).unwrap();
-    let plugin = json!({ "name": "hello", "about": "Says what it is told", "versions": { "0.9.0": {
-        "api": 2, "files": { kitod::registry::platform(): { "url": "hello.tar.gz", "sha256": sum } },
+    let plugin = json!({ "name": "hello", "about": "Says what it is told", "versions": { version: {
+        "api": api, "files": { kitod::registry::platform(): { "url": "hello.tar.gz", "sha256": sum } },
     }}});
     fs::write(registry.join("plugins/hello.json"), plugin.to_string()).unwrap();
+}
+
+/// The plugin that serves the pages, as the registry lists it: a later
+/// version of the one of `PAGES`.
+const PAGES_LATER: &str = r#"name = "hello"
+version = "0.6.0"
+api = 1
+permissions = ["pages", "read"]
+
+[pages]
+mount = "/"
+"#;
+
+#[test]
+fn the_plugin_that_serves_the_pages_is_updated_while_it_serves_them() {
+    let served = Served::start(|dir| {
+        install_hello(dir, PAGES);
+        ok(dir, &["plugin", "enable", "hello"]);
+        registry_of(dir, PAGES_LATER, "0.6.0", 1);
+        ok(dir, &["user", "role", "ada", "admin"]);
+    });
+    let until_served = || {
+        let mut last = 0;
+        for _ in 0..400 {
+            last = served.request("GET", "/", &[], None).status;
+            if last == 200 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("the page answered {last}");
+    };
+    // Its program runs: the page is what it answers.
+    until_served();
+    let opened = served.request("POST", "/-/session", &[], Some(&json!({ "token": served.ada })));
+    let value = opened.head.lines().find_map(|line| line.strip_prefix("set-cookie: kito_session=")).unwrap();
+    let ada = format!("kito_session={}", value.split(';').next().unwrap());
+    let page = [("Cookie", ada.as_str()), ("X-Kito", "1")];
+    let before = served.request("GET", "/-/admin/plugins", &page, None).json();
+    assert_eq!(before["installed"][0]["version"], "0.5.0", "{before}");
+
+    // The version the registry lists takes its place while it runs. On
+    // Windows the program of a plugin that runs cannot be removed: the
+    // version there was is moved aside, and the plugin is installed all
+    // the same.
+    let install = json!({ "action": "install", "name": "hello" });
+    let installed = served.request("POST", "/-/admin/plugins", &page, Some(&install));
+    assert_eq!(installed.status, 200, "{}", installed.body);
+    assert!(
+        installed.json()["done"].as_str().unwrap().contains("hello 0.6.0 is installed"),
+        "{}",
+        installed.body
+    );
+    let now = served.request("GET", "/-/admin/plugins", &page, None).json();
+    let hello = &now["installed"][0];
+    assert_eq!((hello["version"].as_str(), hello["enabled"].as_bool()), (Some("0.6.0"), Some(true)), "{now}");
+    // And the new one serves the pages, with no restart of the server.
+    until_served();
+    // Once more, at once: what the first update left beside is no plugin,
+    // and is in nobody's way.
+    let again = served.request("POST", "/-/admin/plugins", &page, Some(&install));
+    assert_eq!(again.status, 200, "{}", again.body);
+    let now = served.request("GET", "/-/admin/plugins", &page, None).json();
+    assert_eq!(now["installed"].as_array().map(Vec::len), Some(1), "{now}");
+    until_served();
 }
 
 #[test]

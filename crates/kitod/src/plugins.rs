@@ -689,30 +689,127 @@ pub fn install_from(source: &Path) -> Result<Installed, String> {
         return Err(format!("{} is not there: the program of the plugin `{}`", exe.display(), manifest.name));
     }
     let plugins = plugins_dir().ok_or("no place to install plugins in: set KITO_CONFIG_DIR")?;
+    put(&plugins, source, manifest)
+}
+
+/// Where a plugin's directory goes when another takes its place, or when
+/// it is removed: beside it, under a name no plugin can have, so that
+/// nothing takes it for one.
+fn aside(plugins: &Path, name: &str) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    plugins.join(format!(".{name}.gone-{:x}-{now:x}", std::process::id()))
+}
+
+/// Removes what was moved aside before and could not be removed then.
+/// What is still held stays for the next time.
+fn sweep(plugins: &Path) {
+    for entry in std::fs::read_dir(plugins).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.contains(".gone-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Moves a directory to where there is none, or an empty one. Renamed
+/// whole where the system allows it. Windows refuses that for as long as
+/// anything has a file of the directory open, if only for a moment and
+/// to read it (a scanner does, and so does whoever reads a manifest),
+/// and still lets each file be renamed, the program of a plugin that is
+/// running too: there, what is in it is moved one by one, and the
+/// directory left empty is removed. Whatever fails, everything is back
+/// where it was.
+fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    let Err(whole) = std::fs::rename(from, to) else { return Ok(()) };
+    if !from.is_dir() {
+        return Err(whole);
+    }
+    std::fs::create_dir_all(to)?;
+    let mut moved = Vec::new();
+    let one_by_one = (|| -> std::io::Result<()> {
+        let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(from)?.collect::<std::io::Result<_>>()?;
+        for entry in entries {
+            let (source, target) = (entry.path(), to.join(entry.file_name()));
+            match entry.file_type()?.is_dir() {
+                true => move_dir(&source, &target)?,
+                false => std::fs::rename(&source, &target)?,
+            }
+            moved.push((source, target));
+        }
+        Ok(())
+    })();
+    if let Err(e) = one_by_one {
+        for (source, target) in moved.iter().rev() {
+            let _ = move_dir(target, source);
+        }
+        let _ = std::fs::remove_dir(to);
+        return Err(e);
+    }
+    // One that cannot be removed, because somebody is in it, is empty
+    // and in nobody's way.
+    let _ = std::fs::remove_dir(from);
+    Ok(())
+}
+
+/// Puts the plugin that is in `source` among the installed ones, in the
+/// place of the version that was there.
+///
+/// That version is moved aside, and never taken apart where it is. A
+/// program of it may be running (the plugin that serves a server's
+/// pages, one that is answering an event), and Windows does not let the
+/// file of a running program be removed, though it lets it be renamed:
+/// removed in place, the old version was left there in pieces, and
+/// nothing was installed. Moved aside, it is removed at once where that
+/// is allowed, and otherwise the next time a plugin is installed or
+/// removed (`sweep`). And whatever fails, the plugin is the old version
+/// or the new one, whole.
+fn put(plugins: &Path, source: &Path, manifest: Manifest) -> Result<Installed, String> {
     let dir = plugins.join(&manifest.name);
     let staged = plugins.join(format!(".{}.new", manifest.name));
     let fail = |e: std::io::Error| format!("{}: {e}", dir.display());
+    sweep(plugins);
     let _ = std::fs::remove_dir_all(&staged);
     copy_dir(source, &staged).map_err(fail)?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| {
-            format!(
-                "{}: {e} (a plugin that is running holds its program: stop it, then again)",
-                dir.display()
-            )
+    let gone = aside(plugins, &manifest.name);
+    let had = dir.exists();
+    if had {
+        move_dir(&dir, &gone).map_err(|e| {
+            format!("{}: {e} (something keeps a file of it to itself: close it, then again)", dir.display())
         })?;
     }
-    std::fs::rename(&staged, &dir).map_err(fail)?;
+    if let Err(e) = move_dir(&staged, &dir) {
+        if had {
+            let _ = move_dir(&gone, &dir);
+        }
+        return Err(fail(e));
+    }
+    let _ = std::fs::remove_dir_all(&gone);
     Ok(Installed { manifest, dir })
 }
 
 /// Removes an installed plugin. `false`: there was none.
 pub fn uninstall(name: &str) -> Result<bool, String> {
     check_name("plugin", name)?;
-    let Some(dir) = plugins_dir().map(|dir| dir.join(name)).filter(|dir| dir.is_dir()) else {
+    match plugins_dir() {
+        Some(plugins) => take_out(&plugins, name),
+        None => Ok(false),
+    }
+}
+
+/// Takes a plugin out of the installed ones: moved aside, as `put` moves
+/// the version it replaces and for the same reason, then removed.
+fn take_out(plugins: &Path, name: &str) -> Result<bool, String> {
+    let dir = plugins.join(name);
+    if !dir.is_dir() {
         return Ok(false);
-    };
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    sweep(plugins);
+    let gone = aside(plugins, name);
+    move_dir(&dir, &gone).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let _ = std::fs::remove_dir_all(&gone);
     Ok(true)
 }
 
@@ -1172,5 +1269,139 @@ mod tests {
         // more all the same: what is said then is not lost.
         let (ran, _) = run("(sleep 1.3; echo after) & sleep 0.8; echo said", b"", 1);
         assert_eq!(ran, Ok(b"said\nafter\n".to_vec()));
+    }
+
+    #[test]
+    fn a_directory_that_is_not_renamed_whole_is_moved_one_by_one_or_not_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fill = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            for file in ["a", "b", "sub/c"] {
+                std::fs::write(dir.join(file), file).unwrap();
+            }
+        };
+        fn files(dir: &Path, under: &str, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = format!("{under}{}", entry.file_name().to_string_lossy());
+                match entry.file_type().unwrap().is_dir() {
+                    true => files(&entry.path(), &format!("{name}/"), found),
+                    false => found.push(name),
+                }
+            }
+        }
+        let all = |dir: &Path| {
+            let mut found = Vec::new();
+            files(dir, "", &mut found);
+            found.sort();
+            found
+        };
+        let from = tmp.path().join("from");
+
+        // To where there is nothing: whole.
+        let nothing = tmp.path().join("nothing");
+        fill(&from);
+        move_dir(&from, &nothing).unwrap();
+        assert!(!from.exists());
+        assert_eq!(all(&nothing), ["a", "b", "sub/c"]);
+
+        // Renaming it whole is refused (here, because the place is taken;
+        // on Windows, also because somebody has a file of it open): what
+        // is in it goes one by one, and it is gone all the same.
+        let taken = tmp.path().join("taken");
+        std::fs::create_dir_all(&taken).unwrap();
+        std::fs::write(taken.join("kept"), "kept").unwrap();
+        fill(&from);
+        move_dir(&from, &taken).unwrap();
+        assert!(!from.exists());
+        assert_eq!(all(&taken), ["a", "b", "kept", "sub/c"]);
+
+        // One of its files cannot be moved (a directory has its name):
+        // nothing is, and it is whole where it was.
+        let refuses = tmp.path().join("refuses");
+        std::fs::create_dir_all(refuses.join("b")).unwrap();
+        std::fs::write(refuses.join("b/held"), "held").unwrap();
+        fill(&from);
+        assert!(move_dir(&from, &refuses).is_err());
+        assert_eq!(all(&from), ["a", "b", "sub/c"]);
+        assert_eq!(all(&refuses), ["b/held"]);
+    }
+
+    /// A program every system has that runs for as long as its input is
+    /// open, and what it is started with.
+    fn one_that_waits() -> Option<(PathBuf, &'static [&'static str])> {
+        if cfg!(windows) {
+            let system = std::env::var_os("SystemRoot")?;
+            return Some((Path::new(&system).join("System32").join("findstr.exe"), &["x"]));
+        }
+        let cat = std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("cat"))
+            .find(|cat| cat.is_file())?;
+        Some((cat, &[]))
+    }
+
+    #[test]
+    fn a_plugin_whose_program_is_running_is_replaced_and_removed_all_the_same() {
+        let Some((waits, with)) = one_that_waits() else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, source) = (tmp.path().join("plugins"), tmp.path().join("source"));
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::copy(&waits, program(&source, "hello")).unwrap();
+        let install = |version: &str| {
+            let manifest = format!("name = \"hello\"\nversion = \"{version}\"\napi = 1\n");
+            std::fs::write(source.join(MANIFEST), manifest).unwrap();
+            put(&plugins, &source, Manifest::read(&source).unwrap())
+                .map(|installed| installed.manifest.version)
+        };
+        let there = || {
+            let mut names: Vec<String> = std::fs::read_dir(&plugins)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let installed = plugins.join("hello");
+        assert_eq!(install("0.1.0"), Ok("0.1.0".to_owned()));
+
+        // Its program runs, from where it is installed, until its input is closed.
+        let mut running = std::process::Command::new(program(&installed, "hello"))
+            .args(with)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(running.try_wait().unwrap().is_none(), "it does not wait");
+        // And somebody is reading its manifest: on Windows that alone
+        // keeps its directory from being renamed.
+        let reading = std::fs::File::open(installed.join(MANIFEST)).unwrap();
+
+        // Another version takes its place, whole, and the program goes on.
+        assert_eq!(install("0.2.0"), Ok("0.2.0".to_owned()));
+        assert_eq!(Manifest::read(&installed).unwrap().version, "0.2.0");
+        assert!(program(&installed, "hello").is_file());
+        assert!(running.try_wait().unwrap().is_none(), "replacing it stopped it");
+        // It is removed while it runs, too. What a system keeps of it for
+        // as long as it runs is beside, under a name that is no plugin's.
+        assert_eq!(take_out(&plugins, "hello"), Ok(true));
+        assert!(!installed.exists());
+        assert!(there().iter().all(|name| check_name("plugin", name).is_err()), "{:?}", there());
+        assert_eq!(take_out(&plugins, "hello"), Ok(false));
+
+        // Once it has stopped, the next change leaves nothing behind.
+        drop(reading);
+        drop(running.stdin.take());
+        running.wait().unwrap();
+        for _ in 0..100 {
+            assert_eq!(install("0.3.0"), Ok("0.3.0".to_owned()));
+            if there() == ["hello"] {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(there(), ["hello"]);
     }
 }

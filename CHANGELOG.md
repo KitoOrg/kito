@@ -17,6 +17,17 @@ of a version are its section here.
   written everywhere else, named no path at all. Both are read now
   ([ADR 0008](docs/adr/0008-plugin-registry.md), amended). Nothing
   changes on Linux and macOS.
+- **On Windows, a plugin is updated and removed while it runs.** Windows
+  does not let the file of a running program be removed, and Kito
+  replaced a plugin by removing its directory. Updating the plugin that
+  serves a server's pages from those pages (the web client, from its own
+  Plugins page) was refused with `Access is denied`, and so was
+  installing or removing a plugin in the moment after it was disabled;
+  and what was refused had already taken the old version apart. The
+  version there was is now moved aside, and removed once nothing runs
+  from it. Whatever fails, the plugin is the old version or the new
+  one, whole. It is done the same way on every system; only Windows
+  showed the fault.
 
 ## [0.40.0]
 

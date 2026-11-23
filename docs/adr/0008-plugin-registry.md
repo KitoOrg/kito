@@ -234,3 +234,25 @@ No name on Windows can have a `/` in it, so nothing that was read
 before is read differently. Elsewhere the path is taken as it is
 written, as before. Nothing of an address is decoded on any system: a
 path with a space in it is written with the space.
+
+## Amendment, 2026-11-23: a plugin that runs is replaced all the same
+
+"Installs it as `--path` does" meant: the directory there was is
+removed, and the new one renamed into its place. With the registry read
+on Windows, the same test went one step further and showed what that
+does there: the plugin that serves the server's pages was still running
+a moment after it was disabled, Windows does not remove the file of a
+program that runs, and the install was refused after the old version's
+manifest had been removed. Updating the web client from its own Plugins
+page was refused the same way, every time.
+
+A version that is replaced, and a plugin that is removed, is now moved
+aside under a name no plugin can have (`.<name>.gone-…` among the
+installed plugins), and removed from there: at once where nothing runs
+from it, and otherwise the next time a plugin is installed or removed.
+Where the system does not let the directory be renamed (Windows, while
+anything has a file of it open), what is in it is moved one by one. The
+plugin is the old version or the new one, whole, whatever fails. The
+server starts the new version of a plugin that serves pages as it did
+before; the program of the old one ends on its own, from where it was
+moved to.

@@ -2235,3 +2235,25 @@ was installed from stays the same text. The rule is a function of the
 text and of the system, so both systems' rules are tested on either.
 Found by running the failing test on Windows itself: the tests built
 for Windows inside WSL run on the machine's own Windows.
+
+### D-213 · A plugin's directory is moved aside, never removed where it is
+Installing over a plugin removed its directory and renamed the new one
+into its place; removing a plugin removed the directory. Windows asked
+of itself says: the file of a program that runs cannot be removed; a
+directory cannot be renamed while anything has a file of it open, even
+to read it and sharing everything (a scanner, whoever reads a
+manifest); a file can be renamed in both cases, the program that runs
+too. So the plugin that serves a server's pages could not be updated
+from them, and a refused removal left the directory without its
+manifest. Now (`move_dir`, `put`, `take_out` in `kitod/src/plugins.rs`)
+the directory is renamed to `.<name>.gone-…` beside it, a name no
+plugin can have; where that is refused, what is in it is moved there
+one by one and the empty directory removed; the new version is renamed
+into place, or moved in one by one; and a move that fails half-way puts
+everything back. What was moved aside is removed at once, or, when a
+program still runs from it, the next time a plugin is installed or
+removed. Not chosen: stopping the plugin first (the server knows what
+it runs, the client's `kito plugin update` does not, and a scanner is
+nobody's to stop), and trying again for a while (how long a scan lasts
+is not known). Left as it is: a file that something keeps to itself
+alone still refuses the move, and the error says so.
