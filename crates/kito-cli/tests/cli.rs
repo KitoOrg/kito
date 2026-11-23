@@ -1089,6 +1089,120 @@ fn hooks_hold_an_agent_to_the_rules_before_it_edits() {
 }
 
 #[test]
+fn after_a_command_the_first_import_is_nobodys_edit_and_an_edit_is_told_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    // A project that was there before Kito, its files written a moment ago.
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/a.py"), "def one():\n    return 1\n").unwrap();
+    fs::write(root.join("README.md"), "hello\n").unwrap();
+    ok(root, &["init"]);
+    ok(root, &["sync"]);
+    ok(root, &["checkpoint", "-m", "First import"]);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["files"], 2);
+
+    // A command that changed nothing, as an assistant reports it (it does
+    // not say how long it took): the files of the import are not its doing.
+    let ran = |session: &str, command: &str| {
+        let input = serde_json::json!({
+            "session_id": session, "cwd": root, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "tool_response": { "stdout": "", "stderr": "", "interrupted": false },
+        });
+        let (answer, code, said) = hook(root, &["hook", "after-shell"], &input);
+        assert_eq!(code, 0, "{said}");
+        answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap_or_default().to_owned()
+    };
+    assert_eq!(ran("s", "ls"), "");
+    assert_eq!(ran("s", "ls -l"), "");
+
+    // An edit made by hand in the main directory is told to the session,
+    // once: not again after every command that follows.
+    fs::write(root.join("README.md"), "hello again\n").unwrap();
+    ok(root, &["sync"]);
+    let told = ran("s", "echo hello again > README.md");
+    assert!(told.contains("files of the main directory were changed: README.md"), "{told}");
+    assert!(!told.contains("src/a.py"), "{told}");
+    assert_eq!(ran("s", "ls"), "");
+    // Another session has not been told yet.
+    assert!(ran("t", "ls").contains("README.md"));
+    assert_eq!(ran("t", "ls"), "");
+    // The next edit is told again.
+    fs::write(root.join("README.md"), "hello once more\n").unwrap();
+    ok(root, &["sync"]);
+    assert!(ran("s", "echo hello once more > README.md").contains("README.md"));
+    assert_eq!(ran("s", "ls"), "");
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
+fn a_configuration_written_while_the_daemon_runs_is_the_one_in_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    fs::write(root.join("a.txt"), "one\n").unwrap();
+    ok(root, &["init"]);
+    ok(root, &["checkpoint", "-m", "base"]);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["checks"], serde_json::json!([]));
+
+    // The checks are written into the file while the daemon runs: they
+    // are the checks, with nothing restarted.
+    let config = root.join(".kito/config.toml");
+    let default = fs::read_to_string(&config).unwrap();
+    let checked = default.replace(
+        "# commands = [\"npx tsc --noEmit\", \"npm test\"]",
+        "commands = [\"! grep -q FIXME a.txt\"]",
+    );
+    assert_ne!(checked, default);
+    fs::write(&config, &checked).unwrap();
+    let checks = serde_json::json!(["! grep -q FIXME a.txt"]);
+    assert_eq!(json(root, &["status", "--json"])["repo"]["checks"], checks);
+    let lane = json(root, &["lane", "open", "alice", "--intent", "a note", "--scope", "./", "--json"]);
+    let work = PathBuf::from(lane["workdir"].as_str().unwrap());
+    fs::write(work.join("a.txt"), "one\nFIXME\n").unwrap();
+    let integrate = |args: &[&str]| -> (Value, String) {
+        let out = kito(root, args);
+        let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+        (serde_json::from_str(&printed).unwrap_or(Value::Null), printed)
+    };
+    let (result, _) = integrate(&["integrate", "1", "--json"]);
+    assert_eq!(result[0]["result"], "verification_failed", "{result}");
+    assert!(result[0].get("config_error").is_none(), "{result}");
+
+    // The file is broken. It is said where somebody looks, and the checks
+    // read before it broke still hold: never "no checks".
+    fs::write(&config, checked.replace("commands = [\"! grep", "commands = [[\"! grep")).unwrap();
+    let status = json(root, &["status", "--json"]);
+    assert_eq!(status["repo"]["checks"], checks);
+    let error = status["repo"]["config_error"].as_str().expect("the status says it").to_owned();
+    assert!(error.contains("cannot be read") && error.contains("config.toml"), "{error}");
+    let said = ok(root, &["status"]);
+    assert!(said.contains("Configuration ..... the configuration file cannot be read"), "{said}");
+    assert!(said.contains("Checks ............ ! grep -q FIXME a.txt"), "{said}");
+    let (result, _) = integrate(&["integrate", "1", "--json"]);
+    assert_eq!(result[0]["result"], "verification_failed", "{result}");
+    assert_eq!(result[0]["config_error"], serde_json::json!(error), "{result}");
+    let (_, printed) = integrate(&["integrate", "1"]);
+    assert!(printed.contains("verification failed"), "{printed}");
+    assert!(printed.contains("Configuration ..... the configuration file cannot be read"), "{printed}");
+
+    // Put right, the error is gone. A setting the daemon reads only when
+    // it starts is said to wait for that, until it has started again.
+    fs::write(&config, checked.replace("watch = true", "watch = false")).unwrap();
+    let status = json(root, &["status", "--json"]);
+    assert!(status["repo"].get("config_error").is_none(), "{status}");
+    assert_eq!(status["restart_needed"], serde_json::json!(["[capture] watch"]), "{status}");
+    let said = ok(root, &["status"]);
+    assert!(said.contains("Restart needed .... [capture] watch"), "{said}");
+    ok(root, &["daemon", "stop"]);
+    let status = json(root, &["status", "--json"]);
+    assert!(status.get("restart_needed").is_none(), "{status}");
+    assert_eq!(status["watcher"]["watching"], false);
+    ok(root, &["daemon", "stop"]);
+}
+
+#[test]
 #[cfg(unix)] // Unix permissions or links: not on Windows (ADR 0002)
 fn a_command_runs_confined_to_its_lane() {
     let tmp = tempfile::tempdir().unwrap();

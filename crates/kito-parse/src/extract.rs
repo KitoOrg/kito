@@ -32,7 +32,13 @@ pub struct ParsedFile {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedSymbol {
     pub kind: SymbolKind,
+    /// What it is called. Where two things of a container may have one
+    /// name, the word that tells them apart comes first: `set total` is
+    /// the setter of the property whose getter is `total`.
     pub name: String,
+    /// The name without that word, when the name has one: what a history
+    /// written before names had such words calls the symbol.
+    pub formerly: Option<String>,
     /// Index of the enclosing symbol in [`ParsedFile::symbols`].
     pub parent: Option<usize>,
     /// Bytes of the whole definition.
@@ -77,6 +83,7 @@ enum Capture {
     Def(SymbolKind),
     Name,
     Scope,
+    Role,
     Signature,
     Body,
     Other,
@@ -121,6 +128,7 @@ impl Compiled {
             .map(|name| match *name {
                 "name" => Capture::Name,
                 "scope" => Capture::Scope,
+                "role" => Capture::Role,
                 "sig" => Capture::Signature,
                 "body" => Capture::Body,
                 other => other
@@ -168,6 +176,7 @@ struct Found {
     line: u32,
     name: Range<usize>,
     scope: Option<Range<usize>>,
+    role: Option<Range<usize>>,
     signature: Vec<Range<usize>>,
     body: Option<Range<usize>>,
 }
@@ -278,9 +287,16 @@ pub fn parse_reusing(dialect: Dialect, source: &[u8], previous: Option<&Parsed>)
             .enumerate()
             .map(|(i, f)| {
                 let text = |r: &Range<usize>| String::from_utf8_lossy(&source[r.clone()]).trim().to_owned();
-                let name = match &f.scope {
-                    Some(scope) => format!("{}{}{}", text(scope), compiled.joiners[f.pattern], text(&f.name)),
-                    None => text(&f.name),
+                let scoped = |name: String| match &f.scope {
+                    Some(scope) => format!("{}{}{name}", text(scope), compiled.joiners[f.pattern]),
+                    None => name,
+                };
+                // What tells it from a namesake comes before its name.
+                let (name, formerly) = match &f.role {
+                    Some(role) => {
+                        (scoped(format!("{} {}", text(role), text(&f.name))), Some(scoped(text(&f.name))))
+                    }
+                    None => (scoped(text(&f.name)), None),
                 };
                 // A function nested in a type is a method, in every language.
                 let in_type = parents[i].is_some_and(|p| {
@@ -317,6 +333,7 @@ pub fn parse_reusing(dialect: Dialect, source: &[u8], previous: Option<&Parsed>)
                 ParsedSymbol {
                     kind,
                     name,
+                    formerly,
                     parent: parents[i],
                     range: f.def.clone(),
                     name_range: f.name.clone(),
@@ -343,7 +360,7 @@ fn find_symbols(compiled: &Compiled, root: Node<'_>, source: &[u8]) -> Vec<Found
     let mut matches = cursor.matches(&compiled.query, root, source);
     let mut by_name: HashMap<(usize, usize), Found> = HashMap::new();
     while let Some(m) = matches.next() {
-        let (mut def, mut name, mut scope, mut body) = (None, None, None, None);
+        let (mut def, mut name, mut scope, mut role, mut body) = (None, None, None, None, None);
         let mut signature = Vec::new();
         for capture in m.captures() {
             let range = capture.node.byte_range();
@@ -351,14 +368,24 @@ fn find_symbols(compiled: &Compiled, root: Node<'_>, source: &[u8]) -> Vec<Found
                 Capture::Def(kind) => def = Some((kind, range, capture.node.start_position().row as u32 + 1)),
                 Capture::Name => name = Some(range),
                 Capture::Scope => scope = Some(range),
+                Capture::Role => role = Some(range),
                 Capture::Signature => signature.push(range),
                 Capture::Body => body = Some(range),
                 Capture::Other => {}
             }
         }
         let (Some((kind, def, line)), Some(name)) = (def, name) else { continue };
-        let candidate =
-            Found { pattern: m.pattern_index, kind, def, line, name: name.clone(), scope, signature, body };
+        let candidate = Found {
+            pattern: m.pattern_index,
+            kind,
+            def,
+            line,
+            name: name.clone(),
+            scope,
+            role,
+            signature,
+            body,
+        };
         let better = |old: &Found| {
             let (new_len, old_len) = (candidate.def.len(), old.def.len());
             new_len > old_len || (new_len == old_len && candidate.pattern < old.pattern)

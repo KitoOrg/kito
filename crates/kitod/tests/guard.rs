@@ -379,3 +379,55 @@ fn after_a_command_what_it_changed_where_it_should_not_have() {
     assert!(report.message.contains("lane/"), "{}", report.message);
     assert!(report.message.contains("extend_scope"), "{}", report.message);
 }
+
+#[test]
+fn the_first_import_is_nobodys_edit_and_an_edit_by_hand_is_told_once() {
+    isolate_identity();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    drop(Repo::init(&root).unwrap());
+    // Whatever was recorded counts as the doing of the command that asks:
+    // what is told here does not hang on the clock.
+    let since = 0;
+    // A project that was there before Kito: its files, written a moment ago.
+    write(&root, ".gitignore", ".kito/\n");
+    write(&root, "src/shop.ts", SHOP);
+    write(&root, "README.md", "# Shop\n");
+    // What a daemon does when it starts: it takes them in.
+    let mut repo = Repo::open(&root).unwrap();
+    assert!(!repo.scan_at_start().unwrap().is_empty());
+    let report = repo.after_shell(since, &[], true).unwrap();
+    assert!(report.main.is_empty() && report.message.is_empty(), "{report:?}");
+
+    // An edit made by hand afterwards is told to a session that asks, once.
+    write(&root, "README.md", "# Shop\n\nEdited where it stands.\n");
+    repo.scan().unwrap();
+    let report = repo.after_shell_for(since, &[], true, Some("one")).unwrap();
+    assert_eq!(report.main.len(), 1, "{report:?}");
+    assert!(
+        report.message.contains("files of the main directory were changed: README.md."),
+        "{}",
+        report.message
+    );
+    assert!(repo.after_shell_for(since, &[], true, Some("one")).unwrap().message.is_empty());
+    // Another session has not heard of it; nor has one that gives no name.
+    assert_eq!(repo.after_shell_for(since, &[], true, Some("two")).unwrap().main.len(), 1);
+    assert!(repo.after_shell_for(since, &[], true, Some("two")).unwrap().main.is_empty());
+    assert_eq!(repo.after_shell(since, &[], true).unwrap().main.len(), 1);
+    assert!(repo.after_shell(since, &[], true).unwrap().main.is_empty());
+    // The next edit of the same file is another edit.
+    write(&root, "README.md", "# Shop\n\nEdited again.\n");
+    repo.scan().unwrap();
+    assert_eq!(repo.after_shell_for(since, &[], true, Some("one")).unwrap().main.len(), 1);
+    assert!(repo.after_shell_for(since, &[], true, Some("one")).unwrap().main.is_empty());
+
+    // A daemon that starts on a repository with a history: what it finds
+    // changed was changed by hand while it was away.
+    drop(repo);
+    write(&root, "src/shop.ts", "export const nothing = 0;\n");
+    let mut repo = Repo::open(&root).unwrap();
+    repo.scan_at_start().unwrap();
+    let report = repo.after_shell(since, &[], true).unwrap();
+    assert_eq!(report.main.len(), 1, "{report:?}");
+    assert_eq!(report.main[0].paths, ["src/shop.ts"]);
+}

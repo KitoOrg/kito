@@ -28,8 +28,14 @@ pub enum Outcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoResolution {
     /// `body_merge`: both sides changed the symbol and the texts merged.
+    /// `same_addition`: both sides added the symbol with the same text, and
+    /// it is there once. `line_merge`: the file could not be merged
+    /// function by function (text between them changed on both sides) and
+    /// was merged by lines, whose changes neither overlap nor touch.
+    /// `rename_propagation`: a rename reached the other side's uses.
     pub kind: String,
     /// `ts/auth.getUser#42`: language, file, name and ID of the symbol.
+    /// For a `line_merge`, the file.
     pub symbol: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_name: Option<String>,
@@ -117,6 +123,11 @@ pub struct IntegrationResult {
     /// (ADR 0004): "1 of 2 approvals; changes requested by bob".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<String>,
+    /// The configuration file of the repository could not be read when the
+    /// lane was integrated, and why: the checks that ran, if any, are those
+    /// of the configuration read before the file changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 impl IntegrationResult {
@@ -135,6 +146,7 @@ impl IntegrationResult {
             out_of_scope: Vec::new(),
             landed_on: None,
             missing: None,
+            config_error: None,
         }
     }
 

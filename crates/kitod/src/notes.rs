@@ -177,9 +177,22 @@ impl Repo {
     ) -> Vec<NoteInfo> {
         let Some(lines) = lines else { return self.notes_for(lane, None, file) };
         let spans = self.symbol_spans(lane, file).unwrap_or_default();
+        self.notes_on_spans(lane, file, &spans, lines)
+    }
+
+    /// The notes on some lines of a version of a file, given the functions
+    /// of that version and the lines each is on: those on the functions the
+    /// lines are in, on the file and the directories above.
+    fn notes_on_spans(
+        &self,
+        lane: LaneId,
+        file: &Path,
+        spans: &[(SymbolId, u32, u32)],
+        lines: &[(u32, u32)],
+    ) -> Vec<NoteInfo> {
         let mut found: Vec<NoteInfo> = Vec::new();
         let mut functions = 0;
-        for (id, start, end) in &spans {
+        for (id, start, end) in spans {
             if lines.iter().any(|(from, to)| from <= end && start <= to) {
                 functions += 1;
                 found.extend(self.notes_for(lane, Some(*id), file));
@@ -193,6 +206,57 @@ impl Repo {
         found.sort_by(|a, b| a.id.cmp(&b.id));
         found.dedup_by(|a, b| a.id == b.id);
         found
+    }
+
+    /// The notes on what a lane replaced or removed: for each file it
+    /// changed, those on the lines it found there and no longer has, as an
+    /// edit of those lines that was held back would have told them. A new
+    /// file replaces nothing, and lines that are only added have no note.
+    pub(crate) fn notes_replaced(&self, lane: LaneId) -> Result<Vec<NoteInfo>> {
+        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
+        let mut found: Vec<NoteInfo> = Vec::new();
+        for path in at.base_tree.differences(&at.work.tree) {
+            let Some(before) = at.base_tree.get(path) else { continue };
+            let was = self.store.get_blob(&before.blob)?.unwrap_or_default();
+            let is = match at.work.tree.get(path) {
+                Some(entry) => self.store.get_blob(&entry.blob)?.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            // The lines of the file as it was that are gone, from 1.
+            let old: Vec<&[u8]> = was.split_inclusive(|&b| b == b'\n').collect();
+            let new: Vec<&[u8]> = is.split_inclusive(|&b| b == b'\n').collect();
+            let mut gone: Vec<(u32, u32)> = Vec::new();
+            for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new) {
+                let (tag, lines, _) = op.as_tag_tuple();
+                if matches!(tag, similar::DiffTag::Delete | similar::DiffTag::Replace) {
+                    gone.push((lines.start as u32 + 1, lines.end as u32));
+                }
+            }
+            if gone.is_empty() {
+                continue;
+            }
+            // The functions of the file as it was, as the lane's base knows them.
+            let parsed =
+                kito_parse::dialect_for_path(path).and_then(|dialect| kito_parse::parse(dialect, &was));
+            let spans: Vec<(SymbolId, u32, u32)> = match &parsed {
+                Some(parsed) => {
+                    let line_of = |at: usize| {
+                        1 + was[..at.min(was.len())].iter().filter(|&&b| b == b'\n').count() as u32
+                    };
+                    let ids = kito_diff::ast::identify(&at.base_symbols, path, parsed);
+                    let spans = parsed.symbols.iter().zip(ids).filter_map(|(symbol, id)| {
+                        let end = symbol.range.end.saturating_sub(1).max(symbol.range.start);
+                        Some((id?, line_of(symbol.range.start), line_of(end)))
+                    });
+                    spans.collect()
+                }
+                None => Vec::new(),
+            };
+            found.extend(self.notes_on_spans(lane, path, &spans, &gone));
+        }
+        found.sort_by(|a, b| a.id.cmp(&b.id));
+        found.dedup_by(|a, b| a.id == b.id);
+        Ok(found)
     }
 
     fn note_info(&self, lane: LaneId, note: &Note) -> NoteInfo {

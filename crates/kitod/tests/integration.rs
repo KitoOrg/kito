@@ -361,6 +361,57 @@ fn what_fails_the_verification_does_not_reach_the_main_lane() {
 }
 
 #[test]
+fn checks_written_while_the_repository_is_open_are_in_force_and_a_broken_file_takes_none_away() {
+    let (_tmp, root, mut repo) = shop();
+    assert!(repo.status().unwrap().checks.is_empty());
+    repo.open_lane("alice", None, None, "the shop's next step", &kitod::scope::everything()).unwrap();
+    let alice = workdir(&repo, 1);
+
+    // Somebody writes the checks into the file: nobody tells the repository.
+    let checks = "[verify]\ncommands = [\"! grep -rq FIXME src\"]\ntimeout_secs = 30\n";
+    write(&root, ".kito/config.toml", checks);
+    write(&alice, "src/shop.ts", &SHOP.replace("let sum = 0;", "let sum = 0; // FIXME"));
+    let failed = repo.integrate(LaneId(1)).unwrap();
+    assert_eq!(failed.result, Outcome::VerificationFailed, "{failed:?}");
+    assert_eq!(failed.config_error, None);
+    assert_eq!(repo.status().unwrap().checks, ["! grep -rq FIXME src"]);
+    assert_eq!(read(&root, "src/shop.ts"), SHOP);
+
+    // The file is broken: it is said, and the checks read before stay.
+    write(&root, ".kito/config.toml", "[verify]\ncommands = [\"! grep -rq FIXME src\"\n");
+    assert!(!repo.refresh_config(), "nothing new is in force");
+    let status = repo.status().unwrap();
+    assert_eq!(status.checks, ["! grep -rq FIXME src"]);
+    let said = status.config_error.expect("a file that cannot be read is said");
+    assert!(said.contains("cannot be read") && said.contains("still is"), "{said}");
+    assert!(said.contains("config.toml") && said.contains("line 2"), "where it is broken: {said}");
+    let failed = repo.integrate(LaneId(1)).unwrap();
+    assert_eq!(failed.result, Outcome::VerificationFailed, "the checks still hold: {failed:?}");
+    assert_eq!(failed.config_error.as_deref(), Some(said.as_str()));
+    // Broken another way, it still takes nothing away.
+    write(&root, ".kito/config.toml", "[verify]\ncommands = \n");
+    assert!(!repo.refresh_config());
+    assert_eq!(repo.status().unwrap().checks, ["! grep -rq FIXME src"]);
+
+    // Put right, with one check more: in force, and nothing left to say.
+    write(
+        &root,
+        ".kito/config.toml",
+        "[verify]\ncommands = [\"! grep -rq FIXME src\", \"test -f README.md\"]\ntimeout_secs = 30\n",
+    );
+    write(&alice, "src/shop.ts", &SHOP.replace("let sum = 0;", "let sum = 0; // cents"));
+    let done = repo.integrate(LaneId(1)).unwrap();
+    assert_eq!(done.result, Outcome::Integrated, "{done:?}");
+    assert_eq!(done.verification.unwrap().commands.len(), 2);
+    assert_eq!((done.config_error, repo.status().unwrap().config_error), (None, None));
+
+    // Checks taken away on purpose are gone.
+    write(&root, ".kito/config.toml", "[verify]\ncommands = []\n");
+    assert!(repo.refresh_config());
+    assert!(repo.status().unwrap().checks.is_empty());
+}
+
+#[test]
 fn moves_renames_and_removals_arrive_as_what_they_are() {
     let (_tmp, root, mut repo) = shop();
     repo.open_lane("alice", None, None, "the shop's next step", &kitod::scope::everything()).unwrap();

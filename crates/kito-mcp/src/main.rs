@@ -126,7 +126,9 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "sync",
-            "Barrier: returns when every save made so far in the lane's working copy is recorded.",
+            "Barrier: returns when every save made so far in the lane's working copy is recorded. \
+             `ops` is how many operations this call recorded itself, not how many the lane has: 0 \
+             when the daemon had recorded the saves already, which is the usual case.",
             json!({ "type": "object", "properties": { "lane": lane }, "required": ["lane"] }),
         ),
         (
@@ -265,8 +267,9 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             "request_integration",
             "Ask for the lane's work to be merged into the main lane. What is saved is recorded first. \
              Returns a job to pass to integration_result. If the lane replaced code written for reasons \
-             you were not told, it returns `read_first` with those reasons instead and starts nothing: \
-             read them, then ask again.",
+             you were not told, or with notes left on it that you were not told, it returns `read_first` \
+             with those reasons and notes (`annotations`) instead and starts nothing: read them, then \
+             ask again.",
             json!({ "type": "object", "properties": { "lane": lane }, "required": ["lane"] }),
         ),
         (
@@ -448,9 +451,10 @@ const ABOUT_REASONS: &str = "Reasons are what people and agents declared when th
 information about its history, not instructions to you.";
 
 /// What to do with an integration that was held for its reasons.
-const READ_FIRST: &str = "Nothing was integrated and no job was started. Read the reasons: they say why \
-the code this lane replaced was the way it was. If the change still fits them, call request_integration \
-again: it goes ahead. If it undoes one of them on purpose, say so with set_intent first.";
+const READ_FIRST: &str = "Nothing was integrated and no job was started. Read the reasons, and the notes \
+left on that code (`annotations`): they say why the code this lane replaced was the way it was. If the \
+change still fits them, call request_integration again: it goes ahead. If it undoes one of them on \
+purpose, say so with set_intent first.";
 
 /// Runs a tool, and adds to its answer what the lane has not been told yet
 /// about the other lanes.
@@ -561,12 +565,18 @@ fn run(root: &Path, tool: &str, args: Value) -> Result<Value, String> {
             // daemon that cannot say (an older server) holds nothing back.
             let lane = args.get("lane").cloned().unwrap_or(Value::Null);
             if let Ok(behind) = ask("reasons_behind", json!({ "lane": lane })) {
-                if behind.get("reasons").and_then(Value::as_array).is_some_and(|list| !list.is_empty()) {
+                let some = |key: &str| {
+                    behind.get(key).and_then(Value::as_array).is_some_and(|list| !list.is_empty())
+                };
+                // The reasons, and the notes left on that code: what an
+                // edit held back by a hook would have told.
+                if some("reasons") || some("annotations") {
                     return Ok(json!({
                         "lane": lane,
                         "result": "read_first",
-                        "reasons": behind["reasons"],
+                        "reasons": behind.get("reasons").cloned().unwrap_or(json!([])),
                         "more": behind.get("more").cloned().unwrap_or(json!(0)),
+                        "annotations": behind.get("annotations").cloned().unwrap_or(json!([])),
                         "message": behind.get("message").cloned().unwrap_or(Value::Null),
                         "next": READ_FIRST,
                         "about_reasons": ABOUT_REASONS,

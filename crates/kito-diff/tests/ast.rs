@@ -629,6 +629,111 @@ fn additions_removals_and_overloads() {
     assert_eq!(w.id("src/auth.ts", "Session").seq(), gone);
 }
 
+const BOX_PY: &str = "class Box:\n    @property\n    def size(self):\n        return self._size\n\n    @size.setter\n    def size(self, value):\n        self._size = value\n";
+const BOX_JS: &str = "class Box {\n  get size() {\n    return this._size;\n  }\n\n  set size(value) {\n    this._size = value;\n  }\n}\n";
+const BOX_TS: &str = "class Box {\n  get size(): number {\n    return this._size;\n  }\n\n  set size(value: number) {\n    this._size = value;\n  }\n}\n";
+
+#[test]
+fn the_setter_of_a_property_is_a_symbol_of_its_own() {
+    // In each language where the two halves of a property are defined under
+    // one name: the file, the two halves, the getter alone, the setter's name.
+    let cases = [
+        (
+            "box.py",
+            BOX_PY,
+            "    @property\n    def size(self):\n        return self._size\n\n",
+            "Box.setter size",
+        ),
+        ("box.js", BOX_JS, "  get size() {\n    return this._size;\n  }\n\n", "Box.set size"),
+        ("box.ts", BOX_TS, "  get size(): number {\n    return this._size;\n  }\n\n", "Box.set size"),
+    ];
+    for (file, both, getter, setter) in cases {
+        // The setter is there first; the getter is added above it.
+        let alone = both.replace(getter, "");
+        let mut w = World::default();
+        w.step(&[(file, Some(&alone))]);
+        let set = w.id(file, setter);
+        assert_eq!(w.step(&[(file, Some(both))]), ["Add Method Box.size"], "{file}");
+        let get = w.id(file, "Box.size");
+        assert_eq!(w.id(file, setter), set, "{file}");
+
+        // Each changes on its own, and is itself afterwards.
+        let edited = both
+            .replace("this._size = value", "this._size = value || 0")
+            .replace("self._size = value", "self._size = value or 0");
+        assert_eq!(w.step(&[(file, Some(&edited))]), [format!("ModifyBody {setter}")], "{file}");
+        let edited = edited
+            .replace("return this._size", "return this._size | 0")
+            .replace("return self._size", "return int(self._size)");
+        assert_eq!(w.step(&[(file, Some(&edited))]), ["ModifyBody Box.size"], "{file}");
+        assert_eq!((w.id(file, "Box.size"), w.id(file, setter)), (get, set), "{file}");
+
+        // The getter goes: what is left is the setter, not the getter changed.
+        assert_eq!(
+            w.step(&[(file, Some(&alone))]),
+            [format!("ModifyBody {setter}"), "Remove Box.size".to_owned()],
+            "{file}"
+        );
+        assert_eq!(w.id(file, setter), set, "{file}");
+    }
+}
+
+#[test]
+fn a_history_that_has_a_setter_under_the_name_of_its_getter_is_put_right() {
+    // Also with the setter written above its getter: the history numbered
+    // it first, and it is the first of the two still.
+    const SET_FIRST_JS: &str = "class Box {\n  set size(value) {\n    this._size = value;\n  }\n\n  get size() {\n    return this._size;\n  }\n}\n";
+    const SET_FIRST_TS: &str = "class Box {\n  set size(value: number) {\n    this._size = value;\n  }\n\n  get size(): number {\n    return this._size;\n  }\n}\n";
+    for (file, source, setter, name, set_first) in [
+        ("box.py", BOX_PY, "Box.setter size", "setter size", false),
+        ("box.js", BOX_JS, "Box.set size", "set size", false),
+        ("box.ts", BOX_TS, "Box.set size", "set size", false),
+        ("xob.js", SET_FIRST_JS, "Box.set size", "set size", true),
+        ("xob.ts", SET_FIRST_TS, "Box.set size", "set size", true),
+    ] {
+        // The history as it was written when both were called `size`.
+        let mut w = World::default();
+        let path = Path::new(file);
+        let now = parsed(path, source);
+        let mut ids: Vec<SymbolId> = Vec::new();
+        for (n, sym) in now.symbols.iter().enumerate() {
+            let id = SymbolId::new(LaneId::MAIN, n as u64);
+            let symbol = Symbol {
+                id,
+                kind: sym.kind,
+                lang: now.lang,
+                name: sym.formerly.clone().unwrap_or_else(|| sym.name.clone()),
+                parent: sym.parent.map(|p| ids[p]),
+                file: path.to_owned(),
+                signature: sym.signature,
+                body: sym.body,
+                fingerprint: sym.fingerprint.clone(),
+            };
+            let text = BlobId::of(&source.as_bytes()[sym.range.clone()]);
+            w.table.apply(&OpKind::AddSymbol { sym: symbol, text }).unwrap();
+            ids.push(id);
+        }
+        w.files.insert(path.to_owned(), source.to_owned());
+        assert_eq!(w.table.find(path, "Box.size").len(), 2, "{file}");
+
+        // It is read as it is: the getter by its name, the setter by the
+        // one it had.
+        let known = kito_diff::ast::identify(&w.table, path, &now);
+        assert_eq!(known, ids.iter().copied().map(Some).collect::<Vec<_>>(), "{file}");
+
+        // The next save of the file gives the setter its name: it is the
+        // symbol it was, and so is the getter, which changed.
+        let edited = source
+            .replace("return this._size", "return this._size | 0")
+            .replace("return self._size", "return int(self._size)");
+        let mut recorded = w.step(&[(file, Some(&edited))]);
+        recorded.sort();
+        assert_eq!(recorded, ["ModifyBody Box.size".to_owned(), format!("Rename size -> {name}")], "{file}");
+        let (get, set) = if set_first { (ids[2], ids[1]) } else { (ids[1], ids[2]) };
+        assert_eq!((w.id(file, "Box.size"), w.id(file, setter)), (get, set), "{file}");
+    }
+}
+
 #[test]
 fn identity_survives_an_unreadable_old_version() {
     let mut w = World::default();

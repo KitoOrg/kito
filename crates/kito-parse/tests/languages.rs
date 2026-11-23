@@ -685,6 +685,59 @@ fn overloads_and_duplicates_are_all_kept_in_order() {
     assert_eq!(lines, [1, 2, 3, 4, 4]);
 }
 
+#[test]
+fn the_setter_of_a_property_is_not_its_getter() {
+    // Python: what its decorator says of it. A decorator about something
+    // else says nothing of the function it is on.
+    let source = "class Box:\n    @property\n    def size(self):\n        return self._size\n\n    @size.setter\n    def size(self, value):\n        self._size = value\n\n    @size.deleter\n    def size(self):\n        del self._size\n\n    @registry.setter\n    def other(self, value):\n        pass\n";
+    let file = parse(Dialect::Python, source.as_bytes()).unwrap();
+    assert_eq!(
+        outline(&file),
+        [
+            "Class Box",
+            "Method Box.size",
+            "Method Box.setter size",
+            "Method Box.deleter size",
+            "Method Box.other"
+        ]
+    );
+    // The word is not part of what the code calls it, nor was it before.
+    let setter = symbol(&file, "Box.setter size");
+    assert_eq!((&source[setter.name_range.clone()], setter.formerly.as_deref()), ("size", Some("size")));
+    assert!(source[setter.range.clone()].starts_with("@size.setter"));
+    assert_eq!(symbol(&file, "Box.size").formerly, None);
+
+    // JavaScript: `set`. A method called `set` is a method like another.
+    let source = "class Box {\n  get size() { return this._size; }\n  set size(value) { this._size = value; }\n  set(key, value) { this[key] = value; }\n  static set limit(value) { Box.max = value; }\n}\nconst box = { get size() { return 1; }, set size(value) {} };\n";
+    let file = parse(Dialect::JavaScript, source.as_bytes()).unwrap();
+    assert!(!file.has_errors);
+    assert_eq!(
+        outline(&file),
+        [
+            "Class Box",
+            "Method Box.size",
+            "Method Box.set size",
+            "Method Box.set",
+            "Method Box.set limit",
+            "Const box",
+            "Method box.size",
+            "Method box.set size"
+        ]
+    );
+    let setter = symbol(&file, "Box.set size");
+    assert_eq!((&source[setter.name_range.clone()], setter.formerly.as_deref()), ("size", Some("size")));
+    assert_eq!(symbol(&file, "Box.set").formerly, None);
+
+    // TypeScript: also where a class only declares them.
+    let file = ts("abstract class Box {\n  get size(): number { return this._size; }\n  set size(value: number) { this._size = value; }\n  abstract get limit(): number;\n  abstract set limit(value: number);\n}\n");
+    assert!(!file.has_errors);
+    assert_eq!(
+        outline(&file),
+        ["Class Box", "Method Box.size", "Method Box.set size", "Method Box.limit", "Method Box.set limit"]
+    );
+    assert_eq!(symbol(&file, "Box.set limit").formerly.as_deref(), Some("limit"));
+}
+
 mod incremental {
     use super::*;
     use kito_parse::parse_reusing;

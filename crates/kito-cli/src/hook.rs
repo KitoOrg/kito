@@ -354,12 +354,17 @@ pub fn after_shell() -> ExitCode {
     lanes.dedup();
     // What was saved a moment ago is recorded a moment later.
     std::thread::sleep(std::time::Duration::from_millis(60));
+    // Which session asks: an edit of the main directory is told to it once,
+    // not after every command that follows.
+    let mut asked = json!({ "since_ms": since, "lanes": lanes });
+    if let Some(session) = input.get("session_id").and_then(Value::as_str) {
+        asked["session"] = json!(session);
+    }
     let mut told = Vec::new();
     for root in roots(&input) {
         // A daemon that is not running recorded nothing, and has nothing to tell.
         let Ok(mut client) = Client::connect(&root) else { continue };
-        let report: Result<ShellReport, _> =
-            client.call("after_shell", json!({ "since_ms": since, "lanes": lanes }));
+        let report: Result<ShellReport, _> = client.call("after_shell", asked.clone());
         if let Ok(report) = report {
             if !report.message.is_empty() {
                 told.push(report.message);

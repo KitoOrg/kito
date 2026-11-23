@@ -12,6 +12,7 @@
 //! | rename of X | another rename of X | `RenameRename` |
 //! | removal of X | change to X | `RemoveModify` |
 //! | move of X | change to X | both apply: the ID follows the symbol |
+//! | a new symbol named N | a new one named N, in the same place | once if they are the same text; otherwise `BodyBody`, with no text at the base |
 //! | text outside the symbols | the same | three-way merge of the text; if that fails, `Text` |
 //!
 //! A file is not merged as lines but as what it is made of: a header, its
@@ -20,15 +21,27 @@
 //! functions at the same place do not touch the same thing, and a function
 //! one side moves to another file while the other edits it is still one
 //! function. Only a file that cannot be read this way (no grammar, syntax
-//! errors, symbols the history does not know) is merged as text.
+//! errors, symbols the history does not know, or symbols of one name that
+//! cannot be told apart) is merged as text.
+//!
+//! Nothing is merged in twice. What both sides added to the same place
+//! under the same name is one thing: the same text is in the result once,
+//! two texts are a conflict, unless the language lets the two live side by
+//! side (overloads with other parameters, a second `impl` block).
+//!
+//! Where a file's own merge ends in a conflict of kind `Text` and a plain
+//! line merge of the file has none (the changes of the two sides neither
+//! overlap nor touch), the result is the line merge: this merge may compose
+//! more than a line merge does, and less only where the line merge would
+//! write a definition twice (one that is neither side's).
 //!
 //! The crate does no I/O: it is given the three states and a way to read a
 //! blob, and returns the files that change and the conflicts found.
 
 use kito_core::{BlobId, ConflictKind, FileMode, SymbolId, SymbolTable, Tree};
 use kito_diff::ast::Identities;
-use kito_diff::text::{is_binary, merge3};
-use kito_parse::{dialect_for_path, parse, ParsedFile};
+use kito_diff::text::{is_binary, merge3, merge3_apart};
+use kito_parse::{dialect_for_path, namesakes, parse, Namesakes, ParsedFile};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -114,6 +127,12 @@ pub struct Outcome {
     pub conflicts: Vec<Found>,
     /// Symbols both sides changed, whose texts merged on their own.
     pub merged_symbols: Vec<SymbolId>,
+    /// Symbols both sides added with the same text, which are in the
+    /// result once: each as the main lane has it.
+    pub added_by_both: Vec<SymbolId>,
+    /// Files whose own merge ended in a conflict of kind `Text` where a
+    /// plain line merge had none: they are that line merge.
+    pub merged_by_lines: Vec<PathBuf>,
 }
 
 /// Where a scope is: a file, or a symbol that contains others.
@@ -171,6 +190,21 @@ struct SideData {
     at: HashMap<SymbolId, At>,
 }
 
+/// The symbols of a scope in the merged result.
+struct Order {
+    /// In order. A forced choice comes with the ones a decision brought
+    /// back or kept.
+    symbols: Vec<(SymbolId, Option<Choice>)>,
+    /// The symbols both sides added to the scope under one name: for the
+    /// main lane's, which is in the order, the lane's, which is not.
+    twins: HashMap<SymbolId, SymbolId>,
+    /// The two sides each brought to the scope a thing of the same name,
+    /// the two are not one thing added twice (one of them was somewhere
+    /// before), and the language does not let them live side by side:
+    /// which one stays has to be asked.
+    clash: bool,
+}
+
 /// What is being written for one file.
 #[derive(Default)]
 struct Emit {
@@ -178,6 +212,8 @@ struct Emit {
     ids: Vec<(usize, SymbolId)>,
     conflicts: Vec<Found>,
     merged: Vec<SymbolId>,
+    /// Symbols both sides added with the same text.
+    twice: Vec<SymbolId>,
     symbols: usize,
 }
 
@@ -369,6 +405,21 @@ impl SideData {
         let view = &self.views[at.view];
         Some((view, view.unit_of(at.sym)?))
     }
+
+    /// What the parser says of a symbol.
+    fn parsed(&self, id: SymbolId) -> Option<(&ParsedFile, &kito_parse::ParsedSymbol)> {
+        let at = self.at.get(&id)?;
+        let file = self.views[at.view].parsed.as_ref()?;
+        Some((file, &file.symbols[at.sym]))
+    }
+
+    /// From now on a file is text: nothing in it is taken for a symbol.
+    fn as_text(&mut self, path: &Path) {
+        let Some(&index) = self.by_path.get(path) else { return };
+        self.views[index].structural = false;
+        self.views[index].ids.clear();
+        self.at.retain(|_, at| at.view != index);
+    }
 }
 
 /// White space aside, the same text.
@@ -464,6 +515,9 @@ struct Merger<'a> {
     sides: [SideData; 3],
     /// Per side (main, lane): the symbols of the base it changed, moved or removed.
     changed: [HashSet<SymbolId>; 3],
+    /// Files whose symbols of one name cannot be told apart, and that can
+    /// be merged neither as symbols nor as text: see [`merge`].
+    unsure: HashSet<PathBuf>,
     out: Outcome,
 }
 
@@ -471,8 +525,13 @@ struct Merger<'a> {
 pub fn merge(input: &Input<'_>) -> Outcome {
     let trees = [input.base.tree, input.main.tree, input.lane.tree];
     let tables = [input.base.symbols, input.main.symbols, input.lane.symbols];
-    let mut merger =
-        Merger { input, sides: Default::default(), changed: Default::default(), out: Outcome::default() };
+    let mut merger = Merger {
+        input,
+        sides: Default::default(),
+        changed: Default::default(),
+        unsure: HashSet::new(),
+        out: Outcome::default(),
+    };
     let by_lane: BTreeSet<PathBuf> = trees[BASE].differences(trees[LANE]).map(Path::to_owned).collect();
     if by_lane.is_empty() && input.resolutions.is_empty() {
         return merger.out;
@@ -515,6 +574,21 @@ pub fn merge(input: &Input<'_>) -> Outcome {
             }
             data.by_path.insert(path.clone(), data.views.len());
             data.views.push(view);
+        }
+    }
+    // A file where symbols of one name do not line up with the base's is
+    // not read as a structure: on no side, so that the three agree. If one
+    // of its symbols is in another file on a side, its text is not all
+    // there is to merge either (a change to that symbol must follow it):
+    // the file is then asked about, whatever the rest composes to.
+    let astray: Vec<&PathBuf> = touched.iter().filter(|path| merger.namesakes_astray(path)).collect();
+    for path in astray {
+        if !merger.stays_within(path) {
+            merger.unsure.insert(path.clone());
+            continue;
+        }
+        for side in [BASE, MAIN, LANE] {
+            merger.sides[side].as_text(path);
         }
     }
     for side in [MAIN, LANE] {
@@ -691,13 +765,26 @@ impl Merger<'_> {
             }
             return;
         }
-        if main == lane {
-            return;
-        }
         let structural = [BASE, MAIN, LANE].iter().all(|&side| match self.sides[side].view(path) {
             Some(view) => view.structural,
             None => true,
         }) && dialect_for_path(path).is_some();
+        if main == lane {
+            // The same file on both sides, unless its bytes are other
+            // symbols on each and one of them is a symbol the other side
+            // changed where it stood: a function one side moved here, where
+            // the other wrote a copy of it and changed the function. The
+            // change has to reach it: the file is merged as symbols.
+            let made_of = |side: usize| self.sides[side].view(path).map(|view| view.ids.clone());
+            let crossed = structural
+                && main.is_some()
+                && made_of(MAIN) != made_of(LANE)
+                && (self.crossed(MAIN, path, LANE) || self.crossed(LANE, path, MAIN));
+            if crossed {
+                self.structure(path, mode);
+            }
+            return;
+        }
 
         if lane == base {
             // Only the main lane touched the file: it stays as it is there,
@@ -727,19 +814,135 @@ impl Merger<'_> {
             };
             match merged {
                 Some(content) => self.output(path, Some(FileOut { content, mode })),
+                None if self.by_lines(path, mode, false) => {}
                 None => self.text_conflict(path),
             }
         }
     }
 
+    /// `true` if, in a file, symbols of one name are not on a side the
+    /// ones they are at the base. The history tells namesakes apart by the
+    /// order they were created in, a file by the order they are written
+    /// in: when a side writes a new overload above an old one the two
+    /// orders part, and what the base knows as the old one is taken for the
+    /// new one. A symbol that is not what the base has under its ID, while
+    /// a namesake of it is, says so.
+    fn namesakes_astray(&self, path: &Path) -> bool {
+        let Some(base) = self.sides[BASE].view(path).filter(|view| view.structural) else { return false };
+        let Some(parsed) = &base.parsed else { return false };
+        let was: HashMap<SymbolId, (kito_core::Hash, kito_core::Hash)> =
+            base.ids.iter().zip(&parsed.symbols).map(|(id, sym)| (*id, (sym.signature, sym.body))).collect();
+        [MAIN, LANE].iter().any(|&side| {
+            let Some(view) = self.sides[side].view(path).filter(|view| view.structural) else { return false };
+            let Some(parsed) = &view.parsed else { return false };
+            let symbols = &parsed.symbols;
+            let mut groups: HashMap<(Option<SymbolId>, kito_core::SymbolKind, &str), Vec<usize>> =
+                HashMap::new();
+            for (i, sym) in symbols.iter().enumerate() {
+                let key = (sym.parent.map(|parent| view.ids[parent]), sym.kind, sym.name.as_str());
+                groups.entry(key).or_default().push(i);
+            }
+            groups.values().filter(|group| group.len() > 1).any(|group| {
+                group.iter().any(|&i| {
+                    let Some(&(signature, body)) = was.get(&view.ids[i]) else { return false };
+                    let is = |j: usize| (symbols[j].signature, symbols[j].body);
+                    // It changed, and another one is as the base has it, or
+                    // at least has its parameters.
+                    is(i) != (signature, body)
+                        && group.iter().any(|&j| {
+                            j != i
+                                && (is(j) == (signature, body)
+                                    || (symbols[j].signature == signature
+                                        && symbols[i].signature != signature))
+                        })
+                })
+            })
+        })
+    }
+
+    /// `true` if no symbol of the file is, on one of the three sides, in
+    /// another file: nothing in it came from elsewhere or went there, and
+    /// its own text is all there is to merge.
+    fn stays_within(&self, path: &Path) -> bool {
+        let sides = [BASE, MAIN, LANE];
+        sides.iter().all(|&side| {
+            self.table(side).in_file(path).all(|(id, _)| {
+                sides.iter().all(|&other| self.table(other).get(id).is_none_or(|entry| entry.file == path))
+            })
+        })
+    }
+
+    /// Settles a file whose own merge ended in a conflict of kind `Text`
+    /// with a plain line merge of it, if that has no conflict: what a line
+    /// merge composes beyond doubt is not asked about. `false` if it has
+    /// one too, or if a side does not have the file.
+    ///
+    /// `as_symbols`: the file was read as symbols on the three sides. Its
+    /// line merge is then taken only if it can be read so too, and every
+    /// definition in it is one a side has. Lines do not know that a
+    /// function both sides added, or both moved, to two different places
+    /// is one function: they keep it twice, and the second is neither
+    /// side's, or is the symbol the first already is (moved and renamed by
+    /// one side, moved elsewhere by the other, it is there under its two
+    /// names). Such a result is not what the two sides made, and the
+    /// conflict stands.
+    fn by_lines(&mut self, path: &Path, mode: FileMode, as_symbols: bool) -> bool {
+        let [Some(base), Some(main), Some(lane)] = [BASE, MAIN, LANE].map(|side| self.content(side, path))
+        else {
+            return false;
+        };
+        let Some(merged) = merge3_apart(&base, &main, &lane) else { return false };
+        // Which symbol each definition of the result is: the one the main
+        // lane has in that place and by that name, else the lane's.
+        let parsed = dialect_for_path(path)
+            .filter(|_| merged.len() <= MAX_PARSED_BYTES)
+            .and_then(|dialect| parse(dialect, &merged))
+            .filter(|parsed| !parsed.has_errors);
+        let mut ids: Vec<(usize, SymbolId)> = Vec::new();
+        let mut taken: HashSet<SymbolId> = HashSet::new();
+        match &parsed {
+            Some(parsed) => {
+                let known = [MAIN, LANE].map(|side| kito_diff::ast::identify(self.table(side), path, parsed));
+                for (i, sym) in parsed.symbols.iter().enumerate() {
+                    match known[0][i].or(known[1][i]) {
+                        // A symbol is one definition, never two.
+                        Some(id) if taken.insert(id) => ids.push((sym.range.start, id)),
+                        _ if as_symbols => return false,
+                        _ => {}
+                    }
+                }
+            }
+            None if as_symbols => return false,
+            None => {}
+        }
+        for (offset, id) in ids {
+            self.out.identities.insert(path, offset, id);
+        }
+        self.out.merged_by_lines.push(path.to_owned());
+        self.output(path, Some(FileOut { content: merged, mode }));
+        true
+    }
+
     /// Merges one file as a structure.
     fn structure(&mut self, path: &Path, mode: FileMode) {
+        if self.unsure.contains(path) {
+            return self.text_conflict(path);
+        }
         let scopes =
             [BASE, MAIN, LANE].map(|side| self.sides[side].by_path.get(path).map(|&view| (view, None)));
         let mut emit = Emit::default();
         self.scope(&Key::File(path.to_owned()), scopes, path, &mut emit);
         if !emit.conflicts.is_empty() {
-            self.out.conflicts.append(&mut emit.conflicts);
+            // Text between the symbols that the structure cannot compose
+            // and lines can: a function added after statements one of
+            // which the other side changed. Only where the text is all
+            // that stands in the way, and all the file is made of: a
+            // symbol that went to another file takes its changes along,
+            // which lines do not know.
+            let only_text = emit.conflicts.iter().all(|conflict| conflict.kind == ConflictKind::Text);
+            if !(only_text && self.stays_within(path) && self.by_lines(path, mode, true)) {
+                self.out.conflicts.append(&mut emit.conflicts);
+            }
             return;
         }
         let present = |side: usize| self.tree(side).contains(path);
@@ -768,6 +971,7 @@ impl Merger<'_> {
             self.out.identities.insert(path, offset, id);
         }
         self.out.merged_symbols.append(&mut emit.merged);
+        self.out.added_by_both.append(&mut emit.twice);
         self.output(path, Some(FileOut { content: emit.bytes, mode }));
     }
 
@@ -793,19 +997,51 @@ impl Merger<'_> {
         }
     }
 
-    /// The symbols of a scope in the merged result, in order. A forced
-    /// choice comes with the ones a decision brought back or kept.
-    fn sequence(
-        &self,
-        seqs: [&[SymbolId]; 3],
-        path: &Path,
-        emit: &mut Emit,
-    ) -> Vec<(SymbolId, Option<Choice>)> {
+    /// `true` if a symbol the main lane added to a scope and one the lane
+    /// added there are one thing added twice: the same kind and name, and
+    /// either the same text or nothing in the language that lets the two
+    /// live side by side.
+    fn added_twice(&self, main: SymbolId, lane: SymbolId) -> bool {
+        let (Some(ours), Some(theirs)) = (self.table(MAIN).get(main), self.table(LANE).get(lane)) else {
+            return false;
+        };
+        if ours.kind != theirs.kind || ours.name != theirs.name {
+            return false;
+        }
+        if self.same_addition(main, lane) {
+            return true;
+        }
+        match namesakes(theirs.lang, theirs.kind, &theirs.name) {
+            Namesakes::Never => true,
+            Namesakes::Always => false,
+            // The same parameters: the same overload.
+            Namesakes::Overloads => {
+                let signature =
+                    |side: usize, id: SymbolId| self.sides[side].parsed(id).map(|(_, sym)| sym.signature);
+                signature(MAIN, main) == signature(LANE, lane)
+            }
+        }
+    }
+
+    /// `true` if a symbol of the main lane and one of the lane have the
+    /// same kind, the same name and the same text.
+    fn same_addition(&self, main: SymbolId, lane: SymbolId) -> bool {
+        let (Some(ours), Some(theirs)) = (self.table(MAIN).get(main), self.table(LANE).get(lane)) else {
+            return false;
+        };
+        let texts = (self.sides[MAIN].unit_text(main), self.sides[LANE].unit_text(lane));
+        ours.kind == theirs.kind && ours.name == theirs.name && matches!(texts, (Some(a), Some(b)) if a == b)
+    }
+
+    /// The symbols of a scope in the merged result, in order.
+    fn sequence(&self, seqs: [&[SymbolId]; 3], path: &Path, emit: &mut Emit) -> Order {
         let [base, main, lane] = seqs;
         let in_base: HashSet<SymbolId> = base.iter().copied().collect();
         let exists = |side: usize, id: SymbolId| self.table(side).get(id).is_some();
         let decided = |id: SymbolId| self.input.resolutions.get(&Subject::Symbol(id)).cloned();
         let mut merged: Vec<(SymbolId, Option<Choice>)> = Vec::new();
+        let mut twins: HashMap<SymbolId, SymbolId> = HashMap::new();
+        let mut clash = false;
 
         // The main lane's order, minus what the lane took away.
         for &id in main {
@@ -877,6 +1113,42 @@ impl Merger<'_> {
             } else if exists(MAIN, id) {
                 continue; // the main lane has it somewhere else
             }
+            // The main lane added one of the same name to this scope: one
+            // thing added twice, not two to keep side by side. What follows
+            // it on the lane follows the main lane's. Only what is new on
+            // both sides is one thing: a symbol the base has, which a side
+            // moved here, is itself wherever it is, and what the other side
+            // did to it has to reach it. Of several of the name, the one
+            // with the same text before another.
+            let twin = match forced.is_none() && !exists(BASE, id) {
+                false => None,
+                true => {
+                    let mine = || {
+                        merged.iter().map(|(m, _)| *m).filter(|m| {
+                            !in_base.contains(m)
+                                && !exists(BASE, *m)
+                                && !lane.contains(m)
+                                && !twins.contains_key(m)
+                        })
+                    };
+                    mine()
+                        .find(|m| self.same_addition(*m, id))
+                        .or_else(|| mine().find(|m| self.added_twice(*m, id)))
+                }
+            };
+            if let Some(twin) = twin {
+                twins.insert(twin, id);
+                anchor = Some(twin);
+                continue;
+            }
+            // The same name as something only the main lane has here, and
+            // not its twin: a method the lane moved in where the main lane
+            // wrote a copy of it, or the other way round. Both are written,
+            // so that nothing either side did is lost, and the file is asked
+            // about: the two cannot both stay.
+            clash |= merged
+                .iter()
+                .any(|(m, _)| !lane.contains(m) && !twins.contains_key(m) && self.added_twice(*m, id));
             // After its anchor, and among what the main lane added at the
             // same place in an order that does not depend on who came first.
             let mut at = match anchor {
@@ -889,7 +1161,7 @@ impl Merger<'_> {
             merged.insert(at, (id, forced));
             anchor = Some(id);
         }
-        merged
+        Order { symbols: merged, twins, clash }
     }
 
     /// Merges a scope: its header, its symbols in the merged order, its tail.
@@ -915,9 +1187,14 @@ impl Merger<'_> {
             Some(text) => emit.bytes.extend_from_slice(&text),
             None => conflict_here = true,
         }
-        let sequence = self.sequence([&seqs[BASE], &seqs[MAIN], &seqs[LANE]], path, emit);
-        for (n, (id, forced)) in sequence.into_iter().enumerate() {
+        let Order { symbols, twins, clash } =
+            self.sequence([&seqs[BASE], &seqs[MAIN], &seqs[LANE]], path, emit);
+        conflict_here |= clash;
+        for (n, (id, forced)) in symbols.into_iter().enumerate() {
+            // What the lane added under the same name: one thing with it.
+            let twin = twins.get(&id).copied();
             let prefix = |side: usize| {
+                let id = twin.filter(|_| side == LANE).unwrap_or(id);
                 self.sides[side].unit(id).map(|(view, unit)| &view.content[unit.prefix.clone()])
             };
             match merge_piece(prefix(BASE), prefix(MAIN), prefix(LANE)) {
@@ -937,7 +1214,10 @@ impl Merger<'_> {
                 None => conflict_here = true,
             }
             emit.symbols += 1;
-            self.symbol(id, forced, path, emit);
+            match twin {
+                Some(twin) => self.added_by_both(id, twin, path, emit),
+                None => self.symbol(id, forced, path, emit),
+            }
         }
         let tail = |s: &Scope| s.tail.clone();
         match merge_piece(piece(BASE, tail), piece(MAIN, tail), piece(LANE, tail)) {
@@ -982,6 +1262,14 @@ impl Merger<'_> {
         })
     }
 
+    /// The symbols inside `id` as a side has it, in order.
+    fn inside_ids(&self, side: usize, id: SymbolId) -> Vec<SymbolId> {
+        self.sides[side].at.get(&id).map_or(Vec::new(), |at| {
+            let view = &self.sides[side].views[at.view];
+            view.inside(at.sym).map(|inner| view.ids[inner]).collect()
+        })
+    }
+
     /// Merges a symbol member by member.
     fn members(&self, id: SymbolId, path: &Path, emit: &mut Emit) {
         let lead = |side: usize| self.sides[side].lead(id);
@@ -1018,6 +1306,53 @@ impl Merger<'_> {
         }
     }
 
+    /// Writes a symbol as one side has it: whole, unless it holds a symbol
+    /// the other side changed (a new class a method was moved into).
+    fn one_sided(&self, side: usize, other: usize, id: SymbolId, path: &Path, emit: &mut Emit) {
+        match self.crossed_inside(side, id, other) {
+            true => self.members(id, path, emit),
+            false => self.whole(side, id, emit),
+        }
+    }
+
+    /// Writes a symbol both sides added to the same scope under the same
+    /// name (`main` there, `lane` here): it is one thing. With the same
+    /// text on both sides it is written once; with two texts the sides do
+    /// not go together, and the conflict is the main lane's symbol with
+    /// nothing at the base.
+    fn added_by_both(&self, main: SymbolId, lane: SymbolId, path: &Path, emit: &mut Emit) {
+        match self.input.resolutions.get(&Subject::Symbol(main)).cloned() {
+            Some(Choice::Main) => return self.one_sided(MAIN, LANE, main, path, emit),
+            Some(Choice::Lane) => return self.one_sided(LANE, MAIN, lane, path, emit),
+            Some(Choice::Text(mut text)) => {
+                if !text.ends_with(b"\n") {
+                    text.push(b'\n');
+                }
+                self.know(main, emit);
+                emit.bytes.extend_from_slice(&text);
+                return;
+            }
+            None => {}
+        }
+        let text = |side: usize, id: SymbolId| {
+            self.sides[side].unit(id).map(|(view, unit)| view.content[unit.text.clone()].to_vec())
+        };
+        let (ours, theirs) = (text(MAIN, main), text(LANE, lane));
+        match ours == theirs {
+            true => emit.twice.push(main),
+            false => emit.conflicts.push(Found {
+                kind: ConflictKind::BodyBody,
+                subject: Subject::Symbol(main),
+                file: path.to_owned(),
+                name: self.table(MAIN).qualified_name(main).or_else(|| self.name(MAIN, main)),
+                base: None,
+                main: ours,
+                lane: theirs,
+            }),
+        }
+        self.one_sided(MAIN, LANE, main, path, emit);
+    }
+
     /// Writes the merged text of one symbol.
     fn symbol(&self, id: SymbolId, forced: Option<Choice>, path: &Path, emit: &mut Emit) {
         let has = |side: usize| self.sides[side].at.contains_key(&id);
@@ -1035,16 +1370,10 @@ impl Merger<'_> {
             }
             _ => {}
         }
-        // On one side only: as it is there, unless it holds a symbol the
-        // other side changed (a new class a method was moved into).
-        let one_sided =
-            |side: usize, other: usize, emit: &mut Emit| match self.crossed_inside(side, id, other) {
-                true => self.members(id, path, emit),
-                false => self.whole(side, id, emit),
-            };
+        // On one side only: as it is there.
         match (has(MAIN), has(LANE)) {
-            (true, false) => return one_sided(MAIN, LANE, emit),
-            (false, true) => return one_sided(LANE, MAIN, emit),
+            (true, false) => return self.one_sided(MAIN, LANE, id, path, emit),
+            (false, true) => return self.one_sided(LANE, MAIN, id, path, emit),
             (false, false) => return,
             (true, true) => {}
         }
@@ -1064,7 +1393,18 @@ impl Merger<'_> {
             };
         }
         if text(MAIN) == text(LANE) {
-            return self.whole(MAIN, id, emit);
+            // The same text is the same thing, unless it is made of other
+            // symbols on the two sides and one of them is a symbol the other
+            // side changed where it stood (a method one side moved in, where
+            // the other wrote a copy of it and changed the method): member
+            // by member then, so that the change is not lost with a text
+            // taken whole.
+            let crossed = self.inside_ids(MAIN, id) != self.inside_ids(LANE, id)
+                && (self.crossed_inside(MAIN, id, LANE) || self.crossed_inside(LANE, id, MAIN));
+            return match crossed {
+                true => self.members(id, path, emit),
+                false => self.whole(MAIN, id, emit),
+            };
         }
 
         // Both sides changed it.

@@ -236,6 +236,12 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     pub socket: PathBuf,
     pub debounce_ms: u64,
+    /// The settings the configuration now gives another value than the
+    /// daemon runs with (`[capture] watch`, `debounce_ms`, `rescan_secs`):
+    /// it reads them when it starts, and they wait for it to start again.
+    /// Every other setting is in force as soon as it is written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_needed: Vec<String>,
     pub watcher: WatcherStatus,
     pub repo: crate::repo::Status,
 }

@@ -493,6 +493,9 @@ impl Repo {
         if lane.is_main() {
             return Err(Error::Other("the main lane is what lanes are integrated into".into()));
         }
+        // The rules of an integration are those written now: the checks
+        // somebody added a moment ago are in force for this one.
+        self.refresh_config();
         let target = self.target_of(lane)?;
         // A lane brings what it did, not what it was built on (ADR 0001).
         if let Some(waits) = self.waits_for(lane)? {
@@ -1278,20 +1281,7 @@ impl Repo {
         }
 
         let symbols = &self.work(target)?.symbols;
-        result.auto_resolutions = prepared
-            .outcome
-            .merged_symbols
-            .iter()
-            .map(|id| AutoResolution {
-                kind: "body_merge".to_owned(),
-                symbol: symbol_ref(symbols, *id),
-                new_name: None,
-                locations: symbols
-                    .get(*id)
-                    .map(|entry| entry.file.display().to_string())
-                    .into_iter()
-                    .collect(),
-            })
+        result.auto_resolutions = settled_by_itself(symbols, &prepared.outcome)
             .chain(prepared.propagated.iter().cloned())
             .collect();
         result.checkpoint = Some(checkpoint.id.to_string());
@@ -1345,21 +1335,7 @@ impl Repo {
         let base = self.base_on(target, self.lanes[&lane].record.base);
         self.fast_forward(lane, base)?;
         let symbols = &self.work(target)?.symbols;
-        result.auto_resolutions = prepared
-            .outcome
-            .merged_symbols
-            .iter()
-            .map(|id| AutoResolution {
-                kind: "body_merge".to_owned(),
-                symbol: symbol_ref(symbols, *id),
-                new_name: None,
-                locations: symbols
-                    .get(*id)
-                    .map(|entry| entry.file.display().to_string())
-                    .into_iter()
-                    .collect(),
-            })
-            .collect();
+        result.auto_resolutions = settled_by_itself(symbols, &prepared.outcome).collect();
         result.landed_on = Some(target.to_string());
         result.message = Some(format!("it reaches the main lane when {target} does"));
         result.your_next_base = Some(base.to_string());
@@ -1550,6 +1526,14 @@ impl Repo {
     /// index: for who measures an integration as the daemon does it, with
     /// the index rewritten after the lane has its answer.
     pub fn integrate_leaving_index(&mut self, lane: LaneId) -> Result<IntegrationResult> {
+        let mut result = self.integrate_as_configured(lane)?;
+        // A configuration that could not be read is said with the answer:
+        // the one in force was the last that could.
+        result.config_error = self.config_error().map(str::to_owned);
+        Ok(result)
+    }
+
+    fn integrate_as_configured(&mut self, lane: LaneId) -> Result<IntegrationResult> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1577,6 +1561,32 @@ impl Repo {
             "the lanes keep changing: try again when they are quiet",
         ))
     }
+}
+
+/// What a merge settled without asking: the symbols both sides changed
+/// whose texts merged (`body_merge`), those both sides added with the same
+/// text, which are there once (`same_addition`), and the files whose merge
+/// as symbols stopped on the text between them where a plain line merge
+/// did not, which are that line merge (`line_merge`).
+fn settled_by_itself<'a>(
+    symbols: &'a SymbolTable,
+    outcome: &'a kito_merge::Outcome,
+) -> impl Iterator<Item = AutoResolution> + 'a {
+    let of_symbol = move |kind: &'static str, id: &SymbolId| AutoResolution {
+        kind: kind.to_owned(),
+        symbol: symbol_ref(symbols, *id),
+        new_name: None,
+        locations: symbols.get(*id).map(|entry| entry.file.display().to_string()).into_iter().collect(),
+    };
+    let merged = outcome.merged_symbols.iter().map(move |id| of_symbol("body_merge", id));
+    let twice = outcome.added_by_both.iter().map(move |id| of_symbol("same_addition", id));
+    let by_lines = outcome.merged_by_lines.iter().map(|path| AutoResolution {
+        kind: "line_merge".to_owned(),
+        symbol: path.display().to_string(),
+        new_name: None,
+        locations: vec![path.display().to_string()],
+    });
+    merged.chain(twice).chain(by_lines)
 }
 
 /// A symbol for people and logs: `ts/auth.getUser#42`.

@@ -477,6 +477,40 @@ fn an_agent_is_told_why_before_its_work_lands() {
     let now = fs::read_to_string(work.join("src/shop.ts")).unwrap();
     fs::write(work.join("src/shop.ts"), now.replace("item.price *", "Math.trunc(item.price) *")).unwrap();
     assert_eq!(integrate(&mut mcp, "lane/3")["result"], "integrated");
+    mcp.tool("kito.close_lane", json!({ "lane": "lane/3" })).unwrap();
+
+    // A note left on a function is told before the function changes, to an
+    // agent with no hooks too: with the integration it asks for, since
+    // nothing held its edit. The reasons it was told already are not
+    // repeated; the note is.
+    let noted = mcp
+        .tool(
+            "kito.note",
+            json!({ "on": "src/shop.ts:total", "text": "the nightly billing job calls it", "agent": "ada" }),
+        )
+        .unwrap();
+    assert_eq!(noted["on"], "src/shop.ts:total", "{noted}");
+    let dave = mcp
+        .tool("kito.open_lane", json!({ "agent": "dave", "intent": "rounder totals", "scope": ["src/"] }))
+        .unwrap();
+    assert_eq!(dave["why"], json!([]), "a directory: nothing is told when it is declared");
+    mcp.tool("kito.why", json!({ "target": "src/shop.ts", "lane": "lane/4" })).unwrap();
+    let work = PathBuf::from(dave["workdir"].as_str().unwrap());
+    let now = fs::read_to_string(work.join("src/shop.ts")).unwrap();
+    fs::write(work.join("src/shop.ts"), now.replace("Math.trunc(item.price)", "Math.round(item.price)"))
+        .unwrap();
+    let held = integrate(&mut mcp, "lane/4");
+    assert_eq!(held["result"], "read_first", "{held}");
+    assert_eq!(held["annotations"][0]["text"], "the nightly billing job calls it", "{held}");
+    assert_eq!(held["annotations"][0]["on"], "src/shop.ts:total", "{held}");
+    let message = held["message"].as_str().unwrap();
+    assert!(
+        message.contains("Notes left on this code:\n- note#1 on src/shop.ts:total (ada): the nightly"),
+        "{held}"
+    );
+    assert!(held["next"].as_str().unwrap().contains("`annotations`"), "{held}");
+    // Told: asked again, it goes ahead.
+    assert_eq!(integrate(&mut mcp, "lane/4")["result"], "integrated");
 
     drop(mcp);
     stop_daemon(&root);

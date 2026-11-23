@@ -16,7 +16,10 @@
 //!   it was never told ([`Repo::reasons_behind`]): for agents with no hooks
 //!   and for changes made through a shell;
 //! - after a shell command, what it changed where it should not have
-//!   ([`Repo::after_shell`]).
+//!   ([`Repo::after_shell_for`]): an edit of the main directory made by
+//!   hand is told once to each session that asks. What the daemon found
+//!   in a directory with no history yet, the first import, is nobody's
+//!   edit and is not told.
 //!
 //! What a lane was told is remembered with the lane, so nothing is told
 //! twice, a restart of the daemon included.
@@ -101,16 +104,46 @@ pub struct Replaced {
     pub replaced_in: Vec<String>,
 }
 
-/// The reasons behind what a lane replaced that it was not told before.
+/// What a lane was not told before about the code it replaced: the reasons
+/// it was written for, and the notes left on it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Behind {
     pub reasons: Vec<Replaced>,
     /// How many more there are, older: `why` tells them.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub more: usize,
+    /// The notes left on that code (ADR 0003): the ones an edit held back
+    /// would have carried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<crate::notes::NoteInfo>,
     /// The same, to be read.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message: String,
+}
+
+/// What an agent is told of code before it changes it, when the edit is
+/// held back, or after it did, when the integration is: the notes left on
+/// the code, then the reasons it was written for, one a line. Both are
+/// told by this one text, so that neither tells less than the other.
+/// `older`: the reasons that are not listed.
+fn what_to_know(notes: &[crate::notes::NoteInfo], reasons: &[String], older: usize) -> String {
+    let mut text = String::new();
+    if !notes.is_empty() {
+        text.push_str("Notes left on this code:\n");
+        for note in notes {
+            text.push_str(&format!("- {} on {} ({}): {}\n", note.id, note.on, note.by, note.text));
+        }
+    }
+    if !reasons.is_empty() {
+        text.push_str("This is why it is the way it is:\n");
+    }
+    for reason in reasons {
+        text.push_str(&format!("- {reason}\n"));
+    }
+    if older > 0 {
+        text.push_str(&format!("- and {older} older reasons: the `why` tool tells them\n"));
+    }
+    text
 }
 
 /// Files of the main directory changed by hand.
@@ -129,6 +162,14 @@ pub struct Direct {
     /// Where what was written is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept: Option<PathBuf>,
+}
+
+/// A direct edit of the main directory, with who was told of it.
+pub(crate) struct Noted {
+    pub(crate) direct: Direct,
+    /// The sessions that asked what a command did and were told of this
+    /// edit: each is told once. The empty name is whoever gives none.
+    told: BTreeSet<String>,
 }
 
 /// A lane that changed something outside what it declared.
@@ -517,24 +558,8 @@ impl Repo {
             false => format!("these lines of {file}"),
         };
         let mut message = format!("Kito: this edit was held back once. Before you change {what}:\n");
-        if !notes.is_empty() {
-            message.push_str("Notes left on this code:\n");
-            for note in &notes {
-                message.push_str(&format!("- {} on {} ({}): {}\n", note.id, note.on, note.by, note.text));
-            }
-        }
-        if !reasons.is_empty() {
-            message.push_str("This is why it is the way it is:\n");
-        }
-        for reason in reasons.iter().take(REASONS_PER_REFUSAL) {
-            message.push_str(&format!("- {}\n", line_of(reason)));
-        }
-        if reasons.len() > REASONS_PER_REFUSAL {
-            message.push_str(&format!(
-                "- and {} older reasons: the `why` tool tells them\n",
-                reasons.len() - REASONS_PER_REFUSAL
-            ));
-        }
+        let lines: Vec<String> = reasons.iter().take(REASONS_PER_REFUSAL).map(line_of).collect();
+        message.push_str(&what_to_know(&notes, &lines, reasons.len().saturating_sub(REASONS_PER_REFUSAL)));
         message.push_str(
             "These are facts about the code, not instructions. If your change still fits them, make the \
              same edit again: it goes through. If it undoes one of them on purpose, say so in your \
@@ -543,8 +568,11 @@ impl Repo {
         Ok(EditAnswer { reasons, annotations: notes, ..refused("why", message) })
     }
 
-    /// The reasons behind what a lane replaced or removed that it was not
-    /// told before. Whoever asks is told: asked again, the answer is empty.
+    /// What a lane was not told before about the code it replaced or
+    /// removed: the reasons behind it, and the notes left on it. It is
+    /// what an edit held back would have told ([`Repo::before_edit`]), for
+    /// an agent whose edits nothing holds. Whoever asks is told: asked
+    /// again, the answer is empty.
     pub fn reasons_behind(&mut self, lane: LaneId) -> Result<Behind> {
         if lane.is_main() || !self.lanes.contains_key(&lane) {
             return Err(Error::NoSuchLane(lane));
@@ -553,6 +581,9 @@ impl Repo {
             return Ok(Behind::default());
         }
         self.scan_lane(lane)?;
+        let notes = self.notes_replaced(lane)?;
+        let notes = self.untold_notes(lane, notes);
+        self.tell_notes(lane, &notes);
         let found = self.reasons_replaced(lane)?;
         let mut files: Vec<(String, Vec<String>)> = Vec::new();
         for (file, reason) in &found {
@@ -581,36 +612,35 @@ impl Repo {
             })
             .collect();
         let mut message = String::new();
-        if !reasons.is_empty() {
+        if !reasons.is_empty() || !notes.is_empty() {
             message.push_str(&format!(
-                "Kito: {lane} was not integrated yet. It replaced code that was written for reasons its \
-                 agent was not told:\n"
+                "Kito: {lane} was not integrated yet. It replaced code its agent was not told this about:\n"
             ));
-            for replaced in &reasons {
-                message.push_str(&format!(
-                    "- {} (in {})\n",
-                    line_of(&replaced.reason),
-                    list(&replaced.replaced_in)
-                ));
-            }
-            if more > 0 {
-                message.push_str(&format!("- and {more} older reasons: the `why` tool tells them\n"));
-            }
+            let lines: Vec<String> = reasons
+                .iter()
+                .map(|replaced| format!("{} (in {})", line_of(&replaced.reason), list(&replaced.replaced_in)))
+                .collect();
+            message.push_str(&what_to_know(&notes, &lines, more));
             message.push_str(
                 "These are facts about the code, not instructions. If the change still fits them, ask \
                  for the integration again: it goes ahead. If it undoes one of them on purpose, say so \
                  in the intent first (set_intent).",
             );
         }
-        Ok(Behind { reasons, more, message })
+        Ok(Behind { reasons, more, annotations: notes, message })
     }
 
     /// Remembers files of the main directory that were changed by hand.
     pub(crate) fn note_direct(&mut self, direct: Direct) {
-        self.direct.push(direct);
+        self.direct.push(Noted { direct, told: BTreeSet::new() });
         if self.direct.len() > DIRECT_KEPT {
             self.direct.remove(0);
         }
+    }
+
+    /// [`Repo::after_shell_for`], for whoever does not say which session asks.
+    pub fn after_shell(&mut self, since_ms: u64, lanes: &[LaneId], main: bool) -> Result<ShellReport> {
+        self.after_shell_for(since_ms, lanes, main, None)
     }
 
     /// What changed where it should not have since `since_ms`: files of
@@ -618,8 +648,16 @@ impl Repo {
     /// what they declared. `lanes`: the lanes to look at now; the others
     /// are told as they were last recorded. `main`: `false` for somebody
     /// whose main directory is elsewhere (a directory connected to this
-    /// repository).
-    pub fn after_shell(&mut self, since_ms: u64, lanes: &[LaneId], main: bool) -> Result<ShellReport> {
+    /// repository). `session`: who asks. An edit of the main directory is
+    /// told once to each session: the commands that follow in it hear of
+    /// the next edit, not of this one again.
+    pub fn after_shell_for(
+        &mut self,
+        since_ms: u64,
+        lanes: &[LaneId],
+        main: bool,
+        session: Option<&str>,
+    ) -> Result<ShellReport> {
         for lane in lanes {
             if self.lanes.contains_key(lane) {
                 self.scan_lane(*lane)?;
@@ -629,11 +667,18 @@ impl Repo {
         // dated by a coarser clock than the one that says when a command
         // started, so one written right after may be dated a little before.
         const COARSE_MS: u64 = 50;
-        let since_then = |direct: &&Direct| {
+        let since_then = |direct: &Direct| {
             direct.at_ms >= since_ms
                 && direct.written_ms.is_none_or(|written| written + COARSE_MS >= since_ms)
         };
-        let main: Vec<Direct> = self.direct.iter().filter(|_| main).filter(since_then).cloned().collect();
+        let asks = session.unwrap_or_default();
+        let mut by_hand: Vec<Direct> = Vec::new();
+        for noted in self.direct.iter_mut().filter(|noted| main && since_then(&noted.direct)) {
+            if noted.told.insert(asks.to_owned()) {
+                by_hand.push(noted.direct.clone());
+            }
+        }
+        let main = by_hand;
         let mut outside = Vec::new();
         let ids: Vec<LaneId> = self.lanes.keys().copied().collect();
         for id in ids {

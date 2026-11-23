@@ -4942,6 +4942,8 @@ fn print_integration(result: &IntegrationResult) {
                         auto.symbol,
                         auto.locations.join(", ")
                     ),
+                    ("same_addition", _) => println!("  added by both, there once: {}", auto.symbol),
+                    ("line_merge", _) => println!("  merged by lines: {}", auto.symbol),
                     _ => println!("  merged by itself: {}", auto.symbol),
                 }
             }
@@ -5016,6 +5018,11 @@ fn print_integration(result: &IntegrationResult) {
                 result.lane
             );
         }
+    }
+    // However it ended: the checks that ran, if any, were not those the
+    // file names now.
+    if let Some(error) = &result.config_error {
+        print_config_error(error);
     }
 }
 
@@ -5188,9 +5195,31 @@ fn cmd_sync(cli: &Cli, lane: &Option<String>) -> Outcome {
     Ok(())
 }
 
+/// What is said, wherever somebody looks, of a configuration file that
+/// cannot be read: it is not in force, and the one read before it still is.
+fn print_config_error(error: &str) {
+    let mut lines = error.lines();
+    println!("{} {}", paint::warn("Configuration ....."), lines.next().unwrap_or_default());
+    for line in lines {
+        println!("                    {line}");
+    }
+}
+
 fn print_status(status: &DaemonStatus, with_daemon: bool) {
     let repo = &status.repo;
     println!("Repository ........ {}", repo.root.display());
+    // First, so that nobody reads the rest for what the file says.
+    if let Some(error) = &repo.config_error {
+        print_config_error(error);
+    }
+    if !status.restart_needed.is_empty() {
+        println!(
+            "{} {} changed in the configuration and is read when the daemon starts: `kito daemon stop`, \
+             and the next command starts it again",
+            paint::warn("Restart needed ...."),
+            status.restart_needed.join(", ")
+        );
+    }
     println!("Author ............ {}", repo.author);
     println!("Tracked files ..... {}", repo.files);
     println!("Symbols ........... {}", repo.symbols);

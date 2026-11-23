@@ -55,3 +55,7 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0020 · A server's plugins that work on its repositories on their own](0020-plugins-that-work-on-their-own.md)
   (accepted)
+- [0021 · What a merge may do: nothing twice, never less than a line merge, and what a symbol is](0021-what-a-merge-may-do.md)
+  (accepted)
+- [0022 · The configuration in force is the one that is written](0022-the-configuration-in-force.md)
+  (accepted)

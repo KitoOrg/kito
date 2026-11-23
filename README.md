@@ -135,7 +135,13 @@ kito lane open alice --intent "taxes on every total" --scope src/shop.ts:total
 When the agent is done, its work is composed with what the main lane has
 become meanwhile, symbol by symbol: two agents that changed different
 functions of the same file, or added functions at the same place, do not
-conflict.
+conflict. Three things hold whatever is merged
+([ADR 0021](docs/adr/0021-what-a-merge-may-do.md)): what both sides added
+the same is in the result once, a line or a function; a file whose
+merge by symbols stops on the text between them is merged by lines when
+its lines compose beyond doubt (`kito integrate` says `merged by lines`);
+and the setter of a property is not its getter (`set total`, in Python
+`setter total`, next to `total`).
 
 ```bash
 kito integrate lane/1
@@ -152,8 +158,19 @@ commands = ["npx tsc --noEmit", "npm test"]
 share = ["node_modules"]
 ```
 
+The file is in force as it is written: the daemon reads it again whenever
+it takes the repository up, so checks added while it runs hold for the
+next integration, with nothing to restart. A file that cannot be read
+(broken TOML) changes nothing: the configuration read before it stays in
+force, checks included, and `kito status` and the answer of every
+integration say so until it is put right. Only how the daemon watches
+(`[capture] watch`, `debounce_ms`, `rescan_secs`) is read when it starts:
+`kito status` says when one of them waits for a restart
+([ADR 0022](docs/adr/0022-the-configuration-in-force.md)).
+
 A real conflict — the same lines of the same function, a symbol removed on
-one side and changed on the other — stops that lane only, and is decided by
+one side and changed on the other, two functions of one name added by the
+two sides with different texts — stops that lane only, and is decided by
 taking one side or writing the text:
 
 ```bash
@@ -416,6 +433,19 @@ with its tools. `kito-mcp` has to be on the `PATH`. Claude Code
 writes an underscore where a tool's name has a dot (`kito.open_lane` is
 `mcp__kito__kito_open_lane` to it): no `--tool-prefix` is needed. From
 there, a task asked in plain words is done in a lane and integrated.
+
+A session with nobody in front of it (`claude -p`) is asked nothing and
+shown nothing to accept. In a folder that was never trusted it runs the
+project's hooks and connects the `kito` server, but it does not apply the
+tools the project's settings allow, and a tool nobody approved is refused
+there. Kito's tools are then allowed on the command line:
+
+```bash
+claude -p "taxes on every total" --allowedTools "mcp__kito__*"
+```
+
+Once somebody has started Claude Code in the folder and accepted it, the
+project's own settings count for `claude -p` too.
 
 ### The intent board
 
@@ -750,7 +780,7 @@ around its tools, whatever the model decided:
 | Hook | When | What it does |
 | --- | --- | --- |
 | `kito hook before-edit` | before `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | The edit is not made if the file is in the main directory, in `.kito/`, or outside what its lane declared; the model is told what to do instead. On lines written for a reason the lane was not told, the edit is held back once and the model is given the reasons |
-| `kito hook after-shell` | after `Bash` | What a shell command changed cannot be stopped before: the model is told afterwards what it changed in the main directory and outside the scope of a lane |
+| `kito hook after-shell` | after `Bash` | What a shell command changed cannot be stopped before: the model is told afterwards what it changed in the main directory and outside the scope of a lane. An edit of the main directory is told once to a session, not after every command that follows; the files Kito took in when it first started on the directory are nobody's edit |
 | `kito hook session-start` | when a session starts, resumes or is compacted | The model is told the three rules and who is working on what right now |
 
 A refusal is written for the model that reads it:
@@ -779,9 +809,11 @@ tell it again). An agent that asked `why` for its lane counts as told.
 
 What no hook saw is caught before it lands. When an agent asks for its
 lane to be integrated (`request_integration`), and the lane replaced code
-written for reasons it was never told (edited through a shell, or by an
-agent with no hooks), the answer is `read_first` with those reasons, and
-nothing is started; asked again, the integration goes ahead. Changes
+written for reasons it was never told, or with notes on it that it was
+never told (edited through a shell, or by an agent with no hooks), the
+answer is `read_first` with those reasons and those notes, as the edit
+would have been told them had a hook held it, and nothing is started;
+asked again, the integration goes ahead. Changes
 outside the scope stop an integration as they always did, and a protected
 main lane puts back what is written in it.
 
@@ -807,8 +839,10 @@ said of itself: a label, by which nothing is decided
 ([ADR 0010](docs/adr/0010-assistant-in-a-lane.md)).
 
 Hooks are settings of Claude Code: an interactive session runs them once
-the folder is trusted, and `claude -p` runs them at once. `kito` has to be
-on the `PATH`. A hook that cannot reach the daemon lets the edit through
+the folder is trusted, and `claude -p` runs them at once (the tools the
+project allows are another matter there: see [Claude Code](#claude-code)).
+`kito` has to be on the `PATH`. A hook that cannot reach the daemon lets
+the edit through
 and says so on its standard error; the rules are still checked when the
 lane is integrated.
 

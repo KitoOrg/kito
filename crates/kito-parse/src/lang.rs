@@ -101,6 +101,39 @@ impl Dialect {
     }
 }
 
+/// Whether a container may hold two things of one kind under one name, each
+/// a thing of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Namesakes {
+    /// No: a second one replaces the first, or does not compile.
+    Never,
+    /// Overloads: as many as there are lists of parameters.
+    Overloads,
+    /// As many as one likes: each adds to the same thing, or the name
+    /// names nothing.
+    Always,
+}
+
+/// What a language makes of two definitions of the same kind and name in
+/// one container. It is what tells two lanes that each added a method
+/// `log` to a class apart from two lanes that added the same method twice.
+pub fn namesakes(lang: Lang, kind: kito_core::SymbolKind, name: &str) -> Namesakes {
+    use kito_core::SymbolKind::{Class, Function, Interface, Method, Module};
+    if name == "_" {
+        return Namesakes::Always;
+    }
+    match (lang, kind) {
+        (Lang::Java | Lang::CSharp | Lang::Cpp | Lang::TypeScript, Function | Method) => Namesakes::Overloads,
+        // Blocks that add to a type or to a namespace: `impl`, `namespace`,
+        // and the declarations TypeScript merges.
+        (Lang::Rust, Class) => Namesakes::Always,
+        (Lang::Cpp | Lang::CSharp | Lang::Php, Module) => Namesakes::Always,
+        (Lang::TypeScript, Module | Interface) => Namesakes::Always,
+        (Lang::Go, Function) if name == "init" => Namesakes::Always,
+        _ => Namesakes::Never,
+    }
+}
+
 /// The grammar for a file, chosen by its extension. `None`: the file is
 /// handled as plain text.
 pub fn dialect_for_path(path: &Path) -> Option<Dialect> {
@@ -129,6 +162,26 @@ mod tests {
         assert_eq!(lang("Program.cs"), Lang::CSharp);
         assert_eq!(lang("README.md"), Lang::Text);
         assert_eq!(lang("Makefile"), Lang::Text);
+    }
+
+    #[test]
+    fn what_may_share_a_name_depends_on_the_language() {
+        use kito_core::SymbolKind::{Class, Const, Function, Method, Module};
+        // A method defined twice is one method in Python, two in Java.
+        assert_eq!(namesakes(Lang::Python, Method, "log"), Namesakes::Never);
+        assert_eq!(namesakes(Lang::JavaScript, Function, "log"), Namesakes::Never);
+        for lang in [Lang::Java, Lang::CSharp, Lang::Cpp, Lang::TypeScript] {
+            assert_eq!(namesakes(lang, Method, "log"), Namesakes::Overloads, "{lang:?}");
+            assert_eq!(namesakes(lang, Class, "Log"), Namesakes::Never, "{lang:?}");
+        }
+        // Blocks that add to the same thing.
+        assert_eq!(namesakes(Lang::Rust, Class, "Server"), Namesakes::Always);
+        assert_eq!(namesakes(Lang::Cpp, Module, "util"), Namesakes::Always);
+        assert_eq!(namesakes(Lang::Rust, Function, "start"), Namesakes::Never);
+        // Names that name nothing, and Go's `init`.
+        assert_eq!(namesakes(Lang::Rust, Const, "_"), Namesakes::Always);
+        assert_eq!(namesakes(Lang::Go, Function, "init"), Namesakes::Always);
+        assert_eq!(namesakes(Lang::Go, Function, "start"), Namesakes::Never);
     }
 
     #[test]

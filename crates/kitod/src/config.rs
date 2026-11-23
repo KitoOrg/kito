@@ -555,12 +555,25 @@ impl Config {
     /// Reads `config.toml` from the store directory. If the file is missing
     /// the defaults apply.
     pub fn load(store_dir: &Path) -> Result<Config, String> {
+        Config::parse(store_dir, Config::read(store_dir)?.as_deref())
+    }
+
+    /// The bytes of `config.toml` as it is now; `None` if there is no file.
+    pub fn read(store_dir: &Path) -> Result<Option<Vec<u8>>, String> {
         let path = store_dir.join(CONFIG_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// What the bytes of `config.toml` say; of no file, the defaults.
+    pub fn parse(store_dir: &Path, bytes: Option<&[u8]>) -> Result<Config, String> {
+        let Some(bytes) = bytes else { return Ok(Config::default()) };
+        let path = store_dir.join(CONFIG_FILE);
+        let text = std::str::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        toml::from_str(text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     pub fn export_options(&self) -> kito_git::ExportOptions {

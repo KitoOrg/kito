@@ -76,3 +76,27 @@ pub enum NoteTarget {
   that no longer exists") until somebody removes it.
 - Not done here: notes in git (`git notes`), notes on a single line that
   follow it through edits, replies to a note (that is review, phase 17).
+
+## Amended 2026-11-23: told before the code lands, with hooks or without
+
+A note "is told to every agent before it changes the code". That held
+for an agent whose edits a hook holds back: the edit that is held
+carries the notes. An agent with no hooks, or one that changed the code
+through a shell, was told the reasons when it asked for its lane to be
+integrated (`read_first`) and never the notes; a lane opened on a
+directory was told nothing when it opened. The note never reached it.
+
+- **`reasons_behind` answers the notes too** (`annotations`): the ones
+  on the functions whose lines the lane replaced or removed, on their
+  files and on the directories above, as an edit of those lines that was
+  held back would have carried them. Lines that are only added, and new
+  files, have none. The lane counts as told: asked again, the answer is
+  empty and the integration goes ahead.
+- **`read_first`** (the MCP tool `request_integration`) carries them as
+  `annotations`, and is answered when there are notes and no reasons
+  left to tell.
+- **One text tells both.** What the held edit says and what the held
+  integration says of notes and reasons is written by one function of
+  the daemon (`guard::what_to_know`): the same headings, the same line
+  for a note, the same line for a reason. The two cannot tell different
+  things again.

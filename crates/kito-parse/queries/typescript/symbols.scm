@@ -26,6 +26,21 @@
 (internal_module name: (_) @name body: (statement_block) @body) @def.module
 (module name: (_) @name body: (statement_block) @body) @def.module
 
+; The setter of a property has the name of its getter: `set` is part of
+; its own, `set total`. The getter keeps the plain name.
+(method_definition
+  "set" @role
+  name: (_) @name
+  parameters: (formal_parameters) @sig
+  return_type: (_)? @sig
+  body: (statement_block) @body) @def.method
+
+(abstract_method_signature
+  "set" @role
+  name: (_) @name
+  parameters: (formal_parameters) @sig
+  return_type: (_)? @sig) @def.method
+
 (method_definition
   name: (_) @name
   parameters: (formal_parameters) @sig

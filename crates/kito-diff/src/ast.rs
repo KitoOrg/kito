@@ -137,8 +137,71 @@ struct Old<'a> {
     id: SymbolId,
     entry: &'a SymbolEntry,
     seen: Option<(&'a ParsedSymbol, &'a [u8])>,
+    /// What it is called: as the old content names it, which is what the
+    /// new content is compared with. The history may have it under the name
+    /// it had before a word told it from a namesake (`total`, now `set
+    /// total`): the two are then paired, and the rename is recorded.
+    name: &'a str,
     parent: Option<usize>,
     children: Vec<usize>,
+}
+
+/// Symbols of the history by enclosing symbol, kind and name, each queue
+/// in order of ID.
+type Known<'a> = HashMap<(Option<SymbolId>, kito_core::SymbolKind, &'a str), VecDeque<SymbolId>>;
+
+/// Which of the `known` symbols each parsed one is: same enclosing symbol,
+/// kind and name, namesakes in the order they were created. A symbol whose
+/// name now starts with a word that tells it from a namesake is also
+/// recognized under the name it had without it, if the history still has
+/// it so and no symbol goes by that name.
+///
+/// A history written before names had such words holds the two halves of
+/// a property under one name, numbered in the order they were written in.
+/// Where it has under the plain name as many symbols as the file has by
+/// it, with a word or without, and none under a name with a word, they are
+/// those, in the order of the file: a setter written above its getter is
+/// the first of the two, not the second.
+fn recognize<'a>(mut known: Known<'a>, symbols: &'a [ParsedSymbol]) -> Vec<Option<SymbolId>> {
+    let mut ids: Vec<Option<SymbolId>> = vec![None; symbols.len()];
+    let plain = |sym: &'a ParsedSymbol| -> &'a str { sym.formerly.as_deref().unwrap_or(sym.name.as_str()) };
+    // By enclosing symbol, kind and plain name: `true` if the history holds
+    // every symbol of that name under the plain one. Settled when the first
+    // of them is met, before any is taken.
+    let mut all_plain: HashMap<(Option<SymbolId>, kito_core::SymbolKind, &'a str), bool> = HashMap::new();
+    for formerly in [false, true] {
+        for (i, sym) in symbols.iter().enumerate() {
+            if ids[i].is_some() {
+                continue;
+            }
+            let parent = match sym.parent {
+                None => None,
+                Some(p) => match ids[p] {
+                    Some(id) => Some(id),
+                    None => continue, // the parent is unknown to the history, so is this
+                },
+            };
+            let old = *all_plain.entry((parent, sym.kind, plain(sym))).or_insert_with(|| {
+                let has = |name: &'a str| known.get(&(parent, sym.kind, name)).map_or(0, VecDeque::len);
+                let mates = || {
+                    symbols
+                        .iter()
+                        .filter(|s| s.parent == sym.parent && s.kind == sym.kind && plain(s) == plain(sym))
+                };
+                mates().any(|s| s.formerly.is_some())
+                    && mates().all(|s| s.formerly.is_none() || has(s.name.as_str()) == 0)
+                    && has(plain(sym)) == mates().count()
+            });
+            let mut named =
+                |name: &'a str| known.get_mut(&(parent, sym.kind, name)).and_then(VecDeque::pop_front);
+            ids[i] = named(sym.name.as_str())
+                .or_else(|| sym.formerly.as_deref().filter(|_| formerly || old).and_then(&mut named));
+        }
+        if ids.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    ids
 }
 
 /// A symbol of the new content.
@@ -183,23 +246,11 @@ struct Differ<'a> {
 /// as the differ does, by enclosing symbol, kind and name, namesakes in
 /// order. `None` for the ones the history does not know.
 pub fn identify(table: &SymbolTable, path: &Path, parsed: &ParsedFile) -> Vec<Option<SymbolId>> {
-    let mut known: HashMap<(Option<SymbolId>, kito_core::SymbolKind, &str), VecDeque<SymbolId>> =
-        HashMap::new();
+    let mut known = Known::new();
     for (id, entry) in table.in_file(path) {
         known.entry((entry.parent, entry.kind, entry.name.as_str())).or_default().push_back(id);
     }
-    let mut ids: Vec<Option<SymbolId>> = Vec::with_capacity(parsed.symbols.len());
-    for sym in &parsed.symbols {
-        let parent = match sym.parent {
-            None => Some(None),
-            Some(p) => ids[p].map(Some),
-        };
-        let id = parent
-            .and_then(|parent| known.get_mut(&(parent, sym.kind, sym.name.as_str())))
-            .and_then(VecDeque::pop_front);
-        ids.push(id);
-    }
-    ids
+    recognize(known, &parsed.symbols)
 }
 
 /// Compares the old and the new version of the changed files and returns
@@ -301,24 +352,14 @@ impl<'a> Differ<'a> {
         if let Some(old) = change.old {
             // Known symbols by (parent, kind, name), each queue in order of
             // ID: namesakes are recognized in the order they were created.
-            let mut known: HashMap<(Option<SymbolId>, kito_core::SymbolKind, &str), VecDeque<SymbolId>> =
-                HashMap::new();
+            let mut known = Known::new();
             for (id, entry) in &entries {
                 known.entry((entry.parent, entry.kind, entry.name.as_str())).or_default().push_back(*id);
             }
-            let mut ids: Vec<Option<SymbolId>> = vec![None; old.parsed.symbols.len()];
-            for (i, sym) in old.parsed.symbols.iter().enumerate() {
-                let parent = match sym.parent {
-                    None => None,
-                    Some(p) => match ids[p] {
-                        Some(id) => Some(id),
-                        None => continue, // the parent is unknown to the history, so is this
-                    },
-                };
-                let id = known.get_mut(&(parent, sym.kind, sym.name.as_str())).and_then(VecDeque::pop_front);
+            let ids = recognize(known, &old.parsed.symbols);
+            for (sym, id) in old.parsed.symbols.iter().zip(ids) {
                 if let Some(id) = id {
                     seen.insert(id, (sym, old.content));
-                    ids[i] = Some(id);
                 }
             }
         }
@@ -327,8 +368,10 @@ impl<'a> Differ<'a> {
             entries.iter().enumerate().map(|(i, (id, _))| (*id, base + i)).collect();
         for (id, entry) in &entries {
             let parent = entry.parent.and_then(|p| index.get(&p).copied());
+            let seen = seen.get(id).copied();
+            let name = seen.map_or(entry.name.as_str(), |(sym, _)| sym.name.as_str());
             self.old_at.insert(*id, self.olds.len());
-            self.olds.push(Old { id: *id, entry, seen: seen.get(id).copied(), parent, children: Vec::new() });
+            self.olds.push(Old { id: *id, entry, seen, name, parent, children: Vec::new() });
             self.matched.push(false);
         }
         let mut roots = Vec::new();
@@ -372,8 +415,7 @@ impl<'a> Differ<'a> {
     /// Names of the members two containers have in common, as a share of the
     /// larger of the two.
     fn member_overlap(&self, old: usize, new: usize) -> f32 {
-        let old_names: Vec<&str> =
-            self.olds[old].children.iter().map(|&c| self.olds[c].entry.name.as_str()).collect();
+        let old_names: Vec<&str> = self.olds[old].children.iter().map(|&c| self.olds[c].name).collect();
         let new_names: HashSet<&str> =
             self.news[new].children.iter().map(|&c| self.news[c].sym.name.as_str()).collect();
         let common = old_names.iter().filter(|name| new_names.contains(*name)).count();
@@ -439,7 +481,7 @@ impl<'a> Differ<'a> {
                 let sym = self.news[n].sym;
                 let hit = free_old.iter().position(|&o| {
                     let old = &self.olds[o];
-                    if old.entry.kind != sym.kind || old.entry.name != sym.name {
+                    if old.entry.kind != sym.kind || old.name != sym.name {
                         return false;
                     }
                     let unchanged = old.seen.map_or(0, |(seen, _)| {
@@ -597,7 +639,7 @@ impl<'a> Differ<'a> {
         use kito_core::SymbolKind::Module;
         match (self.olds[old].parent, self.news[new].parent) {
             (None, None) => true,
-            (Some(p), Some(q)) => self.olds[p].entry.name == self.news[q].sym.name,
+            (Some(p), Some(q)) => self.olds[p].name == self.news[q].sym.name,
             // In or out of a namespace.
             (Some(p), None) => self.olds[p].entry.kind == Module,
             (None, Some(q)) => self.news[q].sym.kind == Module,
@@ -612,7 +654,7 @@ impl<'a> Differ<'a> {
         if o.entry.kind != n.kind {
             return None;
         }
-        let same_name = o.entry.name == n.name;
+        let same_name = o.name == n.name;
         let same_body = seen.body == n.body;
         let score = if same_body && n.body_tokens >= MIN_BODY_TOKENS {
             Some(1.0)
@@ -674,7 +716,7 @@ impl<'a> Differ<'a> {
                 continue;
             }
             let same_body = by_body.get(&seen.body).into_iter().flatten();
-            let same_name = by_name.get(old.entry.name.as_str()).into_iter().flatten();
+            let same_name = by_name.get(old.name).into_iter().flatten();
             let mut tried: Vec<usize> = same_body.chain(same_name).copied().collect();
             tried.sort_unstable();
             tried.dedup();

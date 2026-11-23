@@ -334,6 +334,10 @@ pub struct Status {
     /// The lane where commits of the git remote wait to be merged.
     #[serde(default)]
     pub pull_waiting: Option<String>,
+    /// Why `.kito/config.toml` is not in force as it is written: it cannot
+    /// be read, and the configuration read before it changed still is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 /// A file found changed in the directory of a protected main lane: its
@@ -582,18 +586,34 @@ pub struct Repo {
     /// The reasons each lane was told, so that none is told twice.
     pub(crate) reasons_told: HashMap<LaneId, BTreeSet<String>>,
     /// The last direct edits of the main directory, put back or not.
-    pub(crate) direct: Vec<crate::guard::Direct>,
+    pub(crate) direct: Vec<crate::guard::Noted>,
+    /// While `true`, what a capture finds in the main directory is not an
+    /// edit made by hand: a directory with no history yet is being taken in.
+    importing: bool,
     /// From reasons to what they touched: built when somebody first asks
     /// why, kept up to date from then on.
     pub(crate) why_index: Option<crate::why::WhyIndex>,
     /// What was recorded since somebody last asked: for whoever tells the
     /// clients that watch the repository.
     pub(crate) recorded: Vec<Op>,
+    /// The configuration file as it was when it was last looked at (`None`:
+    /// there was none), and why it could not be read, if it could not: the
+    /// configuration in force is then the last one that could.
+    config_seen: (Option<Vec<u8>>, Option<String>),
 }
 
 /// How many recorded ops are kept for whoever asks: with nobody asking,
 /// the oldest are forgotten.
 const RECORDED_KEPT: usize = 4096;
+
+/// What is said of a configuration file that cannot be read: it is not in
+/// force, and nobody should think that an empty one is.
+fn unreadable(why: &str) -> String {
+    format!(
+        "the configuration file cannot be read, so what it says is not in force: the configuration read \
+         before it changed still is (checks included). Fix the file: {why}"
+    )
+}
 
 fn hex20(oid: &[u8; 20]) -> String {
     oid.iter().map(|b| format!("{b:02x}")).collect()
@@ -647,7 +667,8 @@ impl Repo {
         let root = root.canonical().map_err(Error::io(root))?;
         let store_dir = root.join(STORE_DIR);
         let store = Store::open(&store_dir)?;
-        let config = Config::load(&store_dir).map_err(Error::Config)?;
+        let config_text = Config::read(&store_dir).map_err(Error::Config)?;
+        let config = Config::parse(&store_dir, config_text.as_deref()).map_err(Error::Config)?;
         let providers = crate::refs::providers(&config, &root);
         let identity = identity::resolve(&config, &root);
         let main = Work::new(LaneId::MAIN, root.clone(), identity.author(), &config.ignore_patterns());
@@ -672,9 +693,11 @@ impl Repo {
             refusals: (0, None),
             reasons_told: HashMap::new(),
             direct: Vec::new(),
+            importing: false,
             pushed: (None, None),
             why_index: None,
             recorded: Vec::new(),
+            config_seen: (config_text, None),
         };
         repo.load_state()?;
         repo.load_lanes()?;
@@ -714,10 +737,71 @@ impl Repo {
         &self.identity
     }
 
-    /// Rereads `config.toml`: identity and ignore rules take effect right
-    /// away, without restarting the daemon.
+    /// Rereads `config.toml`, and who signs (which also depends on what is
+    /// outside the repository): identity and ignore rules take effect right
+    /// away, without restarting the daemon. A file that cannot be read is
+    /// an error, and changes nothing.
     pub fn reload_config(&mut self) -> Result<()> {
-        self.config = Config::load(&self.root.join(STORE_DIR)).map_err(Error::Config)?;
+        let store_dir = self.root.join(STORE_DIR);
+        let text = Config::read(&store_dir).map_err(Error::Config)?;
+        let config = Config::parse(&store_dir, text.as_deref()).map_err(Error::Config)?;
+        self.config_seen = (text, None);
+        self.put_in_force(config);
+        Ok(())
+    }
+
+    /// Reads the configuration again if its file is not as it was when it
+    /// was last looked at: what is written there is what is in force,
+    /// without anybody restarting anything. It is asked before each
+    /// integration, and by the daemon every time it takes the repository
+    /// up: that costs one small read, and leaves no moment in which a file
+    /// just written is not yet the one that counts.
+    ///
+    /// A file that cannot be read (broken TOML) puts nothing in force: the
+    /// configuration read before it stays, and [`Repo::config_error`] says
+    /// why until the file is right again. Never the defaults: a repository
+    /// with checks does not lose them to a missing quote. Returns `true` if
+    /// the configuration in force changed.
+    pub fn refresh_config(&mut self) -> bool {
+        let store_dir = self.root.join(STORE_DIR);
+        let text = match Config::read(&store_dir) {
+            Ok(text) => text,
+            Err(why) => {
+                self.config_seen.1 = Some(unreadable(&why));
+                return false;
+            }
+        };
+        // As it was when it was read: nothing to do. One that could not be
+        // read is looked at again, until it can.
+        if text == self.config_seen.0 && self.config_seen.1.is_none() {
+            return false;
+        }
+        match Config::parse(&store_dir, text.as_deref()) {
+            Ok(config) => {
+                self.config_seen = (text, None);
+                let changed = config != self.config;
+                if changed {
+                    self.put_in_force(config);
+                }
+                changed
+            }
+            Err(why) => {
+                self.config_seen = (text, Some(unreadable(&why)));
+                false
+            }
+        }
+    }
+
+    /// Why the configuration file is not in force as it is written, if it
+    /// is not: it cannot be read, and the last one that could is in force.
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_seen.1.as_deref()
+    }
+
+    /// Makes a configuration the one in force: who answers for the uses of
+    /// a symbol, what is ignored, who signs.
+    fn put_in_force(&mut self, config: Config) {
+        self.config = config;
         self.reload_providers();
         self.main.ignore = IgnoreRules::new(&self.root, &self.config.ignore_patterns());
         self.identity = identity::resolve(&self.config, &self.root);
@@ -726,7 +810,6 @@ impl Repo {
         for at in self.lanes.values_mut() {
             at.work.ignore = IgnoreRules::new(&at.work.root, &ignore);
         }
-        Ok(())
     }
 
     pub fn store(&self) -> &Store {
@@ -1176,8 +1259,9 @@ impl Repo {
             self.store.put_blob(blob)?;
         }
         // What changed in the main directory without an integration
-        // writing there was changed by hand.
-        let by_hand: Vec<String> = match work.lane.is_main() && !self.main_open {
+        // writing there was changed by hand. Not what was there before
+        // anything was recorded: that is the first import.
+        let by_hand: Vec<String> = match work.lane.is_main() && !self.main_open && !self.importing {
             true => {
                 file_ops.iter().flat_map(|op| op.paths()).map(|path| path.display().to_string()).collect()
             }
@@ -1435,6 +1519,19 @@ impl Repo {
         Ok(ops)
     }
 
+    /// The scan a daemon makes when it starts. In a repository with no
+    /// history yet it is the first import: the files were there before
+    /// anything was recorded, and no command that runs afterwards changed
+    /// them. Whatever is found later, or in a repository that has a
+    /// history, was changed by hand like any other edit of the main
+    /// directory.
+    pub fn scan_at_start(&mut self) -> Result<Vec<Op>> {
+        self.importing = self.main.head.is_none();
+        let scanned = self.scan_all();
+        self.importing = false;
+        scanned
+    }
+
     /// Creates a checkpoint on the current state of the working directory
     /// and, if configured, exports it to git.
     pub fn checkpoint(&mut self, label: &str) -> Result<CheckpointResult> {
@@ -1678,6 +1775,7 @@ impl Repo {
             pushed: self.pushed.0.clone(),
             push_error: self.pushed.1.clone(),
             pull_waiting: self.pull_waiting().map(|(_, lane)| lane.to_string()),
+            config_error: self.config_error().map(str::to_owned),
             ops_since_checkpoint,
             counters: self.counters.clone(),
         })

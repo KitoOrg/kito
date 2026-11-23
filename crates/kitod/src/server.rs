@@ -222,6 +222,7 @@ impl Daemon {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
             Some(repo) => {
+                self.fresh_config(repo);
                 let result = f(repo);
                 // Whatever was recorded on the way, the watchers are told.
                 let recorded = std::mem::take(&mut repo.recorded);
@@ -248,8 +249,47 @@ impl Daemon {
         }
     }
 
+    /// Reads the configuration again if its file changed: what is written
+    /// there is what the repository goes by, whatever is done with it
+    /// next. Asked every time the repository is taken up (a request, a
+    /// capture, a scan, an integration): one small read each time, and no
+    /// moment in which a file just written does not count yet, which file
+    /// events, late or missing, could not promise. A file that cannot be
+    /// read is said here once, and with every status and integration
+    /// until it can.
+    fn fresh_config(&self, repo: &mut Repo) {
+        let was = repo.config_error().map(str::to_owned);
+        let plugins = repo.config().plugins.clone();
+        let changed = repo.refresh_config();
+        if changed && repo.config().plugins != plugins {
+            self.plugins_changed.fetch_add(1, Ordering::Relaxed);
+        }
+        match (was.as_deref(), repo.config_error()) {
+            (was, Some(why)) if was != Some(why) => eprintln!("kitod: {why}"),
+            (Some(_), None) => eprintln!("kitod: the configuration file can be read again, and is in force"),
+            _ if changed => eprintln!("kitod: the configuration changed, and is in force"),
+            _ => {}
+        }
+    }
+
+    /// The settings the configuration now gives another value than the
+    /// daemon runs with: they are read when it starts, and wait for that.
+    fn waits_for_restart(&self, capture: &crate::config::CaptureConfig) -> Vec<String> {
+        let mut waits = Vec::new();
+        if capture.watch != self.watching {
+            waits.push("[capture] watch".to_owned());
+        }
+        if Duration::from_millis(capture.debounce_ms.max(1)) != self.debounce {
+            waits.push("[capture] debounce_ms".to_owned());
+        }
+        if Duration::from_secs(capture.rescan_secs.max(1)) != self.rescan_every {
+            waits.push("[capture] rescan_secs".to_owned());
+        }
+        waits
+    }
+
     fn status(&self) -> Result<DaemonStatus> {
-        let repo = self.with_repo(|repo| repo.status())?;
+        let (repo, capture) = self.with_repo(|repo| Ok((repo.status()?, repo.config().capture.clone())))?;
         let stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
         Ok(DaemonStatus {
             pid: std::process::id(),
@@ -257,6 +297,7 @@ impl Daemon {
             uptime_secs: self.started.elapsed().as_secs(),
             socket: self.socket.clone(),
             debounce_ms: self.debounce.as_millis() as u64,
+            restart_needed: self.waits_for_restart(&capture),
             watcher: WatcherStatus {
                 events: self.signals.events.load(Ordering::Relaxed),
                 batches: stats.batches,
@@ -1211,8 +1252,11 @@ impl Daemon {
                         .filter_map(|spec| spec.trim().parse().ok())
                         .collect();
                     let main = params.get("main").and_then(Value::as_bool).unwrap_or(true);
+                    // Which session asks: each is told an edit once.
+                    let session = params.get("session").and_then(Value::as_str);
                     to_json(serde_json::to_value(
-                        self.with_repo(|repo| repo.after_shell(since, &lanes, main)).map_err(internal)?,
+                        self.with_repo(|repo| repo.after_shell_for(since, &lanes, main, session))
+                            .map_err(internal)?,
                     ))
                 }
                 "board" => to_json(serde_json::to_value(
@@ -2202,7 +2246,11 @@ impl Daemon {
     }
 
     /// A lane has its answer: whoever watches is told, and whoever waits.
-    fn conclude(&self, job: JobId, result: IntegrationResult) {
+    fn conclude(&self, job: JobId, mut result: IntegrationResult) {
+        // A configuration that could not be read is said with the answer:
+        // the one in force was the last that could.
+        result.config_error =
+            self.with_repo(|repo| Ok(repo.config_error().map(str::to_owned))).ok().flatten();
         self.integration_ended(&result);
         if result.result == kito_integrate::Outcome::Integrated {
             self.push_wanted.notify_one();
@@ -2487,7 +2535,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         None
     };
 
-    repo.scan_all()?;
+    repo.scan_at_start()?;
     // Files known only as text (imported, or captured by an older version) get their symbols now.
     repo.analyze()?;
 

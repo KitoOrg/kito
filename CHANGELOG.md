@@ -4,6 +4,116 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.39.4]
+
+What tests on real merges found. Open-source projects' own merges were
+replayed through Kito, and agents were run against it; this release
+fixes what they found that has one right answer.
+
+**Four were wrong merges, made in silence.** Kito integrated, said
+nothing, and a file was not what either side wrote. All four have been
+there since 0.3.0, the first version that merged
+([ADR 0021](docs/adr/0021-what-a-merge-may-do.md)). The replays found
+the first three; the fourth was found by reading the merge again before
+this release:
+
+- **A line was merged in twice.** One side changed a line and added a
+  line after it; the other added the same line at that place. The added
+  line was in the result twice. It is there once now, as is anything
+  the two sides both added where their changes touch.
+- **A function or a method was merged in twice.** Both sides added a
+  function of the same name to the same file, or a method to the same
+  class: the result had two definitions. With the same text it is there
+  once now (the integration says `added by both, there once`); with two
+  texts it is a conflict, `body_body` with nothing at the base, decided
+  like any other. Where a language lets two things of one name live
+  side by side they are kept as before: overloads with other
+  parameters, a second `impl` block, a namespace opened again.
+- **A change could land in the wrong one of two things of one name.**
+  The history numbers symbols of one name in the order they were made,
+  a file in the order they are written. When one side wrote a new
+  overload above an old one (or a getter above a setter, or a `static`
+  method above a method), a change the other side made to the old one
+  went to the new one, or the two were a conflict nobody could make
+  sense of. A property's setter is now a symbol of its own name (`set
+  total`; in Python `setter total`; the getter stays `total`), and a
+  file whose namesakes are not the ones the base has is merged as text,
+  or asked about.
+- **A change to a function was lost when the function moved to where
+  the other side had written a copy of it.** One side changed a
+  function and wrote a copy of it, as it was, in another class or
+  another file; the other side moved the function there. The class, or
+  the file, was the same text on both sides and was taken as it was:
+  the copy stayed, the function went, and its change with it. The same
+  text is now the same thing only when it is made of the same symbols;
+  the moved function and the copy are told apart, and since the two
+  cannot both stay under one name the file is a conflict of kind
+  `text`.
+
+**Whether a repository was touched** cannot be worked out for you: the
+history holds what was merged, not what should have been. What to look
+for, in files that two lanes changed between the same two checkpoints:
+a line, or a few, written twice in a row where each lane had them once;
+two definitions of one name in a file or a class (`kito why
+<file>:<name>` answers that several things are called so; a linter or a
+compiler says it too, and where a repository had checks that compile
+the code they refused such a merge); and, in a class with overloads or
+with a getter and a setter, a change that is in the one it was not made
+in; and a function that one lane moved to a class or a file where
+another lane had written the same function, whose change by that other
+lane is not in it. `kito log -v <file>` shows what each integration did
+to a file, and `kito why <file>:<line>` which lane a line came from.
+
+Also in this release:
+
+- **Kito does not stop where a plain line merge would not.** One side
+  added a function after the statements that close a file, the other
+  changed one of those statements: a conflict of kind `text` on the
+  whole file, in every language. Where a file's merge by symbols ends
+  in conflicts of kind `text` only, and a line merge of it whose
+  changes neither overlap nor touch has none, the result is that line
+  merge (`merged by lines` in the answer; `line_merge` in
+  `auto_resolutions`). A line merge that would write a definition twice
+  (a function both sides added, or moved, to two places of the file) is
+  not taken, and the conflict stands. The same lines removed by both
+  sides next to lines that repeat are no longer a conflict either.
+- **After `kito init`, the first import is not an edit made by hand.**
+  `kito hook after-shell` told an assistant after every command that
+  files of the main directory had been changed by hand, naming the
+  files Kito had just taken in. What the daemon finds when it first
+  starts on a directory is not kept as an edit. A real edit by hand is
+  told once to each session, not after every command that follows.
+- **A note reaches an agent with no hooks.** A lane that changed noted
+  code without a hook to hold the edit is told the notes when it asks
+  to be integrated: `read_first` carries them (`annotations`) with the
+  reasons, in the words the held edit uses
+  ([ADR 0003](docs/adr/0003-notes-on-code.md), amended).
+- **A configuration that is written is the configuration in force.**
+  `[verify] commands` written into `.kito/config.toml` while the daemon
+  ran were not read until it restarted: a lane that broke them was
+  integrated unchecked, and nothing said so. The file is now read again
+  whenever the repository is taken up. One that cannot be read (broken
+  TOML) leaves the configuration read before it in force, checks
+  included, and `kito status` and every integration say so
+  (`config_error`). `kito status` says when `[capture] watch`,
+  `debounce_ms` or `rescan_secs`, which the daemon reads as it starts,
+  wait for a restart (`restart_needed`)
+  ([ADR 0022](docs/adr/0022-the-configuration-in-force.md)).
+- **Words.** The tool `kito.sync` says what its count is: the operations
+  that call recorded, 0 when the daemon had recorded the save already.
+  The README says that a session with nobody in front of it (`claude
+  -p`) in a folder that was never trusted needs Kito's tools allowed on
+  the command line (`--allowedTools "mcp__kito__*"`).
+
+Names in scopes, notes and `why`: `file:Class.total` now means the
+getter alone, and the setter is `file:Class.set total`. Histories are
+not rewritten; a setter recorded under the old name is renamed the next
+time its file is saved, and keeps its notes and its reasons.
+
+Not changed, and for another release to decide: changes on lines that
+touch are still merged; two imports added at the same place are still a
+conflict; overloads are still not told apart in the history itself.
+
 ## [0.39.3]
 
 How a person signs in can be changed

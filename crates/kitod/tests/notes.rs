@@ -162,3 +162,66 @@ fn an_agent_about_to_change_noted_code_is_told_once() {
     let again = repo.before_edit(Some(lane), Path::new("src/shop.ts"), &[(2, 4)], false).unwrap();
     assert!(again.allowed, "{again:?}");
 }
+
+/// The lines of a message that are about notes: `- note#1 on …`.
+fn note_lines(message: &str) -> Vec<&str> {
+    message.lines().filter(|line| line.starts_with("- note#")).collect()
+}
+
+#[test]
+fn an_agent_with_no_hooks_is_told_the_notes_before_its_lane_is_integrated() {
+    let (_tmp, root, mut repo) = shop();
+    repo.add_note(LaneId::MAIN, "src/shop.ts:total", NIGHTLY, None, None).unwrap();
+    repo.add_note(LaneId::MAIN, "src/billing/", "rates come from finance", None, None).unwrap();
+    repo.add_note(LaneId::MAIN, "src/shop.ts:discount", "marketing sets the rate", None, None).unwrap();
+    let open = |repo: &mut Repo, agent: &str| -> (LaneId, PathBuf) {
+        // A directory: nothing is told when it is declared.
+        let info = repo.open_lane(agent, None, None, "tidy the sums", &["src/".to_owned()]).unwrap();
+        assert!(repo.why_of_scope(info.id.parse().unwrap(), &["src/".to_owned()]).0.is_empty());
+        (info.id.parse().unwrap(), info.workdir.unwrap())
+    };
+
+    // What a hook tells of an edit of `total`, before the edit is made.
+    let (hooked, _) = open(&mut repo, "bob");
+    let held = repo.before_edit(Some(hooked), Path::new("src/shop.ts"), &[(4, 4)], false).unwrap();
+    assert_eq!(held.kind, "why");
+    assert_eq!(note_lines(&held.message), [format!("- note#1 on src/shop.ts:total (ada): {NIGHTLY}")]);
+
+    // The same edit with nothing in between: a shell, another editor. The
+    // lane is told the same when it asks to be integrated, and is not
+    // integrated before.
+    let (plain, work) = open(&mut repo, "carol");
+    write(&work, "src/shop.ts", &SHOP.replace("sum += price;", "sum += price * 100;"));
+    write(&work, "src/billing/rates.ts", "export const vat = 0.2;\n");
+    let behind = repo.reasons_behind(plain).unwrap();
+    assert_eq!(behind.annotations.iter().map(|note| note.id.as_str()).collect::<Vec<_>>(), ["note#1"]);
+    assert_eq!(note_lines(&behind.message), note_lines(&held.message));
+    assert!(behind.message.contains("Notes left on this code:\n"), "{}", behind.message);
+    assert!(behind.message.contains("ask for the integration again"), "{}", behind.message);
+    // The note of the function it did not change is not told, nor the one
+    // of a directory where it only added a file.
+    assert!(
+        !behind.message.contains("marketing") && !behind.message.contains("finance"),
+        "{}",
+        behind.message
+    );
+    // Asked again there is nothing left to tell, and the lane goes in.
+    let again = repo.reasons_behind(plain).unwrap();
+    assert!(again.annotations.is_empty() && again.reasons.is_empty() && again.message.is_empty());
+    assert_eq!(repo.integrate(plain).unwrap().result, kito_integrate::Outcome::Integrated);
+
+    // A lane that removes the function is told of it too; one that was
+    // told at the edit is not told again.
+    let (removes, work) = open(&mut repo, "dave");
+    let now = fs::read_to_string(root.join("src/shop.ts")).unwrap();
+    let cut = now.find("export function discount").unwrap();
+    write(&work, "src/shop.ts", &format!("{}\n", now[..cut].trim_end()));
+    let behind = repo.reasons_behind(removes).unwrap();
+    assert_eq!(behind.annotations.len(), 1, "{behind:?}");
+    assert!(behind.annotations[0].text.contains("marketing") && behind.annotations[0].gone);
+    let (told, work) = open(&mut repo, "erin");
+    let held = repo.before_edit(Some(told), Path::new("src/billing/tax.ts"), &[(2, 2)], false).unwrap();
+    assert_eq!(held.annotations.len(), 1, "{held:?}");
+    write(&work, "src/billing/tax.ts", &TAX.replace("0.2", "0.22"));
+    assert!(repo.reasons_behind(told).unwrap().annotations.is_empty());
+}

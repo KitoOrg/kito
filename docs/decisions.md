@@ -1884,3 +1884,123 @@ inside it, so that the lock is held for a read and a write and no
 longer. What a writer remembers of the file it read is a net under
 this, not the way it works: it turns a writer nobody converted into a
 refusal instead of a change lost without a word.
+
+### D-182 · What both sides added is one thing, not two
+Two sides that added the same line where their changes touch, or a
+method of the same name to the same class, got both in the result
+([ADR 0021](adr/0021-what-a-merge-may-do.md)). The line merge still
+applies two changes that touch; it now writes once the lines one ends
+with and the other starts with, rather than refuse the pair as git
+does: whether touching changes should merge at all is a larger question
+and is not answered by this. For symbols the name decides, not the
+text: two texts under one name are one thing two sides disagree on,
+which is a conflict, where comparing texts would have kept both as
+before. The conflict is `body_body` with nothing at the base rather
+than a new kind: the store, the clients and the three ways of deciding
+it are the ones that exist. What a language lets live side by side
+under one name is kept as before, and the list is with the grammars
+(`kito_parse::namesakes`), since it is knowledge of the language.
+
+### D-183 · A text conflict a line merge does not have is the line merge
+The merge by symbols cuts a file into pieces a line merge does not
+have, and a change that crosses two of them (statements at the end of a
+file that become what leads to a new function) was a conflict where the
+lines compose ([ADR 0021](adr/0021-what-a-merge-may-do.md)). The line
+merge used there is the strict one, where changes must not touch, and
+not Kito's own: what is taken without asking must be what nobody would
+ask about. It is a second function (`merge3_apart`) over the same diff
+rather than a call to git: the same code on every machine, and nothing
+to install. It settles a file only when text is all that conflicts and
+all the file is made of; a symbol that went to another file takes its
+changes with it, and lines would leave them behind. And only if every
+definition in the result is one a side has: lines keep a function both
+sides added, or moved, to two places twice, and D-182 comes first.
+
+### D-184 · A setter is named for what it is, and histories are read as they are
+A getter and its setter had one name, and were told apart by the order
+they were made in ([ADR 0021](adr/0021-what-a-merge-may-do.md)). The
+word that tells them apart goes in the name, before it (`set total`),
+so that the last word is still the name the code writes, as for Go's
+`Server.Start`: renaming needed no change. The getter keeps the plain
+name rather than become `get total`: most properties have no setter,
+and every one of them would have been renamed in every history. A
+history that has a setter under the old name is not rewritten: it is
+recognized under that name when nothing else claims it, and the next
+save of the file records the rename, so the symbol keeps its ID, its
+notes and its reasons. Where such a history holds under the plain name
+as many symbols as the file has by it, they are those in the order of
+the file, as they were numbered: a setter written above its getter is
+the first of the two, and the getter does not take its ID.
+
+### D-185 · Namesakes the merge cannot tell apart are merged as text
+Overloads cannot be named apart: their parameters change when they are
+edited. The history numbers them in the order they were made, and a new
+one written above an old one takes its place for the merge, which then
+moved a change to the wrong overload without a word
+([ADR 0021](adr/0021-what-a-merge-may-do.md)). The merge now checks:
+if a symbol of a side is not what the base has under its ID while a
+namesake of it is, the file is merged as text, which composes such a
+case as a line merge does; and asked about, if one of its symbols is
+in another file on a side. Pairing the namesakes again by their
+parameters was the alternative: it would have disagreed with what the
+history says of them, and recorded each as rewritten into the other.
+Knowing overloads apart for good needs the history to keep more of a
+symbol than its name, and is left for a decision of its own.
+
+### D-186 · The first import is nobody's edit, and an edit by hand is told once
+What the daemon found in the main directory outside an integration was
+an edit made by hand, the files it took in when it first started
+included; and `kito hook after-shell`, which is not told how long a
+command took, reported everything recorded in the ten seconds before,
+after every command. The scan a daemon makes when it starts on a
+repository with no history is the first import, and is not kept as an
+edit. Only then: a daemon that starts on a repository with a history
+finds what was changed while it was away, which was changed by hand.
+"Once" is once for each edit and each session: the first command of a
+session that follows the edit is told, the ones after it are not, and
+the next edit of the same file is told again. By session rather than
+once for all, so that an agent is not told of another's edit and then
+left without word of its own; a hook that names no session shares one
+turn with every other that names none.
+
+### D-187 · The notes are told wherever the reasons are, by one text
+An edit held back by a hook carried the notes on the code; an
+integration held back for an agent with no hooks carried the reasons
+alone ([ADR 0003](adr/0003-notes-on-code.md), amended). The two were
+written in two places and had drifted. They are now one text, and what
+the integration looks up is what the edit would have: the notes on the
+functions whose lines were replaced, found in the file as it was.
+
+### D-188 · The configuration is read where it is used
+The daemon read `.kito/config.toml` when it started; checks written
+later were not in force, and nothing said so
+([ADR 0022](adr/0022-the-configuration-in-force.md)). It is read again
+every time the repository is taken up rather than when a file event
+says it changed: events come late or not at all, and an integration
+asked right after the file is written must go by it. A file that cannot
+be read leaves the last one that could in force and is said with every
+status and every integration: taking the defaults would have meant no
+checks because of a missing quote. Three settings of the watcher are
+still read at start, and `status` names them when they wait for a
+restart, rather than have the daemon rebuild its watcher under a
+repository in use.
+
+### D-189 · The same text is not always the same thing
+A class, or a file, that is byte for byte the same on both sides was
+taken as it is. It can be made of other symbols on each: one side
+moved a function into it, the other wrote there a copy of that function
+and changed the function where it stood. Taken whole, the copy stayed,
+the function went, and its change with it, without a word: since 0.3.0,
+found by a review of 0.39.4 and not by the replays
+([ADR 0021](adr/0021-what-a-merge-may-do.md)). The same text is now the
+same thing only if it is made of the same symbols, or if no symbol in
+it is one the other side changed elsewhere; otherwise it is merged
+member by member. And what D-182 calls one thing added twice is only
+what is new on both sides: a symbol the base has is itself wherever a
+side moved it. A function moved into a scope where the other side
+wrote one of its name is then neither its twin nor something that can
+stay beside it, and the file is asked about (a conflict of kind
+`text`) rather than given two definitions, or one that silently wins.
+The check that takes a line merge (D-183) also asks that no symbol be
+two definitions: a function one side renamed and moved, and the other
+moved elsewhere, is in a line merge under both its names.

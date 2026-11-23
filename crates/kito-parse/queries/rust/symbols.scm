@@ -7,6 +7,10 @@
 ;   @name        the node holding the symbol's name
 ;   @scope       optional prefix of the name (joined with "." unless the
 ;                pattern sets `scope.joiner`)
+;   @role        optional word that tells the symbol from another one of
+;                the same name in the same container (`set`): it comes
+;                before the name, after a space. A pattern with one goes
+;                before the pattern without it
 ;   @sig         nodes that make up the signature (may repeat)
 ;   @body        the body
 

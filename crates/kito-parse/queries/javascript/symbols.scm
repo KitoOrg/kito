@@ -12,6 +12,14 @@
 
 (class_declaration name: (identifier) @name body: (class_body) @body) @def.class
 
+; The setter of a property has the name of its getter: `set` is part of
+; its own, `set total`. The getter keeps the plain name.
+(method_definition
+  "set" @role
+  name: (_) @name
+  parameters: (formal_parameters) @sig
+  body: (statement_block) @body) @def.method
+
 (method_definition
   name: (_) @name
   parameters: (formal_parameters) @sig

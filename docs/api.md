@@ -77,7 +77,7 @@ with what comes with it, where a program named itself otherwise.
 
 | Method | Parameters | Answers | Defined in |
 | --- | --- | --- | --- |
-| `status` | | The daemon (`pid`, what it watches) and, under `repo`, the repository: files, ops, checkpoints, protection, checks, what was last pushed | `server.rs`, `repo.rs` (`Status`) |
+| `status` | | The daemon (`pid`, what it watches) and, under `repo`, the repository: files, ops, checkpoints, protection, checks, what was last pushed. `repo.config_error`, when the configuration file cannot be read: why, and that the one read before it changed is in force. `restart_needed`, when the file gives a setting the daemon reads only as it starts another value than it runs with: the settings ([ADR 0022](adr/0022-the-configuration-in-force.md)) | `server.rs`, `repo.rs` (`Status`) |
 | `lanes` | `[all]` | The open lanes (with `all`, the closed ones too) | `lanes.rs` (`LaneInfo`) |
 | `lane_status` | `lane` | One lane, with its conflicts and the comments that wait | `lanes.rs` (`LaneInfo`) |
 | `lane_diff` | `lane`, `[paths]` | What the lane changes: files, hunks, symbols | `review.rs` (`LaneDiff`) |
@@ -93,15 +93,15 @@ with what comes with it, where a program named itself otherwise.
 | `comments` | `lane`, `[all]` | What was said about a lane, each comment followed by its answers | `comments.rs` (`CommentInfo`) |
 | `review` | `lane` | Where the review of a lane stands, and what is missing | `verdicts.rs` (`ReviewInfo`) |
 | `changes_since_review` | `lane` | What changed in the lane since the one who asks last approved it or asked for changes: each file, with its hunks against what they saw (ADR 0019) | `review.rs` (`ChangesSince`) |
-| `conflicts` | `[all]` | The conflicts that wait for a decision (with `all`, the decided ones too) | `kito-integrate` (`ConflictInfo`) |
-| `integration_result` | `job`, `[wait_ms]` | How an integration ended, waiting for it if it has not | `kito-integrate` (`IntegrationResult`) |
+| `conflicts` | `[all]` | The conflicts that wait for a decision (with `all`, the decided ones too). A `body_body` with no `base` is a symbol both sides added under one name with two texts ([ADR 0021](adr/0021-what-a-merge-may-do.md)) | `kito-integrate` (`ConflictInfo`) |
+| `integration_result` | `job`, `[wait_ms]` | How an integration ended, waiting for it if it has not. `auto_resolutions` says what the merge settled by itself: `body_merge` (a symbol both sides changed, whose texts merged), `same_addition` (a symbol both sides added with the same text: there once), `line_merge` (a file merged by lines where its merge as symbols stopped on the text between them; `symbol` is the file), `rename_propagation`. `config_error`: the configuration file could not be read, and the checks were those read before | `kito-integrate` (`IntegrationResult`) |
 | `events` | `[after]`, `[wait_ms]` | What happened since event `after`, waiting up to `wait_ms` for something: `events`, and `next` to ask with | `rpc.rs` (`Event`) |
 | `plugins` | | The plugins this repository names | `plugins.rs` (`PluginInfo`) |
 | `plugin_call` | `ask`, `[params]` | Asks the plugin of the same name on the server this directory is connected to (`kito-<name> answer <ask>` there), and returns what it answers. Refused in a repository of its own | `connected.rs`, `kito-server` |
-| `sync` | `[lane]` | Records what is saved and not recorded yet; changes nothing else | `server.rs` |
+| `sync` | `[lane]` | Records what is saved and not recorded yet; changes nothing else. `ops`: the operations this call recorded itself, 0 when the daemon had recorded the saves already. It is not the number of operations of the lane (`lane_status` has that) | `server.rs` |
 | `before_edit` | `path`, `[lane]`, `[lines]`, `[whole]`, `[assistant]`, `[session]` | Whether an edit may be made, and what to read first. What it says of the assistant that asks, and what its session said, is kept by the lane | `guard.rs` (`EditAnswer`) |
-| `after_shell` | `[since_ms]`, `[lanes]`, `[main]` | What a command changed where it should not have | `guard.rs` |
-| `reasons_behind` | `lane` | The reasons behind what a lane replaced, not told yet | `guard.rs` (`Replaced`) |
+| `after_shell` | `[since_ms]`, `[lanes]`, `[main]`, `[session]` | What a command changed where it should not have. An edit of the main directory made by hand is answered once to each `session` (once to all who name none), not after every command that follows; what the daemon took in when it first started on the repository is not an edit | `guard.rs` |
+| `reasons_behind` | `lane` | What a lane was not told yet about the code it replaced: the reasons behind it (`reasons`) and the notes left on it (`annotations`), as an edit held back would have told them | `guard.rs` (`Behind`) |
 | `assistant_session` | `session`, `assistant` (`[name]`, `[version]`, `[model]`) | Nothing. What the session of an assistant runs on is remembered while the daemon runs (the last 256), and said of the lanes that session then edits in: nothing of the repository changes | `server.rs` |
 | `instructions` | | What the repository's agents are told (ADR 0012): the kitchen attached, each instruction with where it comes from (`kitchen` or `repository`), and the kitchen's it took away | `instructions.rs` (`Instructions`) |
 | `instructions_text` | `[assistant]` (`claude` by default) | What that assistant reads: Kito's rules, then the instructions for every assistant and for it, between Kito's marks | `instructions.rs` (`compose`) |
