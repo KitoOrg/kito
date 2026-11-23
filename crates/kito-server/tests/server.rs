@@ -969,9 +969,65 @@ fn tasks_are_the_server_s_and_their_comments_reach_the_lanes_on_them() {
     // The agent thinks it is done; a person says it is.
     let thinks = bob.call_value("task_done", json!({ "task": "task#1", "agent": "dana" })).unwrap();
     assert_eq!((thinks["thinks_done"].as_str(), thinks["state"].as_str()), (Some("dana"), Some("in_lane")));
+    // Edited, given to somebody else, a second lane named as people write it.
+    ada.call_value("task_update", json!({ "task": "task#1", "title": "Prices in whole cents", "for": "" }))
+        .unwrap();
+    ada.call_value("task_update", json!({ "task": "task#1", "text": "Everywhere money is." })).unwrap();
+    let second = bob
+        .call_value("open_lane", json!({ "agent": "dana", "intent": "cents in the cart", "scope": ["src/cart.ts"], "task": "Task #1" }))
+        .unwrap();
+    assert_eq!(second["task"], "task#1", "{second}");
+    bob.call_value("close_lane", json!({ "lane": second["id"] })).unwrap();
     let done = ada.call_value("task_done", json!({ "task": "task#1" })).unwrap();
     assert_eq!(done["state"], "done");
     assert!(world.repo("shop").join(".kito/tasks.json").is_file());
+    ada.call_value("task_reopen", json!({ "task": "task#1" })).unwrap();
+    ada.call_value("task_drop", json!({ "task": "task#1" })).unwrap();
+
+    // What happened to it, in order, for whoever may read it; `tasks` does not say it.
+    let task = reader.call_value("task", json!({ "task": "task#1" })).unwrap();
+    let history = task["history"].as_array().unwrap();
+    let said: Vec<(&str, &str)> = history
+        .iter()
+        .map(|event| (event["what"].as_str().unwrap(), event["by"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            ("asked", "ada"),
+            ("taken_up", "bob"),
+            ("lane_opened", "bob"),
+            ("comment", "ada"),
+            ("thinks_done", "bob"),
+            ("edited", "ada"),
+            ("for", "ada"),
+            ("edited", "ada"),
+            ("lane_opened", "bob"),
+            ("lane_closed", "bob"),
+            ("done", "ada"),
+            ("reopened", "ada"),
+            ("dropped", "ada"),
+        ],
+        "{task}"
+    );
+    assert_eq!(
+        (history[1]["agent"].as_str(), history[2]["lane"].as_str()),
+        (Some("dana"), Some(lane.as_str()))
+    );
+    assert_eq!((history[3]["n"].as_u64(), history[5]["field"].as_str()), (Some(1), Some("title")));
+    assert_eq!(history[6]["for"], Value::Null);
+    assert!(history.windows(2).all(|two| two[0]["at_ms"].as_u64() <= two[1]["at_ms"].as_u64()));
+    assert_eq!(history[7]["field"], "text");
+    let listed = reader.call_value("tasks", json!({ "state": "all" })).unwrap();
+    assert!(listed[0].get("history").is_none(), "{listed}");
+
+    // A file of tasks that cannot be read is said, never written over.
+    let file = world.repo("shop").join(".kito/tasks.json");
+    fs::write(&file, "{ not json").unwrap();
+    let no = ada.call_value("task_add", json!({ "title": "Another one" })).unwrap_err().to_string();
+    assert!(no.contains("cannot be read"), "{no}");
+    assert!(reader.call_value("tasks", json!({})).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "{ not json");
 }
 
 #[test]

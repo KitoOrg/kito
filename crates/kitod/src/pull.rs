@@ -348,6 +348,8 @@ impl Repo {
             approved_by: None,
             reviewed_by: Vec::new(),
             git_merge: tip,
+            at_ms: Some(crate::tasks::now_ms()),
+            integrated: None,
             lane: None,
         };
         self.store.put_checkpoint(&checkpoint)?;

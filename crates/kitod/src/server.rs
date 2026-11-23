@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::integrate::{Decision, Preparation};
 use crate::repo::Repo;
 use crate::rpc::{self, DaemonStatus, Request, Response, WatcherStatus};
+use crate::tasks::TaskEvent;
 use kito_core::{ConflictId, LaneId};
 use kito_integrate::{IntegrationResult, JobId, JobState, Queue};
 use notify::{RecursiveMode, Watcher};
@@ -117,6 +118,11 @@ struct Daemon {
     /// they may integrate. For one who may not, the merge and the checks
     /// are done and the lane then waits.
     holds: Mutex<std::collections::BTreeMap<JobId, (kito_core::Author, bool)>>,
+    /// Held across every load, change and save of the tasks (ADR 0024).
+    /// Never taken while the repository's lock is held, and the
+    /// repository is never asked while it is held: whoever needs both
+    /// asks the repository first.
+    tasks_lock: Mutex<()>,
     /// Told when a new checkpoint may have to go to the git remote.
     push_wanted: Notify,
 }
@@ -437,6 +443,18 @@ impl Daemon {
                 let spec = text("lane")?;
                 self.with_repo(|repo| repo.lane_of(spec)).map_err(internal)
             };
+            // The same for what only reads: a closed lane answers as it
+            // ended (ADR 0024).
+            let any_lane = || -> std::result::Result<LaneId, (i64, String)> {
+                let spec = text("lane")?;
+                self.with_repo(|repo| repo.known_lane(spec)).map_err(internal)
+            };
+            let any_lane_or_main = || -> std::result::Result<LaneId, (i64, String)> {
+                match params.get("lane").and_then(Value::as_str) {
+                    Some(spec) => self.with_repo(|repo| repo.known_lane(spec)).map_err(internal),
+                    None => Ok(LaneId::MAIN),
+                }
+            };
             match request.method.as_str() {
                 "configure" => {
                     let checks: Option<Vec<String>> =
@@ -508,9 +526,9 @@ impl Daemon {
                 // Tasks (ADR 0015): kept by Kito, out of the project's files.
                 "tasks" | "task" => {
                     let (root, lanes) = self
-                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.lanes(true))))
+                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.task_lanes())))
                         .map_err(internal)?;
-                    let all = crate::tasks::load(&root);
+                    let all = crate::tasks::load(&root).map_err(|why| (rpc::REFUSED, why))?;
                     if request.method == "task" {
                         let n = crate::tasks::number(text("task")?)
                             .ok_or((rpc::INVALID_PARAMS, "a task is task#<n>".to_owned()))?;
@@ -542,10 +560,12 @@ impl Daemon {
                     let agent = optional("agent").filter(|agent| !agent.trim().is_empty());
                     let source = params.get("source").filter(|source| !source.is_null()).cloned();
                     let (root, lanes) = self
-                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.lanes(true))))
+                        .with_repo(|repo| Ok((repo.root().to_owned(), repo.task_lanes())))
                         .map_err(internal)?;
+                    // Nothing else changes the tasks until they are saved.
+                    let _tasks = self.tasks_lock.lock().unwrap_or_else(|e| e.into_inner());
                     let refused = |why: String| (rpc::REFUSED, why);
-                    let mut all = crate::tasks::load(&root);
+                    let mut all = crate::tasks::load(&root).map_err(refused)?;
                     let now = crate::tasks::now_ms();
                     let method = request.method.as_str();
                     let (n, what) = if method == "task_add" {
@@ -563,18 +583,34 @@ impl Daemon {
                         let n = crate::tasks::number(text("task")?)
                             .ok_or((rpc::INVALID_PARAMS, "a task is task#<n>".to_owned()))?;
                         let task = all.get_mut(n).map_err(refused)?;
+                        // What happened to it, kept in order (ADR 0024).
+                        let mut events: Vec<TaskEvent> = Vec::new();
+                        let event = |what: &str| TaskEvent { at_ms: now, ..TaskEvent::new(what, &by) };
                         let what = match method {
                             "task_update" => {
-                                if let Some(title) =
-                                    optional("title").filter(|title| !title.trim().is_empty())
+                                if let Some(title) = optional("title")
+                                    .map(|title| title.trim().to_owned())
+                                    .filter(|title| !title.is_empty() && *title != task.title)
                                 {
-                                    task.title = title.trim().to_owned();
+                                    task.title = title;
+                                    events.push(TaskEvent { field: Some("title".into()), ..event("edited") });
                                 }
-                                if let Some(body) = optional("text") {
-                                    task.text = body.trim().to_owned();
+                                if let Some(body) = optional("text")
+                                    .map(|body| body.trim().to_owned())
+                                    .filter(|body| *body != task.text)
+                                {
+                                    task.text = body;
+                                    events.push(TaskEvent { field: Some("text".into()), ..event("edited") });
                                 }
                                 if params.get("for").is_some() {
-                                    task.assignee = optional("for").filter(|who| !who.trim().is_empty());
+                                    let assignee = optional("for").filter(|who| !who.trim().is_empty());
+                                    if assignee != task.assignee {
+                                        events.push(TaskEvent {
+                                            assignee: Some(assignee.clone()),
+                                            ..event("for")
+                                        });
+                                    }
+                                    task.assignee = assignee;
                                 }
                                 if source.is_some() {
                                     task.source = source.clone();
@@ -598,7 +634,14 @@ impl Daemon {
                                             "task#{n} is taken up by {other} already"
                                         )))
                                     }
-                                    _ => task.claimed_by = Some(agent.clone()),
+                                    Some(_) => {}
+                                    None => {
+                                        task.claimed_by = Some(agent.clone());
+                                        events.push(TaskEvent {
+                                            agent: Some(agent.clone()),
+                                            ..event("taken_up")
+                                        });
+                                    }
                                 }
                                 format!("{agent} takes up task#{n}")
                             }
@@ -612,6 +655,11 @@ impl Daemon {
                                     None => by.clone(),
                                 };
                                 let next = task.comments.iter().map(|c| c.n).max().unwrap_or(0) + 1;
+                                events.push(TaskEvent {
+                                    by: said_by.clone(),
+                                    n: Some(next),
+                                    ..event("comment")
+                                });
                                 task.comments.push(crate::tasks::TaskComment {
                                     n: next,
                                     by: said_by.clone(),
@@ -625,24 +673,32 @@ impl Daemon {
                                 // An agent says what it thinks; the person decides.
                                 Some(agent) => {
                                     task.thinks_done = Some(agent.clone());
+                                    events.push(TaskEvent {
+                                        agent: Some(agent.clone()),
+                                        ..event("thinks_done")
+                                    });
                                     format!("{agent} thinks task#{n} is done")
                                 }
                                 None => {
                                     task.state = "done".into();
                                     task.thinks_done = None;
+                                    events.push(event("done"));
                                     format!("task#{n} done, said {by}")
                                 }
                             },
                             "task_reopen" => {
                                 task.state = "open".into();
                                 task.thinks_done = None;
+                                events.push(event("reopened"));
                                 format!("task#{n} reopened by {by}")
                             }
                             _ => {
                                 task.state = "dropped".into();
+                                events.push(event("dropped"));
                                 format!("task#{n} dropped by {by}")
                             }
                         };
+                        events.into_iter().for_each(|event| task.note(event));
                         task.updated_ms = now;
                         (n, what)
                     };
@@ -793,14 +849,14 @@ impl Daemon {
                 "log" => {
                     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
                     let path = params.get("path").and_then(Value::as_str).map(PathBuf::from);
-                    let lane = lane_or_main()?;
+                    let lane = any_lane_or_main()?;
                     let items = self
                         .with_repo(|repo| repo.log_lane(lane, limit, path.as_deref()))
                         .map_err(internal)?;
                     to_json(serde_json::to_value(items))
                 }
                 "why_graph" => {
-                    let lane = lane_or_main()?;
+                    let lane = any_lane_or_main()?;
                     let target = text("target")?;
                     let uses = params.get("uses").and_then(Value::as_bool).unwrap_or(false);
                     to_json(serde_json::to_value(
@@ -836,10 +892,15 @@ impl Daemon {
                     ))
                 }
                 "notes" => {
-                    let lane = lane_or_main()?;
+                    let lane = any_lane_or_main()?;
                     let on = optional("on");
                     to_json(serde_json::to_value(
-                        self.with_repo(|repo| repo.notes(lane, on.as_deref())).map_err(internal)?,
+                        self.with_repo(|repo| match repo.is_closed(lane) {
+                            // Named as the closed lane had its code.
+                            true => repo.with_closed_lane(lane, |repo| repo.notes(lane, on.as_deref())),
+                            false => repo.notes(lane, on.as_deref()),
+                        })
+                        .map_err(internal)?,
                     ))
                 }
                 "remove_note" => {
@@ -874,7 +935,7 @@ impl Daemon {
                     ))
                 }
                 "comments" => {
-                    let lane = lane()?;
+                    let lane = any_lane()?;
                     let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| repo.comments(lane, all)).map_err(internal)?,
@@ -918,7 +979,7 @@ impl Daemon {
                     ))
                 }
                 "review" => {
-                    let lane = lane()?;
+                    let lane = any_lane()?;
                     to_json(serde_json::to_value(self.with_repo(|repo| repo.review(lane)).map_err(internal)?))
                 }
                 // A review sent whole (ADR 0019): its comments, then the
@@ -1072,7 +1133,7 @@ impl Daemon {
                 }
                 "why" => {
                     let (file, symbol) = (PathBuf::from(text("file")?), text("symbol")?);
-                    let lane = lane_or_main()?;
+                    let lane = any_lane_or_main()?;
                     let found =
                         self.with_repo(|repo| repo.why_lane(lane, &file, symbol)).map_err(internal)?;
                     to_json(serde_json::to_value(found))
@@ -1141,6 +1202,13 @@ impl Daemon {
                             Ok((opened, overlaps, repo.why_of_scope(lane, &scope)))
                         })
                         .map_err(internal)?;
+                    // The task it is for says so (ADR 0024).
+                    if let Ok(root) = self.with_repo(|repo| Ok(repo.root().to_owned())) {
+                        let by = person_name(params).unwrap_or_else(|| opened.agent.clone());
+                        let event =
+                            TaskEvent { lane: Some(opened.id.clone()), ..TaskEvent::new("lane_opened", &by) };
+                        crate::tasks::note_lane(&root, &self.tasks_lock, opened.task.as_deref(), event);
+                    }
                     let mut opened =
                         serde_json::to_value(opened).map_err(|e| (rpc::INTERNAL_ERROR, e.to_string()))?;
                     opened["overlaps"] = to_json(serde_json::to_value(overlaps))?;
@@ -1277,11 +1345,19 @@ impl Daemon {
                     ))
                 }
                 "lane_files" => {
-                    let lane = lane_or_main()?;
                     let paths: Option<Vec<PathBuf>> = params
                         .get("paths")
                         .and_then(Value::as_array)
                         .map(|paths| paths.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
+                    // As they were at a checkpoint (ADR 0024).
+                    if let Some(at) = optional("at") {
+                        let files =
+                            self.with_repo(|repo| repo.files_at(&at, paths.as_deref())).map_err(internal)?;
+                        return Ok(
+                            json!({ "at": at.trim(), "files": to_json(serde_json::to_value(files))? }),
+                        );
+                    }
+                    let lane = any_lane_or_main()?;
                     let (files, ops) = self
                         .with_repo(|repo| {
                             Ok((repo.lane_files(lane, paths.as_deref())?, repo.lane_ops(lane)?))
@@ -1290,6 +1366,47 @@ impl Daemon {
                     Ok(
                         json!({ "lane": lane.to_string(), "ops": ops, "files": to_json(serde_json::to_value(files))? }),
                     )
+                }
+                // What was (ADR 0024): checkpoints like commits, two points
+                // compared, a directory as it was.
+                "checkpoints" => {
+                    let lane = lane_or_main()?;
+                    let limit = params
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .map_or(crate::history::LISTED, |limit| limit as usize);
+                    let (before, path) = (optional("before"), optional("path"));
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| {
+                            repo.checkpoints(lane, limit, before.as_deref(), path.as_deref())
+                        })
+                        .map_err(internal)?,
+                    ))
+                }
+                "checkpoint_info" => {
+                    let asked = text("checkpoint")?;
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.checkpoint_whole(asked)).map_err(internal)?,
+                    ))
+                }
+                "diff" => {
+                    let to = text("to")?;
+                    let from = optional("from");
+                    let paths: Vec<String> = params
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|paths| paths.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.diff(to, from.as_deref(), &paths)).map_err(internal)?,
+                    ))
+                }
+                "tree" => {
+                    let (at, path) = (optional("at"), optional("path"));
+                    to_json(serde_json::to_value(
+                        self.with_repo(|repo| repo.tree_listing(at.as_deref(), path.as_deref()))
+                            .map_err(internal)?,
+                    ))
                 }
                 "get_blobs" => {
                     let ids: Vec<&str> = params
@@ -1378,13 +1495,25 @@ impl Daemon {
                     let lane = lane()?;
                     owned(lane)?;
                     self.writers.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
-                    to_json(serde_json::to_value(
-                        self.with_repo(|repo| repo.close_lane(lane)).map_err(internal)?,
-                    ))
+                    // Who closed it is said only when a person was named.
+                    let by = params.get("on_behalf_of").and_then(person_of);
+                    let (closed, root, by) = self
+                        .with_repo(|repo| {
+                            // The task says who, as its own requests do.
+                            let said =
+                                by.as_ref().map_or_else(|| repo.identity.name.clone(), |by| by.name.clone());
+                            Ok((repo.close_lane_by(lane, by.clone())?, repo.root().to_owned(), said))
+                        })
+                        .map_err(internal)?;
+                    // The task it was for says so (ADR 0024).
+                    let event =
+                        TaskEvent { lane: Some(closed.id.clone()), ..TaskEvent::new("lane_closed", &by) };
+                    crate::tasks::note_lane(&root, &self.tasks_lock, closed.task.as_deref(), event);
+                    to_json(serde_json::to_value(closed))
                 }
                 // Review of a lane (ADR 0004): what it changes.
                 "lane_diff" => {
-                    let lane = lane()?;
+                    let lane = any_lane()?;
                     let paths: Vec<String> = params
                         .get("paths")
                         .and_then(Value::as_array)
@@ -1393,17 +1522,19 @@ impl Daemon {
                     to_json(serde_json::to_value(
                         self.with_repo(|repo| {
                             // As the working copy is now, not as it was last seen.
-                            repo.scan_lane(lane)?;
+                            if !repo.is_closed(lane) {
+                                repo.scan_lane(lane)?;
+                            }
                             repo.lane_diff(lane, &paths)
                         })
                         .map_err(internal)?,
                     ))
                 }
                 "lane_status" => {
-                    let lane = lane()?;
+                    let lane = any_lane()?;
                     let (info, conflicts) = self
                         .with_repo(|repo| {
-                            let info = repo.lane_info(lane)?;
+                            let info = repo.lane_info_any(lane)?;
                             let mine: Vec<_> =
                                 repo.conflicts(false).into_iter().filter(|c| c.lane == info.id).collect();
                             Ok((info, mine))
@@ -1715,6 +1846,25 @@ impl Daemon {
             _ => result.message.clone().unwrap_or_default(),
         };
         self.events.emit(&kind, Some(result.lane.clone()), None, what);
+        // The task the lane is for says so (ADR 0024).
+        if result.result == kito_integrate::Outcome::Integrated {
+            let found = self.with_repo(|repo| {
+                let lane = repo.known_lane(&result.lane)?;
+                let record = repo.record_now(lane).ok_or(Error::NoSuchLane(lane))?;
+                Ok((repo.root().to_owned(), record, repo.identity.name.clone()))
+            });
+            if let Ok((root, record, here)) = found {
+                // The person who let it in; else, as the task's own requests say, this machine's.
+                let by = record.integrations.last().and_then(|done| done.by.as_ref());
+                let by = by.map_or(here, |by| by.name.clone());
+                let event = TaskEvent {
+                    lane: Some(result.lane.clone()),
+                    checkpoint: result.checkpoint.clone(),
+                    ..TaskEvent::new("lane_integrated", &by)
+                };
+                crate::tasks::note_lane(&root, &self.tasks_lock, record.task.as_deref(), event);
+            }
+        }
     }
 
     fn record(&self, capture: Duration, latency: Option<Duration>, error: Option<String>) {
@@ -2541,6 +2691,8 @@ pub async fn serve(root: &Path) -> Result<()> {
 
     let socket = rpc::socket_path(&root);
     let mut listener = crate::ipc::Listener::bind(&root).map_err(Error::io(&socket))?;
+    // What a crash left of a write of the tasks.
+    crate::tasks::remove_stale(&root);
 
     let daemon = Arc::new(Daemon {
         root: root.clone(),
@@ -2566,6 +2718,7 @@ pub async fn serve(root: &Path) -> Result<()> {
         events: Events { activity: Some(crate::insights::activity_file(&root)), ..Events::default() },
         writers: Mutex::default(),
         holds: Mutex::default(),
+        tasks_lock: Mutex::default(),
         push_wanted: Notify::new(),
     });
     eprintln!("kitod: listening on {} for {}", socket.display(), daemon.root.display());

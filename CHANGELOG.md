@@ -4,6 +4,52 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.41.0]
+
+What was ([ADR 0024](docs/adr/0024-what-was.md)): a lane that closed,
+the checkpoints as a history, and the files as they were, for the web
+client and the command line to show.
+
+- **A closed lane shows everything it did.** `kito lane status lane/3`
+  says how it ended: each time it was integrated, into what, as which
+  checkpoint, and who let it in when somebody had to, or that it was
+  closed without; when and by whom it was closed; every op it recorded
+  and every file they touched; and what it had changed and never
+  integrated, which `kito lane diff lane/3` shows. Its log, its files,
+  what was said on it, how its review stood and why its code is the
+  way it is are asked of it as of an open lane, as it was when it
+  closed. Nothing of it can be changed. Lanes closed before this
+  version say their integrations as the history shows them, and not
+  when they were closed: that was not kept.
+- **The checkpoints are the history.** `kito history` lists them like
+  commits, newest first: who made each, for whom, its lines added and
+  removed, its label; `kito history src/shop.ts` those that changed a
+  file or a directory, `--lane staging` those of a permanent lane.
+  `kito show ckpt#4` is one: the lane and task it came from, its
+  approvals and checks, its git commit, and the files it added,
+  modified, removed or renamed, with their lines; `--diff` shows the
+  changes themselves.
+- **The daemon answers new questions**, all for whoever may read:
+  `checkpoints`, `checkpoint_info`, `diff` (between any two
+  checkpoints, the main lane and lanes, closed ones too), `tree` (a
+  directory at any checkpoint, each entry with the last checkpoint that
+  changed it, and its README), and `lane_files` at a checkpoint. A
+  directory connected to a server asks them of it as it asks for the
+  log.
+- **A task says what happened to it, in order**: asked, edited, given to
+  somebody, taken up, each comment, each of its lanes opened,
+  integrated and closed, thought done, done, reopened, dropped
+  (`history`, in the answer of `task`). Tasks from before tell when they
+  were asked for and their comments, and keep the rest from now on.
+- **`task #55` names task 55, when there is one.** A lane opened with
+  `--task "task #55"`, as the help of the CLI and of the MCP tools said
+  to write it, was not linked to its task, and the check that the task is
+  there and open was skipped. In a repository that has a task 55 it now
+  is, and the help says `task#55`; with no task 55 the text stays a label
+  of your own, as before. Lanes opened before keep what they were.
+- `kito task show` says what happened to the task, in order; `kito
+  history --before ckpt#N` goes further back.
+
 ## [0.40.1]
 
 - **On Windows, a registry kept in a directory is read however its

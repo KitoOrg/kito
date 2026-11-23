@@ -673,3 +673,83 @@ fn an_agent_is_held_to_the_rules_from_a_connected_directory() {
     let no = refused(&desk, "reasons_behind", json!({ "lane": "lane/1" }));
     assert!(no.contains("read"), "{no}");
 }
+
+#[test]
+fn what_was_is_read_from_a_connected_directory_by_who_may_read() {
+    let mut world = World::new();
+    let (ada, bob) = (world.ada.clone(), world.bob.clone());
+    let laptop = world.connect("laptop", &ada);
+    call(&laptop, "task_add", json!({ "title": "Taxes in the shop" }));
+    let opened = call(
+        &laptop,
+        "open_lane",
+        json!({ "agent": "alice", "intent": "work from here", "scope": ["./"], "task": "task #1" }),
+    );
+    let work = PathBuf::from(opened["workdir"].as_str().unwrap());
+    write(&work, "src/tax.ts", "export const VAT = 22;\n");
+    call(&laptop, "sync", json!({ "lane": "1" }));
+    call(&laptop, "comment", json!({ "lane": "lane/1", "text": "taxes from here" }));
+    assert_eq!(integrate(&laptop, "1")["result"], "integrated");
+    let closed = call(&laptop, "close_lane", json!({ "lane": "lane/1" }));
+    assert_eq!(closed["closed"]["by"], "ada", "{closed}");
+    // The task it was for says what became of it.
+    let task = call(&laptop, "task", json!({ "task": "task#1" }));
+    let said: Vec<&str> =
+        task["history"].as_array().unwrap().iter().filter_map(|event| event["what"].as_str()).collect();
+    assert_eq!(said, ["asked", "lane_opened", "lane_integrated", "lane_closed"], "{task}");
+    assert_eq!(task["history"][2]["checkpoint"], closed["integrations"][0]["checkpoint"]);
+
+    // A lane of this directory, compared right after a save: the save is there.
+    let next =
+        call(&laptop, "open_lane", json!({ "agent": "alice", "intent": "rates from here", "scope": ["./"] }));
+    let next_work = PathBuf::from(next["workdir"].as_str().unwrap());
+    let next_id = next["id"].as_str().unwrap().to_owned();
+    write(&next_work, "src/rates.ts", "export const RATE = 22;\n");
+    let fresh = call(&laptop, "diff", json!({ "to": next_id, "from": "main" }));
+    assert_eq!(fresh["files"][0]["path"], "src/rates.ts", "{fresh}");
+
+    // Somebody who may only read asks, from a directory of theirs.
+    ok(&world.dir, &["grant", "bob", "shop", "read"]);
+    let desk = world.connect("desk", &bob);
+    let page = call(&desk, "checkpoints", json!({}));
+    let newest = &page["checkpoints"][0];
+    assert_eq!(
+        (newest["lane"].as_str(), newest["for"].as_str(), newest["files"].as_u64()),
+        (Some("lane/1"), Some("ada"), Some(1)),
+        "{page}"
+    );
+    let id = newest["id"].as_str().unwrap().to_owned();
+    let diff = call(&desk, "diff", json!({ "to": id }));
+    assert_eq!(diff["files"][0]["path"], "src/tax.ts", "{diff}");
+    let tree = call(&desk, "tree", json!({ "at": id, "path": "src" }));
+    let names: Vec<&str> =
+        tree["entries"].as_array().unwrap().iter().filter_map(|entry| entry["name"].as_str()).collect();
+    assert_eq!(names, ["shop.ts", "tax.ts"], "{tree}");
+    assert_eq!(tree["entries"][1]["last"]["checkpoint"].as_str(), Some(id.as_str()));
+    let status = call(&desk, "lane_status", json!({ "lane": "lane/1" }));
+    assert_eq!(
+        (status["state"].as_str(), status["integrations"][0]["checkpoint"].as_str()),
+        (Some("closed"), Some(id.as_str())),
+        "{status}"
+    );
+    assert!(call(&desk, "checkpoint_info", json!({ "checkpoint": id }))["changed"].is_array());
+    // What was said on it and its review, as they stood; nothing more is said on it.
+    let said = call(&desk, "comments", json!({ "lane": "lane/1", "all": true }));
+    assert_eq!(said[0]["text"], "taxes from here", "{said}");
+    assert_eq!(call(&desk, "comments", json!({ "lane": "lane/1" })).as_array().unwrap().len(), 1);
+    assert!(call(&desk, "notes", json!({ "lane": "lane/1" })).is_array());
+    let review = call(&desk, "review", json!({ "lane": "lane/1" }));
+    assert_eq!(review["lane"], "lane/1", "{review}");
+    let no = refused(&laptop, "comment", json!({ "lane": "lane/1", "text": "one more thing" }));
+    assert!(no.contains("no such open lane"), "{no}");
+    let no = refused(&laptop, "verdict", json!({ "lane": "lane/1", "verdict": "approve" }));
+    assert!(no.contains("no such open lane"), "{no}");
+
+    // Somebody with no access to the repository is refused, as for the log.
+    let carol = token_in(&ok(&world.dir, &["user", "add", "carol"]));
+    let nowhere = world.connect("nowhere", &carol);
+    let log = refused(&nowhere, "log", json!({}));
+    for method in ["checkpoints", "tree"] {
+        assert_eq!(refused(&nowhere, method, json!({})), log, "{method}");
+    }
+}

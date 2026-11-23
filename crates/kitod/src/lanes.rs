@@ -107,6 +107,35 @@ pub struct LaneInfo {
     /// "claude-opus-5"}`. What that side said of itself: a label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<kito_core::Assistant>,
+    /// Each time its work landed, oldest first (ADR 0024).
+    #[serde(default)]
+    pub integrations: Vec<IntegrationInfo>,
+    /// Once it is closed: when, and by whom, when that was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<ClosedInfo>,
+}
+
+/// One time a lane's work landed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationInfo {
+    /// `main`, a permanent lane's name, or `lane/5`.
+    pub into: String,
+    /// `ckpt#4`; absent when none was made (it landed on an ordinary lane).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    pub at_ms: u64,
+    /// Who let it in, when a person was named for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+}
+
+/// How a lane was closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 /// Where a lane starts and where it lands, when not on the main lane.
@@ -270,12 +299,21 @@ impl Repo {
             if let Some(lane) = self.lanes.values().find(|lane| lane.record.base_head == at) {
                 break (lane.base_tree.clone(), lane.base_symbols.clone());
             }
+            // One rebuilt already: asked for lately, or a checkpoint's.
+            if chain.is_empty() {
+                if let Some(state) = self.kept_state(at) {
+                    break state;
+                }
+            }
             let op = self
                 .store
                 .get_op(&at)?
                 .ok_or_else(|| Error::Other(format!("the op {at} is not in the log")))?;
             if op.lane.is_main() {
-                break self.main_state_at(at)?;
+                match self.kept_state(at) {
+                    Some(state) => break state,
+                    None => break self.main_state(at)?,
+                }
             }
             let first = op.parents.first().copied();
             chain.push(op);
@@ -292,7 +330,7 @@ impl Repo {
     }
 
     /// The state of the main lane right after its op `head`.
-    fn main_state_at(&self, head: OpId) -> Result<(Tree, SymbolTable)> {
+    pub(crate) fn main_state_at(&self, head: OpId) -> Result<(Tree, SymbolTable)> {
         if self.main.head == Some(head) {
             return Ok((self.main.tree.clone(), self.main.symbols.clone()));
         }
@@ -543,18 +581,7 @@ impl Repo {
             return Err(Error::Other(why));
         }
         // A lane for a task of this repository (ADR 0015) is for one there is, still to do.
-        if let Some(n) =
-            task.as_deref().filter(|task| task.trim().starts_with("task#")).and_then(crate::tasks::number)
-        {
-            let all = crate::tasks::load(&self.root);
-            match all.get(n) {
-                None => return Err(Error::Other(format!("task#{n}: no such task (`kito task list`)"))),
-                Some(found) if found.state != "open" => {
-                    return Err(Error::Other(format!("task#{n} is {}: reopen it first", found.state)))
-                }
-                Some(_) => {}
-            }
-        }
+        let task = self.lane_task_of(task)?;
         // A permanent lane has no scope: it holds whatever lands on it.
         if name.is_none() && scope.iter().all(|item| item.trim().is_empty()) {
             return Err(Error::Other(
@@ -603,6 +630,8 @@ impl Repo {
                         approved_by: None,
                         reviewed_by: Vec::new(),
                         git_merge: None,
+                        at_ms: Some(crate::tasks::now_ms()),
+                        integrated: None,
                         lane: None,
                     };
                     self.store.put_checkpoint(&checkpoint)?;
@@ -650,6 +679,9 @@ impl Repo {
             target,
             name,
             assistant: None,
+            integrations: Vec::new(),
+            closed: None,
+            ends_kept: true,
         };
         self.store.put_lane(&record)?;
         self.lanes.insert(id, LaneAt { record, work, base_tree, base_symbols });
@@ -657,9 +689,49 @@ impl Repo {
         self.lane_info(id)
     }
 
+    /// What a lane is opened for, as it is kept (ADR 0024). `task #3`,
+    /// `Task #3` name this repository's task 3 when there is one, and are
+    /// kept as `task#3`; with no task 3 they are somebody's own label, kept
+    /// as said. A task named must be open; `task#3` written so must be one.
+    fn lane_task_of(&self, task: Option<String>) -> Result<Option<String>> {
+        let Some(said) = task.map(|task| task.trim().to_owned()).filter(|task| !task.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(n) = crate::tasks::named(&said) else { return Ok(Some(said)) };
+        let id = crate::tasks::id(n);
+        let all = crate::tasks::load(&self.root).map_err(Error::Other)?;
+        match all.get(n) {
+            Some(found) if found.state != "open" => Err(Error::Other(format!(
+                "{id} is {}: reopen it first (`kito task reopen {id}`), or open the lane without a task",
+                found.state
+            ))),
+            Some(_) => Ok(Some(id)),
+            None if said == id => Err(Error::Other(format!(
+                "{id}: no such task in this repository (`kito task list` lists them): open the lane without \
+                 a task, or name another"
+            ))),
+            None => Ok(Some(said)),
+        }
+    }
+
+    /// The task an intent names, kept as a lane would keep it, with no
+    /// refusal: one this repository does not have is kept as said.
+    pub(crate) fn intent_task_of(&self, task: Option<String>) -> Option<String> {
+        let said = task.map(|task| task.trim().to_owned()).filter(|task| !task.is_empty())?;
+        let named = crate::tasks::named(&said)
+            .filter(|n| crate::tasks::load(&self.root).is_ok_and(|all| all.get(*n).is_some()));
+        Some(named.map_or(said, crate::tasks::id))
+    }
+
     /// Records the last changes of a lane and closes it: its working copy
     /// goes away, its ops stay in the log.
     pub fn close_lane(&mut self, lane: LaneId) -> Result<LaneInfo> {
+        self.close_lane_by(lane, None)
+    }
+
+    /// The same, saying who closed it: the person a server named; by
+    /// default whoever runs the repository.
+    pub fn close_lane_by(&mut self, lane: LaneId, by: Option<kito_core::Author>) -> Result<LaneInfo> {
         if lane.is_main() {
             return Err(Error::Other("the main lane cannot be closed".into()));
         }
@@ -691,20 +763,27 @@ impl Repo {
             let state = at.record.state;
             self.put_lane_state(child, state)?;
         }
+        self.keep_ends(lane);
+        if let Some(at) = self.lanes.get_mut(&lane) {
+            at.record.closed = Some(kito_core::Closing { at_ms: crate::tasks::now_ms(), by });
+        }
         self.put_lane_state(lane, LaneState::Closed)?;
-        let info = self.lane_info(lane)?;
         self.lanes.remove(&lane);
         self.claims_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(&lane);
         self.told.remove(&lane);
         self.reasons_told.remove(&lane);
         let dir = self.lane_dir(lane);
         kito_lane::remove(&dir).map_err(Error::io(&dir))?;
+        let info = self.lane_info_any(lane)?;
         Ok(LaneInfo { workdir: None, ..info })
     }
 
     /// How many ops a lane has recorded: it grows with every change.
     pub fn lane_ops(&self, lane: LaneId) -> Result<u64> {
-        Ok(self.work(lane)?.ops)
+        match self.is_closed(lane) {
+            true => Ok(self.store.lane_len(lane)?),
+            false => Ok(self.work(lane)?.ops),
+        }
     }
 
     /// Says whose lane it is: the person a client was authenticated as.
@@ -751,6 +830,7 @@ impl Repo {
         if let Some(why) = says_nothing(summary) {
             return Err(Error::Other(why));
         }
+        let task = self.intent_task_of(task);
         self.set_intent_given(lane, summary, task, prompt)
     }
 
@@ -790,11 +870,53 @@ impl Repo {
     pub fn lanes(&self, all: bool) -> Vec<LaneInfo> {
         let mut list: Vec<LaneInfo> = self.lanes.keys().filter_map(|id| self.lane_info(*id).ok()).collect();
         if all {
-            let closed = self.store.lane_records().filter(|record| !self.lanes.contains_key(&record.id));
-            list.extend(closed.map(|record| self.describe_lane(record, 0, Vec::new(), None)));
+            let closed: Vec<LaneId> = self
+                .store
+                .lane_records()
+                .filter(|record| !self.lanes.contains_key(&record.id))
+                .map(|record| record.id)
+                .collect();
+            list.extend(closed.into_iter().filter_map(|lane| self.lane_info_any(lane).ok()));
             list.sort_by_key(|info| info.id.parse::<LaneId>().map_or(u64::MAX, |id| id.0));
         }
         list
+    }
+
+    /// Every lane, open or closed, as a task shows its lanes: nothing is
+    /// worked out of their history.
+    pub fn task_lanes(&self) -> Vec<crate::tasks::TaskLane> {
+        let open = self.lanes.values().map(|at| {
+            let mut record = at.record.clone();
+            record.proposed = record.proposed.filter(|proposal| proposal.ops == at.work.ops);
+            record
+        });
+        let closed = self.store.lane_records().filter(|record| !self.lanes.contains_key(&record.id)).cloned();
+        let mut all: Vec<crate::tasks::TaskLane> = open
+            .chain(closed)
+            .map(|record| crate::tasks::TaskLane {
+                id: record.id.to_string(),
+                agent: record.agent.name.clone(),
+                task: record.task.clone(),
+                state: match &record.proposed {
+                    Some(_) => "awaiting_approval".to_owned(),
+                    None => state_word(record.state).to_owned(),
+                },
+                owner: record.owner.as_ref().map(|owner| owner.name.clone()),
+            })
+            .collect();
+        all.sort_by_key(|lane| lane.id.parse::<LaneId>().map_or(u64::MAX, |id| id.0));
+        all
+    }
+
+    /// A lane, open or closed. A closed one says every op it recorded and
+    /// every file those touched.
+    pub fn lane_info_any(&self, lane: LaneId) -> Result<LaneInfo> {
+        if !self.is_closed(lane) {
+            return self.lane_info(lane);
+        }
+        let record = self.store.lane_record(lane).ok_or(Error::NoSuchLane(lane))?;
+        let (ops, files) = self.closed_summary(lane)?;
+        Ok(self.describe_lane(record, ops, files, None))
     }
 
     fn describe_lane(
@@ -844,6 +966,21 @@ impl Repo {
                 false => None,
             },
             assistant: record.assistant.clone(),
+            integrations: self
+                .integrations_of(record)
+                .into_iter()
+                .map(|done| IntegrationInfo {
+                    into: self.lane_name(done.into),
+                    checkpoint: done.checkpoint.map(|id| id.to_string()),
+                    at_ms: done.at_ms,
+                    by: done.by.map(|by| by.name),
+                })
+                .collect(),
+            // A lane closed before Kito 0.41 kept neither when nor who.
+            closed: (record.state == LaneState::Closed).then(|| ClosedInfo {
+                at_ms: record.closed.as_ref().map(|closing| closing.at_ms),
+                by: record.closed.as_ref().and_then(|closing| closing.by.as_ref()).map(|by| by.name.clone()),
+            }),
         }
     }
 

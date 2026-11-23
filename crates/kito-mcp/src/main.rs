@@ -80,7 +80,7 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
                         "items": { "type": "string" },
                         "description": "What you will change: functions and classes as file:name (src/auth.ts:getUser, also ones that do not exist yet), files (src/auth.ts), directories (src/billing/)"
                     },
-                    "task": { "type": "string", "description": "The task it belongs to (task #55)" },
+                    "task": { "type": "string", "description": "The task it belongs to (task#55)" },
                     "base": { "type": "string", "description": "A checkpoint to start from (ckpt#12) instead of the current state" },
                     "on": { "type": "string", "description": "Another lane to start on, as it is now, before it has landed (lane/1), or a permanent lane by its name (staging): to build on work in progress, or to land on staging instead of main. Your lane then lands on that lane" },
                     "target": { "type": "string", "description": "With `on`: the lane to land on instead, one below it (main). Your lane waits until the work it was built on is there" },
@@ -225,7 +225,7 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
                 "properties": {
                     "lane": lane,
                     "summary": { "type": "string", "description": "One sentence: add a cache for user requests" },
-                    "task": { "type": "string", "description": "The task it belongs to (task #55)" },
+                    "task": { "type": "string", "description": "The task it belongs to (task#55)" },
                     "prompt": { "type": "string", "description": "The full prompt, if worth keeping" }
                 },
                 "required": ["lane", "summary"]

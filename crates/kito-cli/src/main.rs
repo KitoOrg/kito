@@ -54,7 +54,20 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "History",
-        &["log", "why", "reasons", "note", "search", "stats", "watch", "checkpoint", "rollback", "sync"],
+        &[
+            "log",
+            "history",
+            "show",
+            "why",
+            "reasons",
+            "note",
+            "search",
+            "stats",
+            "watch",
+            "checkpoint",
+            "rollback",
+            "sync",
+        ],
     ),
     ("Assistants and plugins", &["assistant", "instructions", "plugin", "registry"]),
     ("Git and indexes", &["pull", "export-git", "scip"]),
@@ -588,6 +601,28 @@ enum Cmd {
         #[arg(short = 'v', long)]
         verbose: bool,
     },
+    /// The checkpoints, newest first, like commits
+    History {
+        /// Only those that changed this file, or something under this directory
+        path: Option<PathBuf>,
+        /// How many to show
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: usize,
+        /// Those of this permanent lane instead of the main one
+        #[arg(long, value_name = "LANE")]
+        lane: Option<String>,
+        /// Those older than this checkpoint
+        #[arg(long, value_name = "CHECKPOINT")]
+        before: Option<String>,
+    },
+    /// One checkpoint: what it is and the files it changed
+    Show {
+        /// The checkpoint (ckpt#4)
+        checkpoint: String,
+        /// The changes themselves, line by line
+        #[arg(long)]
+        diff: bool,
+    },
     /// Create a checkpoint manually
     Checkpoint {
         /// Checkpoint label
@@ -886,7 +921,7 @@ enum Cmd {
         summary: String,
         #[arg(long, value_name = "LANE")]
         lane: Option<String>,
-        /// The task it belongs to (task #55)
+        /// The task it belongs to (task#55)
         #[arg(long)]
         task: Option<String>,
     },
@@ -941,7 +976,7 @@ enum LaneCmd {
         /// Once per item, or several after one --scope.
         #[arg(long, required = true, num_args = 1.., value_name = "ITEM")]
         scope: Vec<String>,
-        /// The task the lane belongs to (task #55)
+        /// The task the lane belongs to (task#55)
         #[arg(long)]
         task: Option<String>,
         /// Checkpoint to start from (default: the main lane as it is now)
@@ -1905,6 +1940,16 @@ fn lane_diff_text(diff: &Value, stat: bool) -> String {
             );
         }
     }
+    out.push_str(&diff_files_text(files, stat));
+    out
+}
+
+/// The files of a diff as text: a line per file, its functions, its hunks.
+fn diff_files_text(files: &[Value], stat: bool) -> String {
+    use std::fmt::Write as _;
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
+    let count = |value: &Value, key: &str| value[key].as_u64().unwrap_or(0);
+    let mut out = String::new();
     for file in files {
         let was = file["was"].as_str().map(|was| format!(" (was {was})")).unwrap_or_default();
         let lines = match file["binary"].as_bool() {
@@ -4411,6 +4456,20 @@ fn cmd_task(cli: &Cli, command: Option<&TaskCmd>) -> Outcome {
                 comment["text"].as_str().unwrap_or("").replace('\n', "\n  ")
             );
         }
+        let history = answer["history"].as_array().map_or(&[][..], Vec::as_slice);
+        if !history.is_empty() {
+            println!("\nWhat happened to it:");
+            let width =
+                history.iter().filter_map(|event| event["by"].as_str()).map(str::len).max().unwrap_or(0);
+            for event in history {
+                println!(
+                    "  {}  {:<width$}  {}",
+                    utc(event["at_ms"].as_u64().unwrap_or(0)),
+                    event["by"].as_str().unwrap_or("?"),
+                    task_event(event)
+                );
+            }
+        }
         if answer["state"] == "ready" {
             println!(
                 "\nIts lanes are closed: `kito task done {}` if it is done.",
@@ -4424,6 +4483,32 @@ fn cmd_task(cli: &Cli, command: Option<&TaskCmd>) -> Outcome {
         }
     }
     Ok(())
+}
+
+/// One thing that happened to a task, in a few words.
+fn task_event(event: &Value) -> String {
+    let text = |key: &str| event[key].as_str().unwrap_or("-").to_owned();
+    match event["what"].as_str().unwrap_or_default() {
+        "asked" => "asked for it".to_owned(),
+        "edited" => format!("changed its {}", text("field")),
+        "for" => match event["for"].as_str() {
+            Some(who) => format!("gave it to {who}"),
+            None => "gave it to nobody".to_owned(),
+        },
+        "taken_up" => format!("{} took it up", text("agent")),
+        "comment" => format!("commented (#{})", event["n"].as_u64().unwrap_or(0)),
+        "lane_opened" => format!("opened {} for it", text("lane")),
+        "lane_integrated" => match event["checkpoint"].as_str() {
+            Some(checkpoint) => format!("integrated {} as {checkpoint}", text("lane")),
+            None => format!("integrated {}", text("lane")),
+        },
+        "lane_closed" => format!("closed {}", text("lane")),
+        "thinks_done" => format!("{} thinks it is done", text("agent")),
+        "done" => "said it is done".to_owned(),
+        "reopened" => "reopened it".to_owned(),
+        "dropped" => "dropped it".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 /// The server this directory is connected to, asked as its person about
@@ -5595,6 +5680,32 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
                 ),
                 None => println!("Working copy ...... -"),
             }
+            // A closed lane: how it ended (ADR 0024).
+            if status["state"] == "closed" {
+                print_ending(&status);
+                println!("Ops ............... {}", status["ops"].as_u64().unwrap_or(0));
+                for file in status["files"].as_array().into_iter().flatten() {
+                    println!("  changed  {}", file.as_str().unwrap_or_default());
+                }
+                let left: Value = client.call("lane_diff", json!({ "lane": lane })).map_err(fail)?;
+                let left = left["files"].as_array().map_or(0, Vec::len);
+                match left {
+                    0 => println!("Not integrated .... nothing"),
+                    n => println!(
+                        "Not integrated .... {} (`kito lane diff {}`)",
+                        count(n as u64, "file", "files"),
+                        text("id")
+                    ),
+                }
+                if let Some(said) = status["comments"].as_array().filter(|said| !said.is_empty()) {
+                    println!("Comments:");
+                    comments_text(said).lines().for_each(|line| println!("  {line}"));
+                }
+                return Ok(());
+            }
+            if !status["integrations"].as_array().is_none_or(Vec::is_empty) {
+                print_ending(&status);
+            }
             println!("Ops since the base  {}", status["ops"].as_u64().unwrap_or(0));
             for file in status["files"].as_array().into_iter().flatten() {
                 println!("  changed  {}", file.as_str().unwrap_or_default());
@@ -5606,6 +5717,190 @@ fn cmd_lane(cli: &Cli, command: &LaneCmd) -> Outcome {
             if let Some(said) = status["comments"].as_array().filter(|said| !said.is_empty()) {
                 println!("Comments:");
                 comments_text(said).lines().for_each(|line| println!("  {line}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How a lane ended, or how far it went: each integration, and its closing.
+fn print_ending(status: &Value) {
+    let integrations = status["integrations"].as_array().map_or(&[][..], Vec::as_slice);
+    if status["state"] == "closed" {
+        let how = match integrations.is_empty() {
+            true => "closed without being integrated",
+            false => "integrated, then closed",
+        };
+        let closed = &status["closed"];
+        let when = closed["at_ms"].as_u64().map(|ms| format!(" on {} UTC", utc(ms))).unwrap_or_default();
+        let by = closed["by"].as_str().map(|by| format!(" by {by}")).unwrap_or_default();
+        println!("Ended ............. {how}{when}{by}");
+    }
+    for done in integrations {
+        let into = done["into"].as_str().unwrap_or("-");
+        let as_what = done["checkpoint"].as_str().map(|ck| format!(" as {ck}")).unwrap_or_default();
+        let when = done["at_ms"].as_u64().map(|ms| format!(" on {} UTC", utc(ms))).unwrap_or_default();
+        let by = done["by"].as_str().map(|by| format!(", let in by {by}")).unwrap_or_default();
+        println!("Integrated ........ into {into}{as_what}{when}{by}");
+    }
+}
+
+/// `kito history`: the checkpoints, newest first, a line each.
+fn cmd_checkpoints(
+    cli: &Cli,
+    path: &Option<PathBuf>,
+    limit: usize,
+    lane: &Option<String>,
+    before: &Option<String>,
+) -> Outcome {
+    let root = root_of(cli)?;
+    let rel = match path {
+        Some(path) => Some(repo_relative(&root, path)?),
+        None => None,
+    };
+    let mut client = daemon(cli)?;
+    let mut params = json!({ "limit": limit.clamp(1, 200) });
+    if let Some(rel) = &rel {
+        params["path"] = json!(rel.to_string_lossy().replace('\\', "/"));
+    }
+    if let Some(lane) = lane {
+        params["lane"] = json!(lane);
+    }
+    if let Some(before) = before {
+        let before = before.trim();
+        params["before"] = match before.starts_with("ckpt#") {
+            true => json!(before),
+            false => json!(format!("ckpt#{}", before.trim_start_matches('#'))),
+        };
+    }
+    let page: Value = client.call("checkpoints", params).map_err(fail)?;
+    if cli.json {
+        print_json(&page);
+        return Ok(());
+    }
+    let listed = page["checkpoints"].as_array().map_or(&[][..], Vec::as_slice);
+    if listed.is_empty() {
+        println!("No checkpoints.");
+        return Ok(());
+    }
+    let who = |ck: &Value| {
+        let by = ck["agent"].as_str().or(ck["by"].as_str()).unwrap_or("-").to_owned();
+        match ck["for"].as_str() {
+            Some(person) => format!("{by} for {person}"),
+            None => by,
+        }
+    };
+    let width = listed.iter().map(|ck| who(ck).chars().count()).filter(|n| *n <= 28).max().unwrap_or(0);
+    let ids = listed.iter().map(|ck| ck["id"].as_str().unwrap_or("").len()).max().unwrap_or(0);
+    for ck in listed {
+        let when = ck["at_ms"].as_u64().map(utc).unwrap_or_default();
+        let lines = format!(
+            "+{} -{}",
+            ck["lines_added"].as_u64().unwrap_or(0),
+            ck["lines_removed"].as_u64().unwrap_or(0)
+        );
+        println!(
+            "◆ {:<ids$}  {}  {:<width$}  {:>11}  {}",
+            ck["id"].as_str().unwrap_or("-"),
+            // Month, day, hour and minute.
+            when.get(5..16).unwrap_or(&when),
+            who(ck),
+            lines,
+            ck["label"].as_str().unwrap_or_default(),
+        );
+    }
+    if page["more"].as_bool() == Some(true) {
+        let last = listed.last().and_then(|ck| ck["id"].as_str()).unwrap_or_default();
+        println!("  … and older ones: `kito history --before {last}`");
+    }
+    Ok(())
+}
+
+/// `kito show`: one checkpoint, and with `--diff` its changes.
+fn cmd_show(cli: &Cli, checkpoint: &str, with_diff: bool) -> Outcome {
+    let mut client = daemon(cli)?;
+    let asked = match checkpoint.trim() {
+        spec if spec.starts_with("ckpt#") => spec.to_owned(),
+        spec => format!("ckpt#{}", spec.trim_start_matches('#')),
+    };
+    let ck: Value = client.call("checkpoint_info", json!({ "checkpoint": asked })).map_err(fail)?;
+    let diff: Option<Value> = match with_diff {
+        true => Some(client.call("diff", json!({ "to": asked })).map_err(fail)?),
+        false => None,
+    };
+    if cli.json {
+        match diff {
+            Some(diff) => print_json(&json!({ "checkpoint": ck, "diff": diff })),
+            None => print_json(&ck),
+        }
+        return Ok(());
+    }
+    let text = |key: &str| ck[key].as_str().unwrap_or("-").to_owned();
+    println!("Checkpoint ........ {}  {}", text("id"), text("label"));
+    if let Some(on) = ck["on"].as_str() {
+        println!("Of ................ {on}");
+    }
+    let when = ck["at_ms"].as_u64().map(|ms| format!("{} UTC", utc(ms))).unwrap_or_else(|| "-".to_owned());
+    println!("When .............. {when}");
+    let by = match ck["for"].as_str() {
+        Some(person) => format!("{} for {person}", text("by")),
+        None => text("by"),
+    };
+    println!("By ................ {by}");
+    if let Some(lane) = ck["lane"].as_str() {
+        let agent = ck["assistant"]["name"].as_str().map(|name| format!(" ({name})")).unwrap_or_default();
+        println!("From .............. {lane}, {}{agent}", text("agent"));
+    }
+    if let Some(task) = ck["task"].as_str() {
+        println!("Task .............. {task}");
+    }
+    if let Some(why) = ck["why"].as_str().filter(|why| *why != text("label")) {
+        println!("Why ............... {why}");
+    }
+    if let Some(approved) = ck["approved_by"].as_str() {
+        println!("Let in by ......... {approved}");
+    }
+    let reviewed = strings(&ck["reviewed_by"]);
+    if !reviewed.is_empty() {
+        println!("Reviewed by ....... {}", reviewed.join(", "));
+    }
+    if ck["checks"].is_object() {
+        let checks = &ck["checks"];
+        let commands = strings(&checks["commands"]).join("; ");
+        let how = match checks["passed"].as_bool() {
+            Some(true) => "passed",
+            _ => "did not pass",
+        };
+        let took = checks["duration_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+        println!("Checks ............ {how} in {took:.1} s: {commands}");
+    }
+    if let Some(commit) = ck["git_commit"].as_str() {
+        println!("Git commit ........ {commit}");
+    }
+    if let Some(parent) = ck["parent"].as_str() {
+        println!("After ............. {parent}");
+    }
+    let changed = ck["changed"].as_array().map_or(&[][..], Vec::as_slice);
+    println!(
+        "Files ............. {}, +{} -{}",
+        changed.len(),
+        ck["lines_added"].as_u64().unwrap_or(0),
+        ck["lines_removed"].as_u64().unwrap_or(0)
+    );
+    match diff {
+        Some(diff) => {
+            print!("{}", diff_files_text(diff["files"].as_array().map_or(&[], Vec::as_slice), false))
+        }
+        None => {
+            for file in changed {
+                let from = file["from"].as_str().map(|from| format!(" (was {from})")).unwrap_or_default();
+                println!(
+                    "  {:<9} {}{from}  +{} -{}",
+                    file["status"].as_str().unwrap_or_default(),
+                    file["path"].as_str().unwrap_or_default(),
+                    file["lines_added"].as_u64().unwrap_or(0),
+                    file["lines_removed"].as_u64().unwrap_or(0)
+                );
             }
         }
     }
@@ -6301,6 +6596,8 @@ fn run() -> ExitCode {
         }
         Cmd::Backup { what, server } => cmd_backup(&cli, what.as_deref(), server.as_deref()),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
+        Cmd::History { path, limit, lane, before } => cmd_checkpoints(&cli, path, *limit, lane, before),
+        Cmd::Show { checkpoint, diff } => cmd_show(&cli, checkpoint, *diff),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
         Cmd::Scip { file } => cmd_scip(&cli, file),

@@ -81,6 +81,8 @@ impl Kito {
             approved_by: None,
             reviewed_by: Vec::new(),
             git_merge: None,
+            at_ms: None,
+            integrated: None,
             lane: None,
         };
         self.store.put_checkpoint(&ck).unwrap();

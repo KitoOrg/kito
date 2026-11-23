@@ -596,6 +596,8 @@ pub struct Repo {
     /// What was recorded since somebody last asked: for whoever tells the
     /// clients that watch the repository.
     pub(crate) recorded: Vec<Op>,
+    /// What was worked out of the history (ADR 0024).
+    pub(crate) history: crate::history::Memory,
     /// The configuration file as it was when it was last looked at (`None`:
     /// there was none), and why it could not be read, if it could not: the
     /// configuration in force is then the last one that could.
@@ -697,6 +699,7 @@ impl Repo {
             pushed: (None, None),
             why_index: None,
             recorded: Vec::new(),
+            history: Default::default(),
             config_seen: (config_text, None),
         };
         repo.load_state()?;
@@ -906,6 +909,10 @@ impl Repo {
 
     /// The same, for the working copy of a lane.
     pub fn scan_lane(&mut self, lane: LaneId) -> Result<Vec<Op>> {
+        // A closed lane stands only for a question: it has no working copy.
+        if self.lanes.get(&lane).is_some_and(|at| at.record.state == kito_core::LaneState::Closed) {
+            return Ok(Vec::new());
+        }
         self.with(lane, |repo, work| repo.scan_work(work))
     }
 
@@ -1507,6 +1514,11 @@ impl Repo {
 
     /// The same, as a lane knows the symbol.
     pub fn why_lane(&self, lane: LaneId, file: &Path, name: &str) -> Result<Vec<Why>> {
+        if self.is_closed(lane) {
+            let head = self.store.lane_record(lane).ok_or(Error::NoSuchLane(lane))?.head;
+            let (_, symbols) = self.state_of(head)?;
+            return semantic::why(&self.store, &symbols, lane, file, name);
+        }
         semantic::why(&self.store, &self.work(lane)?.symbols, lane, file, name)
     }
 
@@ -1556,6 +1568,8 @@ impl Repo {
             approved_by: None,
             reviewed_by: Vec::new(),
             git_merge: None,
+            at_ms: Some(crate::tasks::now_ms()),
+            integrated: None,
             lane: None,
         };
         self.store.put_checkpoint(&checkpoint)?;
@@ -1719,6 +1733,7 @@ impl Repo {
     /// Imports the history of the git repository in `root` (empty store).
     pub fn import_git(&mut self) -> Result<kito_git::Imported> {
         let report = kito_git::import(&mut self.store, &self.root, &mut self.clock)?;
+        self.forget_history();
         self.main.tree = Tree::new();
         self.main.symbols = SymbolTable::new();
         self.main.head = None;
@@ -1798,13 +1813,32 @@ impl Repo {
     }
 
     /// Like [`Repo::log`], for the ops a lane recorded itself.
+    /// A closed lane's are all it recorded, named as they were when it closed.
     pub fn log_lane(&self, lane: LaneId, limit: usize, path: Option<&Path>) -> Result<Vec<LogItem>> {
+        if self.is_closed(lane) {
+            let head = self.store.lane_record(lane).ok_or(Error::NoSuchLane(lane))?.head;
+            let (_, symbols) = self.state_of(head)?;
+            return self.log_of(lane, self.store.lane_len(lane)?, &symbols, limit, path);
+        }
         let work = self.work(lane)?;
+        self.log_of(lane, work.ops, &work.symbols, limit, path)
+    }
+
+    /// The last `limit` changes among the first `end` ops of a lane, with
+    /// the names `symbols` gives.
+    fn log_of(
+        &self,
+        lane: LaneId,
+        end: u64,
+        symbols: &SymbolTable,
+        limit: usize,
+        path: Option<&Path>,
+    ) -> Result<Vec<LogItem>> {
         let mut by_head: HashMap<OpId, Vec<&Checkpoint>> = HashMap::new();
         for ck in self.store.checkpoints() {
             by_head.entry(ck.head).or_default().push(ck);
         }
-        let mut reader = Backwards { store: &self.store, lane, end: work.ops, page: Vec::new() };
+        let mut reader = Backwards { store: &self.store, lane, end, page: Vec::new() };
         let mut items = Vec::new();
         let mut shown = 0usize;
         // Symbolic ops waiting for the file change they belong to: in the
@@ -1826,9 +1860,9 @@ impl Repo {
                     std::mem::take(&mut pending).into_iter().partition(|s| s.intent == op.intent);
                 pending = mine;
                 for symbolic in alone {
-                    let file = self.file_then(&work.symbols, &symbolic, None);
+                    let file = self.file_then(symbols, &symbolic, None);
                     if self.concerns(&symbolic, file.as_deref(), path) {
-                        items.push(self.describe(&work.symbols, &symbolic, file, None));
+                        items.push(self.describe(symbols, &symbolic, file, None));
                     }
                 }
             }
@@ -1859,24 +1893,23 @@ impl Repo {
             let alone = run == 1 && next.as_ref().is_none_or(|older| older.kind.symbol().is_some());
             let carrier = op.kind.paths().last().map(|p| p.to_path_buf());
             for symbolic in std::mem::take(&mut pending) {
-                let file =
-                    self.file_then(&work.symbols, &symbolic, if alone { carrier.as_deref() } else { None });
+                let file = self.file_then(symbols, &symbolic, if alone { carrier.as_deref() } else { None });
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&work.symbols, &symbolic, file, Some(op.id)));
+                    items.push(self.describe(symbols, &symbolic, file, Some(op.id)));
                 } else {
                     pending.push(symbolic);
                 }
             }
-            items.push(self.describe(&work.symbols, &op, None, None));
+            items.push(self.describe(symbols, &op, None, None));
             shown += 1;
         }
         // Symbolic ops with no file change before them (the first analysis
         // of files that were already there).
         if shown < limit && run == 0 {
             for symbolic in pending {
-                let file = self.file_then(&work.symbols, &symbolic, None);
+                let file = self.file_then(symbols, &symbolic, None);
                 if self.concerns(&symbolic, file.as_deref(), path) {
-                    items.push(self.describe(&work.symbols, &symbolic, file, None));
+                    items.push(self.describe(symbols, &symbolic, file, None));
                 }
             }
         }

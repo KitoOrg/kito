@@ -615,6 +615,17 @@ impl Daemon {
                 self.barrier(up, params, false)?;
                 self.forward(up, method, params)?
             }
+            // A lane of this directory named as a point of the history:
+            // what was saved here is on the server before the question is.
+            method @ ("diff" | "tree" | "lane_files") => {
+                for key in ["to", "from", "at", "lane"] {
+                    let named = params.get(key).and_then(Value::as_str).map(str::trim);
+                    if let Some(lane) = named.filter(|spec| !spec.starts_with("ckpt#") && *spec != "main") {
+                        self.barrier(up, &json!({ "lane": lane }), false)?;
+                    }
+                }
+                self.forward(up, method, params)?
+            }
             // Asked before an edit in a lane: the server judges the file
             // as it is here. The main directory has nothing to send.
             "before_edit" => {

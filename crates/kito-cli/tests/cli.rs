@@ -2075,6 +2075,100 @@ changed  src/shop.ts  +2 -2
 }
 
 #[test]
+fn the_history_of_checkpoints_and_a_closed_lane_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonical().unwrap();
+    let root = root.as_path();
+    ok(root, &["init"]);
+    let shop = "export function total(prices: number[]): number {\n  let sum = 0;\n  for (const price of prices) {\n    sum += price;\n  }\n  return sum;\n}\n";
+    fs::write(root.join(".gitignore"), ".kito/\n").unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/shop.ts"), shop).unwrap();
+    ok(root, &["checkpoint", "-m", "first version"]);
+    ok(root, &["lane", "open", "alice", "--intent", "prices in cents", "--scope", "./"]);
+    let work = root.join(".kito/lanes/1/work");
+    fs::write(work.join("src/shop.ts"), shop.replace("sum += price;", "sum += Math.round(price * 100);"))
+        .unwrap();
+    fs::write(work.join("NOTES.md"), "Prices are in cents.\n").unwrap();
+    assert!(ok(root, &["integrate", "lane/1"]).contains("integrated as ckpt#2"));
+    fs::write(work.join("NOTES.md"), "Prices are in cents, rounded.\n").unwrap();
+    ok(root, &["sync", "lane/1"]);
+    assert!(ok(root, &["lane", "close", "lane/1"]).contains("lane/1 closed"));
+
+    // One line a checkpoint, newest first; with a path, those that changed it.
+    let history = ok(root, &["history"]);
+    eprintln!("{history}");
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 2, "{history}");
+    assert!(
+        lines[0].starts_with("◆ ckpt#2") && lines[0].contains("alice for") && lines[0].contains("+2 -1"),
+        "{history}"
+    );
+    assert!(lines[0].ends_with("prices in cents"), "{history}");
+    assert!(lines[1].starts_with("◆ ckpt#1") && lines[1].ends_with("first version"), "{history}");
+    assert_eq!(ok(root, &["history", "NOTES.md"]).lines().count(), 1);
+    assert_eq!(ok(root, &["history", "-n", "1"]).lines().count(), 2, "the second line says there is more");
+    assert_eq!(json(root, &["history", "--json"])["checkpoints"][0]["lane"], "lane/1");
+    let older = ok(root, &["history", "--before", "ckpt#2"]);
+    assert!(older.starts_with("◆ ckpt#1") && older.lines().count() == 1, "{older}");
+
+    // A checkpoint: what it is and its files; with --diff, its changes.
+    let show = ok(root, &["show", "ckpt#2"]);
+    eprintln!("{show}");
+    assert!(show.contains("Checkpoint ........ ckpt#2  prices in cents"), "{show}");
+    assert!(show.contains("From .............. lane/1, alice"), "{show}");
+    assert!(
+        show.contains("added     NOTES.md  +1 -0") && show.contains("modified  src/shop.ts  +1 -1"),
+        "{show}"
+    );
+    let diff = ok(root, &["show", "2", "--diff"]);
+    assert!(
+        diff.contains("+    sum += Math.round(price * 100);") && diff.contains("@@ -0,0 +1,1 @@"),
+        "{diff}"
+    );
+    assert!(!kito(root, &["show", "ckpt#9"]).status.success());
+
+    // The closed lane: how it ended, and what it left.
+    let status = ok(root, &["lane", "status", "1"]);
+    eprintln!("{status}");
+    assert!(status.contains("Lane .............. lane/1 (closed)"), "{status}");
+    assert!(status.contains("Ended ............. integrated, then closed"), "{status}");
+    assert!(status.contains("Integrated ........ into main as ckpt#2"), "{status}");
+    assert!(status.contains("Not integrated .... 1 file (`kito lane diff lane/1`)"), "{status}");
+    let left = ok(root, &["lane", "diff", "1"]);
+    assert!(left.contains("+Prices are in cents, rounded."), "{left}");
+    assert!(!status.contains("let in by"), "nobody was named: {status}");
+
+    // What happened to a task, in order.
+    ok(root, &["task", "add", "Taxes", "in", "the", "shop"]);
+    ok(root, &["lane", "open", "bob", "--intent", "taxes in the shop", "--scope", "./", "--task", "task #1"]);
+    ok(root, &["task", "comment", "task#1", "Round", "half", "to", "even"]);
+    let shown = ok(root, &["task", "show", "task#1"]);
+    eprintln!("{shown}");
+    let happened: Vec<&str> = shown.lines().skip_while(|line| *line != "What happened to it:").collect();
+    assert_eq!(happened.len(), 4, "{shown}");
+    assert!(
+        happened[1].ends_with("asked for it") && happened[2].ends_with("opened lane/2 for it"),
+        "{shown}"
+    );
+    assert!(happened[3].ends_with("commented (#1)"), "{shown}");
+
+    // A permanent lane's first checkpoint is what landed on it.
+    ok(root, &["lane", "create", "staging"]);
+    ok(root, &["lane", "open", "carol", "--intent", "rates in the shop", "--scope", "./", "--on", "staging"]);
+    fs::write(root.join(".kito/lanes/4/work/RATES.md"), "22%\n").unwrap();
+    let landed = ok(root, &["integrate", "lane/4"]);
+    let made = landed
+        .split("ckpt#")
+        .nth(1)
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>());
+    let made = format!("ckpt#{}", made.unwrap_or_default());
+    let diff = ok(root, &["show", &made, "--diff"]);
+    assert!(diff.contains("Files ............. 1, +1 -0") && diff.contains("+22%"), "{landed}\n{diff}");
+    assert!(!diff.contains("src/shop.ts"), "{diff}");
+}
+
+#[test]
 fn comments_on_a_lane_from_the_command_line() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonical().unwrap();

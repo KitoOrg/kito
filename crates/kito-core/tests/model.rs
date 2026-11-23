@@ -255,6 +255,8 @@ fn checkpoint_and_friends_round_trip() {
         git_commit: Some([0xab; 20]),
         approved_by: Some(Author::human("ada")),
         git_merge: Some([7; 20]),
+        at_ms: None,
+        integrated: None,
         lane: None,
         reviewed_by: vec![Author::human("bob")],
     };
@@ -288,6 +290,9 @@ fn checkpoint_and_friends_round_trip() {
         target: None,
         name: None,
         assistant: None,
+        integrations: Vec::new(),
+        closed: None,
+        ends_kept: false,
     };
     assert_eq!(codec::from_slice::<Lane>(&codec::to_vec(&lane).unwrap()).unwrap(), lane);
 

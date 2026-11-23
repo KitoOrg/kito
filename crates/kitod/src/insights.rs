@@ -306,7 +306,7 @@ impl Repo {
             }
         }
         if (wants("task") || wants("comment")) && query.place.is_none() && query.outcome.is_none() {
-            for task in crate::tasks::load(&self.root).tasks {
+            for task in crate::tasks::load(&self.root).unwrap_or_default().tasks {
                 let id = crate::tasks::id(task.n);
                 let names = [
                     task.by.as_str(),

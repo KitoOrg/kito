@@ -1015,6 +1015,10 @@ impl Repo {
     /// `lane` has them. `uses`: look for who uses it also in a repository
     /// with many files.
     pub fn why_graph(&mut self, lane: LaneId, target: &str, uses: bool) -> Result<WhyGraph> {
+        // A closed lane is asked about as it was when it closed.
+        if self.is_closed(lane) {
+            return self.with_closed_lane(lane, |repo| repo.why_graph(lane, target, uses));
+        }
         // A lane is asked about as its agent just left it. The main
         // directory is not looked at whole for a question: what is saved
         // there is recorded as it is saved.
@@ -1079,10 +1083,24 @@ impl Repo {
 
     /// The symbols of a file as the lane has it, with the lines each is on.
     pub(crate) fn symbol_spans(&self, lane: LaneId, file: &Path) -> Result<Vec<(SymbolId, u32, u32)>> {
-        let content = self.text_of(lane, file)?.into_bytes();
+        let work = self.work(lane)?;
+        self.spans_in(&work.tree, &work.symbols, file)
+    }
+
+    /// The same, in the files and symbols of any state.
+    pub(crate) fn spans_in(
+        &self,
+        tree: &kito_core::Tree,
+        symbols: &kito_core::SymbolTable,
+        file: &Path,
+    ) -> Result<Vec<(SymbolId, u32, u32)>> {
+        let entry =
+            tree.get(file).ok_or_else(|| Error::Other(format!("{}: no such file", file.display())))?;
+        let bytes = self.store.get_blob(&entry.blob)?.unwrap_or_default();
+        let content = String::from_utf8_lossy(&bytes).into_owned().into_bytes();
         let Some(dialect) = kito_parse::dialect_for_path(file) else { return Ok(Vec::new()) };
         let Some(parsed) = kito_parse::parse(dialect, &content) else { return Ok(Vec::new()) };
-        let ids = kito_diff::ast::identify(&self.work(lane)?.symbols, file, &parsed);
+        let ids = kito_diff::ast::identify(symbols, file, &parsed);
         let line_of =
             |at: usize| 1 + content[..at.min(content.len())].iter().filter(|&&b| b == b'\n').count() as u32;
         Ok(parsed

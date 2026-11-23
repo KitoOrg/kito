@@ -163,6 +163,8 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
             approved_by: None,
             reviewed_by: Vec::new(),
             git_merge: None,
+            at_ms: None,
+            integrated: None,
             lane: None,
         };
         store.put_checkpoint(&checkpoint).unwrap();
@@ -187,6 +189,9 @@ fn confirmed_lanes_and_conflicts_are_never_silently_dropped() {
                 target: None,
                 name: None,
                 assistant: None,
+                integrations: Vec::new(),
+                closed: None,
+                ends_kept: false,
             })
             .unwrap();
         store
@@ -250,6 +255,8 @@ fn garbage_after_the_last_record_is_discarded_and_kept_aside() {
         approved_by: None,
         reviewed_by: Vec::new(),
         git_merge: None,
+        at_ms: None,
+        integrated: None,
         lane: None,
     };
     store.put_checkpoint(&ck).unwrap();

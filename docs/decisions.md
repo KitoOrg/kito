@@ -2257,3 +2257,97 @@ it runs, the client's `kito plugin update` does not, and a scanner is
 nobody's to stop), and trying again for a while (how long a scan lasts
 is not known). Left as it is: a file that something keeps to itself
 alone still refuses the move, and the error says so.
+
+### D-214 · What a lane did is kept with it; what was not kept is not invented
+A lane's record keeps each integration (`into`, `checkpoint`, `at_ms`,
+`by`) and its closing (`at_ms`, `by`), and a checkpoint when it was made
+and the lane that made it ([ADR 0024](adr/0024-what-was.md)). For what
+was recorded before 0.41, an integration is read from the history only
+where Kito itself wrote it so that it can be read back: ops a lane's
+agent recorded on another lane under `integrate lane/N: …`, the first
+with the lane's work as its second parent, and the checkpoint on the
+last of them. Who let it in is said only when that checkpoint says so;
+when a lane was closed is not said at all. From now on too, `by` of an
+integration (who let it in) and of a closing is said only of a person a
+server named: what an agent does on somebody's machine was done for
+nobody Kito knows of. `ends_kept` marks a
+record whose list is whole: one from before gets it, with what the
+history says copied in, before it records anything new, so that the
+history is read for it once and the new integration is never counted
+twice. Not chosen: guessing the closing time from the last op (a lane
+can sit idle for days before it is closed), and the identity of the
+repository's owner for `by` (the person who asked may have been
+somebody on a server).
+
+### D-215 · A closed lane is read from the store, and stands as open for one question
+`lane_status`, `lane_diff`, `lane_files`, `log`, `why` rebuild what they
+need from the lane's record (`head`, `base_head`, `since`): the state
+after its last op, the state it was last brought up to, the ops it
+recorded. `why_graph` reads an open lane in too many places to be
+written twice: for that one question the closed lane is put among the
+open ones as it was when it closed, marked closed so that nothing scans
+its working copy (there is none) and nobody is told, then taken out.
+Requests name a closed lane through `known_lane`; everything that
+writes keeps `lane_of`, which knows only the open ones, so -32022 still
+answers a write to a closed lane and a question about a lane that never
+was.
+
+### D-216 · The checkpoints of a lane are replayed once and kept in memory
+`checkpoints`, `checkpoint_info`, `diff`, `tree` and `lane_files {at}`
+need, for each checkpoint, what it changed and the state at it. The
+first question about a lane's checkpoints replays its ops once, noting
+the files each op touches and the entry each had before, and closes a
+list of changes at each checkpoint's head, with, on the main lane, the
+place of the head. No state is kept per checkpoint: a repository
+imported from git has one per commit. Whole states are kept for the
+last eight asked for; a checkpoint's is rebuilt from the nearest of them
+before it on the main lane (its place says which), else from the first
+op. Later questions replay only the ops recorded since; a checkpoint made
+on the last op replayed gets what was pending. The lines of a change are
+counted when first shown. Measured on 2,801 ops and 101 checkpoints (ADR 0024): the
+first page 435 ms, the next 4 ms. Not chosen: an index on disk (not in
+this phase, and it would have to be rebuilt with every repair of the
+store), and rebuilding each checkpoint's state from the first op
+(`main_state_at`) every time it is asked.
+
+### D-217 · `checkpoint_info`, not `checkpoint`
+The method that answers one checkpoint was to be `checkpoint
+{checkpoint}`; `checkpoint {label}` already makes one, and needs
+`admin`. A method's permission goes with its name (`permission_of`), so
+reading one is `checkpoint_info`.
+
+### D-218 · A task's history is kept with it; a task from before tells what it can
+`history` is written in `.kito/tasks.json` by the daemon where the task
+methods change a task (an `edited` for each of title and text that
+changed, `for` when whom it is for changed, `taken_up` the first time
+an agent takes it up) and where a lane of one of the repository's tasks
+is opened, integrated or closed. A task with no history answers `asked`
+and its comments, which have their times; the first time it is taken to
+be changed, before anything of it changes, what it can tell is written
+as its history, so that a comment made then is in it once. Nothing else
+is told for it: when it was taken up, given to somebody or closed was
+not kept.
+
+### D-219 · `task #7` names a task only when there is one; a lane's link is read as it always was
+`task #7` became a name of task 7 in 0.41, because the help said to
+write it so. But a lane opened before with that text, as a label of
+somebody's own tracker, would then have become task 7's: its state would
+flip, its agent be sent task 7's comments, its events written in task
+7's history. And a repository with no task 7 refused the label with no
+way on. So `task #7`, `Task #7`, `TASK#7` are taken as task 7 only when
+the lane is opened (or an intent given) in a repository that has a task
+7, and kept then as `task#7`; otherwise they are kept as said. What
+links a lane to a task (`tasks::lane_task`) reads what is kept exactly
+as 0.40 read it. Refusals that remain say how to go on.
+
+### D-220 · The tasks are changed under one lock, and a file that cannot be read stops them
+The task requests, and a lane's events written in its task's history
+(from the request thread and from the integration worker), each loaded,
+changed and saved `tasks.json` through one staged file, with no lock: a
+comment could be lost to a lane's event, and two writes of the staged
+file at once could leave it unreadable, which `load` took for no tasks,
+so that the next save wrote an empty list over them all. Now one lock of
+the daemon is held across each load, change and save (taken before the
+repository's, never after it), each write has a staged file of its own,
+and a file that cannot be read is an error that every task request says,
+and that nothing writes over.

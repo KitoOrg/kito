@@ -346,6 +346,8 @@ fn checkpoints_are_durable_and_updatable() {
         approved_by: None,
         reviewed_by: Vec::new(),
         git_merge: None,
+        at_ms: None,
+        integrated: None,
         lane: None,
     };
     // put_checkpoint confirms the appended ops on its own.
@@ -450,6 +452,8 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         approved_by: None,
         reviewed_by: Vec::new(),
         git_merge: None,
+        at_ms: None,
+        integrated: None,
         lane: None,
     };
     store.put_checkpoint(&checkpoint).unwrap();
@@ -475,6 +479,9 @@ fn lanes_and_conflicts_are_durable_and_updatable() {
         target: None,
         name: None,
         assistant: None,
+        integrations: Vec::new(),
+        closed: None,
+        ends_kept: false,
     };
     store.put_lane(&lane).unwrap();
     assert_eq!(store.next_lane_id(), LaneId(2));

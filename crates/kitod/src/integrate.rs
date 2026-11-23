@@ -1142,9 +1142,14 @@ impl Repo {
             return Ok(Some(result));
         }
         let (agent, lane_head) = (at.record.agent.clone(), at.work.head);
+        // Who asked: said only of a person a server named.
+        let asked_by = approved_by.clone();
         let what = at.record.task.clone().or_else(|| {
             at.work.intent.and_then(|id| self.store.intent(&id)).map(|intent| intent.summary.clone())
         });
+        // Its integrations from before Kito 0.41 are read before this one
+        // is written into the history.
+        self.keep_ends(lane);
 
         // An untracked file where one must be written is not ours to overwrite.
         let root = self.work(target)?.root.clone();
@@ -1202,6 +1207,7 @@ impl Repo {
         })?;
         let head = self.work(target)?.head.ok_or(Error::NothingToCheckpoint)?;
         if !self.is_permanent(target) {
+            self.note_integration(lane, target, None, asked_by)?;
             return self
                 .landed_on_lane(prepared, ops.first().map(|op| op.id).unwrap_or(head), result)
                 .map(Some);
@@ -1239,9 +1245,12 @@ impl Repo {
             approved_by,
             reviewed_by,
             git_merge: brought.filter(|_| on_lane.is_none()),
+            at_ms: Some(crate::tasks::now_ms()),
+            integrated: Some(lane),
             lane: on_lane,
         };
         self.store.put_checkpoint(&checkpoint)?;
+        self.note_integration(lane, target, Some(checkpoint.id), asked_by)?;
         for id in &prepared.settled {
             if let Some(mut conflict) = self.store.conflict(*id).cloned() {
                 conflict.resolved_by = ops.first().map(|op| op.id).or(Some(head));
@@ -1503,6 +1512,8 @@ impl Repo {
             approved_by: None,
             reviewed_by: Vec::new(),
             git_merge: caught,
+            at_ms: Some(crate::tasks::now_ms()),
+            integrated: None,
             lane: Some(lane),
         };
         self.store.put_checkpoint(&checkpoint)?;

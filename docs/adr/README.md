@@ -61,3 +61,5 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0023 · The servers a client knows](0023-servers-a-client-knows.md)
   (accepted)
+- [0024 · What was: closed lanes, checkpoints and files as they were](0024-what-was.md)
+  (accepted)

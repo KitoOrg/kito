@@ -94,6 +94,11 @@ const READ: &[&str] = &[
     "lane_diff",
     "lane_files",
     "get_blobs",
+    // What was (ADR 0024).
+    "checkpoints",
+    "checkpoint_info",
+    "diff",
+    "tree",
     "board",
     "who_touches",
     "events",
@@ -1327,27 +1332,38 @@ mod tests {
         assert_eq!(all(&refuses), ["b/held"]);
     }
 
-    /// A program every system has that runs for as long as its input is
-    /// open, and what it is started with.
-    fn one_that_waits() -> Option<(PathBuf, &'static [&'static str])> {
-        if cfg!(windows) {
-            let system = std::env::var_os("SystemRoot")?;
-            return Some((Path::new(&system).join("System32").join("findstr.exe"), &["x"]));
-        }
-        let cat = std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join("cat"))
-            .find(|cat| cat.is_file())?;
-        Some((cat, &[]))
+    /// Writes at `at` a program that runs for as long as its input is
+    /// open, and answers what it is started with: on Unix a script of its
+    /// own (a system's `cat` may be a program of many names, which under
+    /// another one exits at once), on Windows a copy of `findstr.exe`.
+    /// `None` on another system.
+    #[cfg(unix)]
+    fn one_that_waits(at: &Path) -> Option<&'static [&'static str]> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(at, "#!/bin/sh\nread line\n").unwrap();
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Some(&[])
+    }
+
+    #[cfg(windows)]
+    fn one_that_waits(at: &Path) -> Option<&'static [&'static str]> {
+        let system = std::env::var_os("SystemRoot")?;
+        std::fs::copy(Path::new(&system).join("System32").join("findstr.exe"), at).unwrap();
+        Some(&["x"])
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn one_that_waits(_at: &Path) -> Option<&'static [&'static str]> {
+        None
     }
 
     #[test]
     fn a_plugin_whose_program_is_running_is_replaced_and_removed_all_the_same() {
-        let Some((waits, with)) = one_that_waits() else { return };
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, source) = (tmp.path().join("plugins"), tmp.path().join("source"));
         std::fs::create_dir_all(&plugins).unwrap();
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::copy(&waits, program(&source, "hello")).unwrap();
+        let Some(with) = one_that_waits(&program(&source, "hello")) else { return };
         let install = |version: &str| {
             let manifest = format!("name = \"hello\"\nversion = \"{version}\"\napi = 1\n");
             std::fs::write(source.join(MANIFEST), manifest).unwrap();
@@ -1374,7 +1390,8 @@ mod tests {
             .spawn()
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(running.try_wait().unwrap().is_none(), "it does not wait");
+        let status = running.try_wait().unwrap();
+        assert!(status.is_none(), "it does not wait: {status:?}");
         // And somebody is reading its manifest: on Windows that alone
         // keeps its directory from being renamed.
         let reading = std::fs::File::open(installed.join(MANIFEST)).unwrap();

@@ -32,10 +32,10 @@ pub use ids::{
     VerdictId,
 };
 pub use model::{
-    Assistant, AssistantSaid, Author, AuthorKind, Checkpoint, Comment, CommentTarget, Conflict, ConflictKind,
-    FileMode, Fingerprint, Intent, Lane, LaneState, Lang, Location, Note, NoteTarget, Op, OpKind, Proposal,
-    RefSource, Reference, Resolution, ScopeEntry, ScopeItem, Symbol, SymbolKind, Verdict, VerdictKind,
-    Verification,
+    Assistant, AssistantSaid, Author, AuthorKind, Checkpoint, Closing, Comment, CommentTarget, Conflict,
+    ConflictKind, FileMode, Fingerprint, Integration, Intent, Lane, LaneState, Lang, Location, Note,
+    NoteTarget, Op, OpKind, Proposal, RefSource, Reference, Resolution, ScopeEntry, ScopeItem, Symbol,
+    SymbolKind, Verdict, VerdictKind, Verification,
 };
 pub use symbols::{SymbolEntry, SymbolError, SymbolTable};
 pub use tree::{Tree, TreeEntry, TreeError};

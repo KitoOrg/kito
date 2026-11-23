@@ -396,7 +396,7 @@ pub fn run(root: &Path, plan: &Plan) -> Result<Report, String> {
                 "open_lane",
                 json!({
                     "agent": format!("agent-{k}"),
-                    "task": format!("task #{k}"),
+                    "task": format!("part {k} of the simulation"),
                     "intent": format!("the work of agent {k}"),
                     "scope": scope,
                 }),

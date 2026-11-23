@@ -107,6 +107,9 @@ pub fn import(store: &mut Store, root: &Path, clock: &mut HlcClock) -> Result<Im
                 approved_by: None,
                 reviewed_by: Vec::new(),
                 git_merge: None,
+                // When the commit says it was made.
+                at_ms: Some(seconds * 1000),
+                integrated: None,
                 lane: None,
             };
             store.put_checkpoint(&checkpoint)?;

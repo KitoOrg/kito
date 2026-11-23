@@ -47,7 +47,7 @@ Errors that mean something of their own:
 | --- | --- |
 | `-32020` | Refused: it is not done, and asking again will not help. The message says why, and what to do instead. A permission that is missing is this. |
 | `-32021` | The lane is written from another machine now. |
-| `-32022` | No such lane, or it is closed. |
+| `-32022` | No such lane. A closed lane is one too for what writes: what only reads answers for it as it ended ([ADR 0024](adr/0024-what-was.md)). |
 | `-32601`, `-32602`, `-32603`, `-32700` | As JSON-RPC says: unknown method, wrong parameters, an error inside, a line that is not a request. |
 
 A lane is named `lane/3`, `3`, or by the name of a permanent lane
@@ -78,16 +78,20 @@ with what comes with it, where a program named itself otherwise.
 | Method | Parameters | Answers | Defined in |
 | --- | --- | --- | --- |
 | `status` | | The daemon (`pid`, what it watches) and, under `repo`, the repository: files, ops, checkpoints, protection, checks, what was last pushed. `repo.config_error`, when the configuration file cannot be read: why, and that the one read before it changed is in force. `restart_needed`, when the file gives a setting the daemon reads only as it starts another value than it runs with: the settings ([ADR 0022](adr/0022-the-configuration-in-force.md)) | `server.rs`, `repo.rs` (`Status`) |
-| `lanes` | `[all]` | The open lanes (with `all`, the closed ones too) | `lanes.rs` (`LaneInfo`) |
-| `lane_status` | `lane` | One lane, with its conflicts and the comments that wait | `lanes.rs` (`LaneInfo`) |
-| `lane_diff` | `lane`, `[paths]` | What the lane changes: files, hunks, symbols | `review.rs` (`LaneDiff`) |
-| `lane_files` | `[lane]`, `[paths]` | The files of a lane, each with the ID of its content | `files.rs` (`FileEntry`) |
+| `lanes` | `[all]` | The open lanes (with `all`, the closed ones too). Each says its `integrations` (`into`, `checkpoint`, `at_ms`, `by`) and, once closed, `closed` (`at_ms`, `by`); a closed lane's `ops` and `files` are every op it recorded and every file they touched | `lanes.rs` (`LaneInfo`) |
+| `lane_status` | `lane` | One lane, open or closed, with its conflicts and the comments that wait | `lanes.rs` (`LaneInfo`) |
+| `lane_diff` | `lane`, `[paths]` | What the lane changes: files, hunks, symbols. For a closed lane, what it had not integrated when it closed | `review.rs` (`LaneDiff`) |
+| `lane_files` | `[lane]`, `[paths]`, `[at]` | The files of a lane (a closed one: as it ended), each with the ID of its content: `lane`, `ops`, `files`. With `at` (a checkpoint, `main`, a lane), the files as they were there: `at`, `files` | `files.rs` (`FileEntry`) |
+| `checkpoints` | `[lane]` (a permanent lane; `main` by default), `[limit]` (50, at most 200), `[before]` (a checkpoint), `[path]` (a file or a directory) | The checkpoints, newest first, each with who made it, the lane and task it came from, its files and lines, approvals, checks; `more` when there are older ones ([ADR 0024](adr/0024-what-was.md)) | `history.rs` (`CheckpointPage`, `CheckpointInfo`) |
+| `checkpoint_info` | `checkpoint` (`ckpt#4`) | One checkpoint, with `changed`: each file, `added`, `modified`, `removed` or `renamed` (`from`: its name before), its lines, and the IDs of its content `before` and `after`. A checkpoint of a permanent lane says it in `on` | `history.rs` (`CheckpointInfo`) |
+| `diff` | `to`, `[from]`, `[paths]` | What differs between two points (a checkpoint, `main`, a lane, closed too), in the shape of `lane_diff`'s files. Without `from`, a checkpoint against the one before it | `history.rs` (`Diff`), `review.rs` (`FileDiff`) |
+| `tree` | `[at]` (`main` by default, a checkpoint, a lane), `[path]` | What a directory holds at that point: directories, then files, each with the last checkpoint that changed it; its `readme` | `history.rs` (`Listing`) |
 | `get_blobs` | `blobs` | Contents by their IDs, in base64 | `server.rs` |
 | `board` | | Who is on what: every open lane with its scope and where it stands | `scope.rs` |
 | `who_touches` | `target` | The lanes that declared or changed a function, a file or a directory | `scope.rs` |
-| `log` | `[lane]`, `[limit]`, `[path]` | The last changes, newest first | `repo.rs` |
+| `log` | `[lane]`, `[limit]`, `[path]` | The last changes, newest first (of a closed lane too) | `repo.rs` |
 | `why` | `file`, `symbol`, `[lane]` | The history of a function | `repo.rs` |
-| `why_graph` | `target`, `[lane]`, `[uses]` | Why a function, a file or lines are the way they are | `why.rs` (`WhyGraph`) |
+| `why_graph` | `target`, `[lane]`, `[uses]` | Why a function, a file or lines are the way they are; for a closed lane, as it was when it closed | `why.rs` (`WhyGraph`) |
 | `reasons` | `[about]`, `[limit]` | Earlier work, found by the words of its reason | `why.rs` (`ReasonHit`) |
 | `notes` | `[lane]`, `[on]` | The notes left on code | `notes.rs` (`NoteInfo`) |
 | `comments` | `lane`, `[all]` | What was said about a lane, each comment followed by its answers | `comments.rs` (`CommentInfo`) |
@@ -107,7 +111,7 @@ with what comes with it, where a program named itself otherwise.
 | `instructions_text` | `[assistant]` (`claude` by default) | What that assistant reads: Kito's rules, then the instructions for every assistant and for it, between Kito's marks | `instructions.rs` (`compose`) |
 | `instructions_history` | | Who changed which instruction, when, the text before and after (the last 200), the latest first | `instructions.rs` (`history`) |
 | `tasks` | `[state]` (`open` by default, `all`, `in_lane`, `ready`, `done`, `dropped`), `[for]` | The tasks (ADR 0015), each with its state, whom it is for, who took it up and its lanes | `tasks.rs` (`TaskInfo`) |
-| `task` | `task` (`task#3`) | One task, with what was said on it | `tasks.rs` (`TaskInfo`) |
+| `task` | `task` (`task#3`) | One task, with what was said on it and `history`: what happened to it, in order (`asked`, `edited`, `for`, `taken_up`, `comment`, `lane_opened`, `lane_integrated`, `lane_closed`, `thinks_done`, `done`, `reopened`, `dropped`) | `tasks.rs` (`TaskInfo`, `TaskEvent`) |
 | `search` | `[q]` (words, all of them), `[kinds]`, `[since_ms]`, `[until_ms]`, `[who]`, `[where]`, `[outcome]`, `[limit]` | What matches (ADR 0016): reasons, changes, lanes, tasks, comments, notes, the best first | `insights.rs` |
 | `stats` | `[since_ms]`, `[until_ms]` | Lane flow by week and its medians, per assistant and model, busy files and functions, review | `insights.rs` |
 

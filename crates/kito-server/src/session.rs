@@ -77,6 +77,11 @@ const ALLOWED: &[&str] = &[
     "submit_review",
     "apply_suggestion",
     "changes_since_review",
+    // What was (ADR 0024).
+    "checkpoints",
+    "checkpoint_info",
+    "diff",
+    "tree",
     // The git remote now (ADR 0020).
     "git_sync",
 ];
@@ -102,6 +107,10 @@ const READ: &[&str] = &[
     "comments",
     "review",
     "changes_since_review",
+    "checkpoints",
+    "checkpoint_info",
+    "diff",
+    "tree",
     // Asked before an edit and after a command: the answer changes nothing
     // of the repository.
     "before_edit",

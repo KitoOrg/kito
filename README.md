@@ -106,6 +106,21 @@ and the place it has today:
 kito why --history src/users.ts:fetchUser
 ```
 
+The checkpoints are the history, as commits are: a line each, newest
+first, with who made it (and for whom), its lines and its label; with a
+path, those that changed it. One of them, with the lane and the task it
+came from, its approvals and checks, and the files it changed; with
+`--diff`, the changes themselves
+([ADR 0024](docs/adr/0024-what-was.md)):
+
+```bash
+kito history src/shop.ts
+```
+
+```bash
+kito show ckpt#4 --diff
+```
+
 To go back to a checkpoint or to an earlier op (recorded as new ops, so it
 can be undone), and to set who signs the changes:
 
@@ -167,6 +182,13 @@ integration say so until it is put right. Only how the daemon watches
 (`[capture] watch`, `debounce_ms`, `rescan_secs`) is read when it starts:
 `kito status` says when one of them waits for a restart
 ([ADR 0022](docs/adr/0022-the-configuration-in-force.md)).
+
+A lane that is closed is still there to be read: `kito lane status
+lane/1` says how it ended (each integration, as which checkpoint, asked
+by whom; or given up), every op it recorded and every file they
+touched, and what it left that was never integrated, which `kito lane
+diff lane/1` shows. Its log, its files and the reasons of its code are
+asked of it as of an open lane, as it was when it closed.
 
 A real conflict — the same lines of the same function, a symbol removed on
 one side and changed on the other, two functions of one name added by the
@@ -389,6 +411,11 @@ kito task done task#1                       # once its lanes are closed, by a pe
 
 A task is `open`, `in_lane` while a lane is on it, `ready` when its
 lanes are all closed, then `done` or `dropped`, which only a person says.
+It keeps what happened to it, in order: asked, edited, given to
+somebody, taken up, commented, each lane opened, integrated and closed,
+thought done, done, reopened, dropped (`kito task show`). A lane opened
+with `task #1` or `Task #1` is task 1's when there is a task 1; otherwise
+the text is a label of your own.
 Agents use the MCP tools `tasks`, `claim_task` and `task_done` (which
 only says they think it is done) when they are told to work on tasks.
 Tasks are kept by Kito, not in the project, and shared through the

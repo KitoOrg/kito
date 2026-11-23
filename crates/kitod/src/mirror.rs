@@ -54,6 +54,10 @@ const REPEATABLE: &[&str] = &[
     "lane_diff",
     "comments",
     "review",
+    "checkpoints",
+    "checkpoint_info",
+    "diff",
+    "tree",
 ];
 
 /// A connection left alone this long is checked before it is trusted with

@@ -257,9 +257,65 @@ pub(crate) fn symbol_of(kind: &OpKind) -> Option<SymbolId> {
     }
 }
 
+/// How many lines two texts differ by: added, removed.
+pub(crate) fn line_counts(before: &[u8], after: &[u8]) -> (usize, usize) {
+    let (old, new) = (lines_of(before), lines_of(after));
+    let (mut added, mut removed) = (0, 0);
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new) {
+        let (tag, was, now) = op.as_tag_tuple();
+        if tag != similar::DiffTag::Equal {
+            removed += was.len();
+            added += now.len();
+        }
+    }
+    (added, removed)
+}
+
+/// The reasons of a change, without Kito's own `integrate lane/N: …` when
+/// the lane's own are there: it only says them again.
+fn own_reasons(said: Vec<String>) -> Vec<String> {
+    let kitos = |words: &String| crate::history::integrate_of(words).is_some();
+    match said.iter().all(kitos) {
+        true => said,
+        false => said.into_iter().filter(|words| !kitos(words)).collect(),
+    }
+}
+
+/// One side of a diff: the files and the symbols, as they were then.
+#[derive(Clone, Copy)]
+pub(crate) struct Side<'a> {
+    pub(crate) tree: &'a kito_core::Tree,
+    pub(crate) symbols: &'a SymbolTable,
+}
+
+/// What the ops between the two sides of a diff say: the files renamed,
+/// the symbols touched and why.
+#[derive(Default)]
+pub(crate) struct Said {
+    renamed: BTreeMap<PathBuf, PathBuf>,
+    touched: BTreeMap<SymbolId, Vec<String>>,
+}
+
+impl Said {
+    /// Takes in an op; ops are given oldest first.
+    pub(crate) fn take(&mut self, repo: &Repo, op: &kito_core::Op) {
+        if let OpKind::FileRename { from, to } = &op.kind {
+            let first = self.renamed.remove(from).unwrap_or_else(|| from.clone());
+            self.renamed.insert(to.clone(), first);
+        }
+        if let Some(id) = symbol_of(&op.kind) {
+            let said = self.touched.entry(id).or_default();
+            if let Some(words) = repo.words(op).filter(|words| !said.iter().any(|w| w == words)) {
+                said.push(words.to_owned());
+            }
+        }
+    }
+}
+
 impl Repo {
     /// What a lane changes against what it started from; with `paths`, in
-    /// those files and directories only.
+    /// those files and directories only. For a closed lane: what it had
+    /// changed and not integrated when it closed.
     pub fn lane_diff(&self, lane: LaneId, paths: &[String]) -> Result<LaneDiff> {
         if lane.is_main() {
             return Err(Error::Other(
@@ -267,34 +323,83 @@ impl Repo {
                     .to_owned(),
             ));
         }
-        let at = self.lanes.get(&lane).ok_or(Error::NoSuchLane(lane))?;
-        let (base, now) = (&at.base_tree, &at.work.tree);
+        let Some(at) = self.lanes.get(&lane) else {
+            return self.closed_lane_diff(lane, paths);
+        };
+        // What the lane's own ops say.
+        let mut said = Said::default();
+        self.lane_ops_from(lane, at.record.since, |op| said.take(self, op))?;
+        let base = Side { tree: &at.base_tree, symbols: &at.base_symbols };
+        let now = Side { tree: &at.work.tree, symbols: &at.work.symbols };
+        let files = self.diff_files(base, now, said, paths)?;
+        let target = at.record.target_lane();
+        let behind = match self.work(target) {
+            Ok(work) => work.tree.differences(&at.base_tree).count(),
+            Err(_) => 0,
+        };
+        Ok(LaneDiff {
+            lane: lane.to_string(),
+            onto: lane_word(target),
+            base: at.record.base.to_string(),
+            behind,
+            files,
+        })
+    }
 
-        // What the lane's own ops say: the files it renamed, the symbols
-        // it touched and why.
-        let mut renamed: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
-        let mut touched: BTreeMap<SymbolId, Vec<String>> = BTreeMap::new();
+    /// The same, for a closed lane: its head against what it was last
+    /// brought up to. Nothing is behind a lane that lands nowhere now.
+    fn closed_lane_diff(&self, lane: LaneId, paths: &[String]) -> Result<LaneDiff> {
+        let record = self.store.lane_record(lane).ok_or(Error::NoSuchLane(lane))?.clone();
+        let (base_tree, base_symbols) = self.state_of(record.base_head)?;
+        let (tree, symbols) = self.state_of(record.head)?;
+        let mut said = Said::default();
+        self.lane_ops_from(lane, record.since, |op| said.take(self, op))?;
+        let files = self.diff_files(
+            Side { tree: &base_tree, symbols: &base_symbols },
+            Side { tree: &tree, symbols: &symbols },
+            said,
+            paths,
+        )?;
+        Ok(LaneDiff {
+            lane: lane.to_string(),
+            onto: lane_word(record.target_lane()),
+            base: record.base.to_string(),
+            behind: 0,
+            files,
+        })
+    }
+
+    /// Calls `f` on the ops of a lane from the `start`-th on, oldest first.
+    pub(crate) fn lane_ops_from(
+        &self,
+        lane: LaneId,
+        start: u64,
+        mut f: impl FnMut(&kito_core::Op),
+    ) -> Result<()> {
         const PAGE: usize = 1024;
-        let mut start = at.record.since;
+        let mut start = start;
         loop {
             let ops = self.store.lane_ops(lane, start, PAGE)?;
-            for op in &ops {
-                if let OpKind::FileRename { from, to } = &op.kind {
-                    let first = renamed.remove(from).unwrap_or_else(|| from.clone());
-                    renamed.insert(to.clone(), first);
-                }
-                if let Some(id) = symbol_of(&op.kind) {
-                    let said = touched.entry(id).or_default();
-                    if let Some(words) = self.words(op).filter(|words| !said.iter().any(|w| w == words)) {
-                        said.push(words.to_owned());
-                    }
-                }
-            }
+            ops.iter().for_each(&mut f);
             if ops.len() < PAGE {
-                break;
+                return Ok(());
             }
             start += ops.len() as u64;
         }
+    }
+
+    /// What differs between two states, file by file and symbol by
+    /// symbol, as a review shows it; with `paths`, in those files and
+    /// directories only.
+    pub(crate) fn diff_files(
+        &self,
+        before: Side<'_>,
+        after: Side<'_>,
+        said: Said,
+        paths: &[String],
+    ) -> Result<Vec<FileDiff>> {
+        let (base, now) = (before.tree, after.tree);
+        let Said { mut renamed, touched } = said;
         // A file renamed and renamed back is not renamed; nor is one whose
         // first name is taken again.
         renamed
@@ -322,7 +427,7 @@ impl Repo {
 
         // The symbols that differ, under the file each is in now (or was
         // last in).
-        let (was_table, table) = (&at.base_symbols, &at.work.symbols);
+        let (was_table, table) = (before.symbols, after.symbols);
         let mut ids: BTreeSet<SymbolId> = touched.keys().copied().collect();
         ids.extend(was_table.changed(table));
         let mut by_file: BTreeMap<&Path, Vec<SymbolId>> = BTreeMap::new();
@@ -358,7 +463,7 @@ impl Repo {
 
             let spans: BTreeMap<SymbolId, (u32, u32)> = match after {
                 Some(_) => self
-                    .symbol_spans(lane, path)
+                    .spans_in(now, table, path)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(id, from, to)| (id, (from, to)))
@@ -393,7 +498,7 @@ impl Repo {
                     change,
                     was,
                     lines: spans.get(&id).copied(),
-                    intents: touched.get(&id).cloned().unwrap_or_default(),
+                    intents: own_reasons(touched.get(&id).cloned().unwrap_or_default()),
                 });
             }
             symbols.sort_by(|a, b| {
@@ -413,19 +518,7 @@ impl Repo {
                 symbols,
             });
         }
-
-        let target = at.record.target_lane();
-        let behind = match self.work(target) {
-            Ok(work) => work.tree.differences(base).count(),
-            Err(_) => 0,
-        };
-        Ok(LaneDiff {
-            lane: lane.to_string(),
-            onto: lane_word(target),
-            base: at.record.base.to_string(),
-            behind,
-            files,
-        })
+        Ok(files)
     }
 }
 

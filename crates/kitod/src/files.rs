@@ -45,23 +45,39 @@ fn blob_of(text: &str) -> Result<BlobId> {
 
 impl Repo {
     /// The files of a lane as recorded; with `paths`, the ones among them
-    /// that exist.
+    /// that exist. A closed lane's are those it had when it closed.
     pub fn lane_files(&self, lane: LaneId, paths: Option<&[PathBuf]>) -> Result<Vec<FileEntry>> {
-        let tree = &self.work(lane)?.tree;
-        let told = |path: &Path, entry: &TreeEntry| FileEntry {
-            path: path.display().to_string(),
-            blob: entry.blob.to_string(),
-            executable: entry.mode == FileMode::Executable,
-            symlink: entry.mode == FileMode::Symlink,
-        };
-        Ok(match paths {
-            Some(paths) => {
-                paths.iter().filter_map(|path| tree.get(path).map(|entry| told(path, entry))).collect()
-            }
-            None => tree.iter().map(|(path, entry)| told(path, entry)).collect(),
-        })
+        match self.is_closed(lane) {
+            true => Ok(files_of(&self.tree_of(crate::history::Point::Lane(lane))?, paths)),
+            false => Ok(files_of(&self.work(lane)?.tree, paths)),
+        }
     }
 
+    /// The files as they were at a point: a checkpoint (`ckpt#4`), `main`,
+    /// or a lane (a closed one as it ended).
+    pub fn files_at(&self, at: &str, paths: Option<&[PathBuf]>) -> Result<Vec<FileEntry>> {
+        Ok(files_of(&self.tree_of(self.point(at)?)?, paths))
+    }
+}
+
+/// The files of a tree, as a client is told; with `paths`, the ones among
+/// them that exist.
+fn files_of(tree: &kito_core::Tree, paths: Option<&[PathBuf]>) -> Vec<FileEntry> {
+    let told = |path: &Path, entry: &TreeEntry| FileEntry {
+        path: path.display().to_string(),
+        blob: entry.blob.to_string(),
+        executable: entry.mode == FileMode::Executable,
+        symlink: entry.mode == FileMode::Symlink,
+    };
+    match paths {
+        Some(paths) => {
+            paths.iter().filter_map(|path| tree.get(path).map(|entry| told(path, entry))).collect()
+        }
+        None => tree.iter().map(|(path, entry)| told(path, entry)).collect(),
+    }
+}
+
+impl Repo {
     /// A content, by its ID.
     pub fn content(&self, blob: &str) -> Result<Vec<u8>> {
         self.store.get_blob(&blob_of(blob)?)?.ok_or_else(|| Error::Other(format!("no content {blob} here")))

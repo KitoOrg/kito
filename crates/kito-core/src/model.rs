@@ -354,7 +354,7 @@ pub struct Intent {
     pub id: IntentId,
     /// "add a cache for user requests"
     pub summary: String,
-    /// e.g. "task #55"
+    /// e.g. "task#55"
     pub task: Option<String>,
     /// full prompt, optional
     pub prompt: Option<BlobId>,
@@ -525,7 +525,7 @@ pub struct Lane {
     /// (integrated, or re-expressed on top of it).
     #[serde(default)]
     pub since: u64,
-    /// What the lane is for, as declared when it was opened ("task #55").
+    /// What the lane is for, as declared when it was opened ("task#55").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     /// The intent the next captured ops are recorded with.
@@ -564,6 +564,42 @@ pub struct Lane {
     /// (ADR 0010).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<Assistant>,
+    /// Each time its work landed, oldest first (ADR 0024).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations: Vec<Integration>,
+    /// When it was closed, and by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closing>,
+    /// `integrations` holds every integration of the lane. Not set in the
+    /// records written before Kito 0.41: theirs are worked out from the
+    /// history, until one is recorded here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ends_kept: bool,
+}
+
+/// One time a lane's work landed on another lane (ADR 0024).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Integration {
+    /// The lane it landed on: the main lane, a permanent one, or a lane.
+    pub into: LaneId,
+    /// The checkpoint made with it: none when it landed on a lane that is
+    /// neither the main lane nor a permanent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointId>,
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// Who let it in, when a person was named for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<Author>,
+}
+
+/// How a lane was closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Closing {
+    /// Wall-clock time, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<Author>,
 }
 
 impl Lane {
@@ -820,6 +856,13 @@ pub struct Checkpoint {
     /// integrated (ADR 0004).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewed_by: Vec<Author>,
+    /// When it was made, in milliseconds since the Unix epoch. Not kept
+    /// before Kito 0.41 (ADR 0024).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+    /// The lane whose integration made it. Not kept before Kito 0.41.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated: Option<LaneId>,
 }
 
 impl Checkpoint {

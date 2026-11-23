@@ -1011,9 +1011,9 @@ impl Repo {
             });
         }
         // What was said on the task the lane is for (ADR 0015).
-        let task = self.lane_at(lane)?.record.task.as_deref().and_then(crate::tasks::number);
+        let task = self.lane_at(lane)?.record.task.as_deref().and_then(crate::tasks::lane_task);
         if let Some(n) = task {
-            let all = crate::tasks::load(&self.root);
+            let all = crate::tasks::load(&self.root).unwrap_or_default();
             for comment in all.get(n).map(|task| task.comments.as_slice()).unwrap_or_default() {
                 news.push(Overlap {
                     kind: "task_comment".to_owned(),
