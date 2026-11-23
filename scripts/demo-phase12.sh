@@ -24,6 +24,8 @@ BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release"
 export PATH="$BIN:$PATH"
 export KITO_AUTHOR="${KITO_AUTHOR:-the server}"
 DEMO="$(mktemp -d)"
+# The servers each client connects to are kept here, not in your own Kito directory.
+export KITO_CONFIG_DIR="$DEMO/config"
 SERVER="$DEMO/server"
 PIDS=()
 stop() {
@@ -130,7 +132,7 @@ printf '\n(a listener sits between a client and the server, and the client asks 
 listen_between "$DEMO/heard-encrypted"
 mkdir -p "$DEMO/eve/.kito"
 printf 'server = "%s"\nrepo = "shop"\ntoken = "%s"\nfingerprint = "%s"\n' "$THROUGH" "$ADA" "$PRINT" > "$DEMO/eve/.kito/remote.toml"
-(cd "$DEMO/eve" && kito lanes > /dev/null)
+(cd "$DEMO/eve" && kito lanes > /dev/null 2>&1)
 printf '\nthis server:\n'
 heard "$DEMO/heard-encrypted" "$ADA"
 kito --repo "$DEMO/eve" daemon stop > /dev/null 2>&1 || true
@@ -140,7 +142,7 @@ kill "${PIDS[0]}" 2>/dev/null || true; pause 0.3
 serve --plain
 listen_between "$DEMO/heard-plain"
 printf 'server = "%s"\nrepo = "shop"\ntoken = "%s"\nplain = true\n' "$THROUGH" "$ADA" > "$DEMO/eve/.kito/remote.toml"
-(cd "$DEMO/eve" && kito lanes > /dev/null)
+(cd "$DEMO/eve" && kito lanes > /dev/null 2>&1)
 heard "$DEMO/heard-plain" "$ADA" | tidy
 kito --repo "$DEMO/eve" daemon stop > /dev/null 2>&1 || true
 kill "${PIDS[@]}" 2>/dev/null || true; PIDS=(); pause 0.3
@@ -150,7 +152,7 @@ printf '\n\n# 4. The checks of a lane are confined\n'
 run kito-server --dir "$SERVER" repo set shop --check "sh check.sh" | tidy
 serve
 printf 'server = "%s"\nrepo = "shop"\ntoken = "%s"\nfingerprint = "%s"\n' "$ADDR" "$ADA" "$PRINT" > "$DEMO/ada/.kito/remote.toml"
-kito connect "$ADDR" shop mallory --token "$MALLORY" > /dev/null
+kito connect "$ADDR" shop mallory --token "$MALLORY" --as mallory > /dev/null
 as mallory kito status | grep -A1 '^Checks' | tidy
 printf '\n(mallory may use `shop`, not `payroll`. Her lane brings a check of its own.)\n'
 as mallory kito lane open agent-m --intent "a check for the shop" --scope check.sh | head -3 | tidy
@@ -177,6 +179,6 @@ cat "$SERVER/repos/shop/src/shop.py"
 
 printf '\n\n# 5. A command run in a lane is confined to the lane\n'
 as mallory kito lane run 1 -- sh -c 'echo "print(41 + 1)" > answer.py && python3 answer.py'
-printf '\n(mallory) $ kito lane run 1 -- sh -c "echo x > ../../../../hacked.txt; cat ../../../remote.toml"\n'
-(cd "$DEMO/mallory" && kito lane run 1 -- sh -c 'echo x > ../../../../hacked.txt; cat ../../../remote.toml' 2>&1 | tidy) || true
-printf '\n(the token of this directory is in remote.toml: the command could not read it)\n'
+printf '\n(mallory) $ kito lane run 1 -- sh -c "echo x > ../../../../hacked.txt; cat ~/.config/kito/servers.toml"\n'
+(cd "$DEMO/mallory" && kito lane run 1 -- sh -c "echo x > ../../../../hacked.txt; cat $KITO_CONFIG_DIR/servers.toml" 2>&1 | tidy) || true
+printf '\n(the tokens of the servers are in servers.toml: the command could not read it)\n'

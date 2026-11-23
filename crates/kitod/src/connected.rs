@@ -288,7 +288,7 @@ impl Daemon {
     /// Sends the saves of a mirror as the watcher reports them, for as
     /// long as the mirror is there.
     fn send(&self, mirror: &Mirror, watched: bool) {
-        let mut up = Upstream::new(&self.remote);
+        let mut up = Upstream::of(&self.root, &self.remote);
         let mut waiting = false;
         loop {
             let limit = if waiting || !watched { RESCAN } else { RESCAN_WATCHED };
@@ -316,7 +316,7 @@ impl Daemon {
     /// Follows what happens on the server and brings to the mirrors what
     /// changes in their lanes.
     fn follow(&self) {
-        let mut up = Upstream::new(&self.remote);
+        let mut up = Upstream::of(&self.root, &self.remote);
         // `None`: not in step, everything is looked at before listening.
         let mut after: Option<u64> = None;
         loop {
@@ -638,7 +638,7 @@ impl Daemon {
 
 fn serve_client(daemon: &Arc<Daemon>, (read, mut writer): crate::ipc::Halves) {
     let kept = daemon.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
-    let mut up = kept.unwrap_or_else(|| Upstream::new(&daemon.remote));
+    let mut up = kept.unwrap_or_else(|| Upstream::of(&daemon.root, &daemon.remote));
     // Whoever speaks first says a key: the socket's, or the one of a
     // plugin the server lets run here (ADR 0007).
     let mut access = daemon.key.is_none().then_some(Access::Owner);

@@ -323,20 +323,31 @@ kito-server backup s3 --endpoint https://… --bucket kito --keys keys.txt
 kito-server restore kito-backup-….kbak --to /srv/kito-restored
 ```
 
-Admins do the same from a connected directory: `kito audit`, `kito
-backup`, `kito backup now`.
+Admins do the same from their machine: `kito audit`, `kito backup`,
+`kito backup now`, of a connected directory's server, or of the current
+one (`--server <name>` for another).
 
-### A server's repositories, from a connected directory
+### A server's repositories, from your machine
+
+Of a connected directory's server, or anywhere else of your current one
+(`--server <name>` for another):
 
 ```bash
 kito repos                                   # those you may use
 kito repos add notes                         # admins: a new one, which you maintain
 kito repos add api --from https://github.com/acme/api.git --token-file token.txt
 kito repos add mine --push ~/code/mine       # a Kito repository whole, or a git one
+kito repos add mine --push .                 # the one you are in, which is then connected to it
 kito repos rename api backend                # what is connected to `api` still reaches it
 kito repos archive backend                   # out of use; deleted after 30 days
 kito repos unarchive backend                 # owners; `kito repos delete … --confirm …` now
 ```
+
+Sent from inside it, a repository of your own becomes a directory of
+the one on the server, in place: its `.kito` is kept, whole, as
+`.kito-local-<date and time>`, and its files stay as they are. One with
+open lanes is refused before anything is sent (close or integrate them
+first); `--keep-local` only sends it, and it stays as it was.
 
 A new one starts with a `README.md` that holds its name, in a first
 checkpoint: lanes open in it at once. A program that asks the server
@@ -695,16 +706,19 @@ who somebody is, the server says what they may do.
 ```console
 $ kito-server user add bob --identity github:bob --repo shop:write
 bob added: whoever signs in as github:bob is bob. No token.
-$ kito connect kito.example.com/shop
+$ kito connect kito.example.com
 To sign in with github, open https://github.com/login/device
 and enter the code ABCD-1234
 (opened in your browser)
 Waiting until you have...
-shop is connected to `shop` on kito.example.com:7421 as bob.
+Connected to kito.example.com:7421 as bob: `kito.example.com` is your current server.
+The connection is encrypted, and the server is known by its name.
+The repositories you may use there: shop.
+`kito clone shop` makes a directory of one.
 ```
 
 The session lasts thirty days (`[sign_in] days` in `server.toml`);
-`kito sign-in` gets another. A browser goes to `/-/sign-in/github` and
+`kito sign-in` gets another, for every directory of the server. A browser goes to `/-/sign-in/github` and
 comes back with a session cookie. Tokens stay for scripts and agents,
 and a person may have both: `kito-server user link` attaches an account
 to somebody who has a token, `user token` gives a token to somebody who
@@ -881,12 +895,14 @@ person's role on the server (see "The rules of a team").
 kito-server --dir /srv/kito serve
 ```
 
-A client connects a directory of its own to a repository. The files of the
-main lane come into it and are kept as the server has them, and from then
-on `kito` in that directory works as it does in a repository:
+A client signs in to the server once, by naming it, and then makes a
+directory of each repository it works on. The files of the main lane come
+into it and are kept as the server has them, and from then on `kito` in
+that directory works as it does in a repository:
 
 ```bash
-kito connect kito.example.com/shop      # or kito clone; kito://host:port/shop
+kito connect kito.example.com           # signs in; kito://host:port too
+kito clone shop                         # a directory of `shop`
 ```
 
 With no token, Kito asks the server how to sign in, lets you pick at the
@@ -896,8 +912,45 @@ fingerprint, once, for you to say it is yours. Said on the command line,
 for a script:
 
 ```bash
-kito connect host:7421/shop --token kito_... --fingerprint sha256:...
+kito connect host:7421 --token kito_... --fingerprint sha256:...
 ```
+
+The server is kept for you, not for a directory: in `servers.toml` in
+your Kito directory (`~/.config/kito`, `%APPDATA%\kito` on Windows, or
+`$KITO_CONFIG_DIR`), readable by you alone, with your token or session.
+A connected directory names its server in `.kito/remote.toml` and holds
+no token, so a session renewed once serves every directory of that
+server. You may be connected to several servers; the last one connected
+to is current, and a connected directory always uses its own:
+
+```bash
+kito server                             # your servers, and the current one; never a token
+kito server use kito.example.com        # the current one now
+kito connect localhost:7500 --as work   # another, under a name of yours
+kito repos --server work                # one command, another server
+kito server remove work                 # forgotten, its session ended there
+```
+
+A name is one server's, and one person's there. Connecting again under
+a name you have, as yourself, signs you in again only if what is kept no
+longer lets you in; as somebody else it is refused: two accounts on one
+server are two names (`kito connect kito.example.com --token … --as
+bob`), and each directory acts as the account it was made with. A name
+another server has is refused with `--as`; without it, the new server is
+kept as `host-2`, and that is said. Your shell, the hooks, a directory's
+daemon and the MCP server must all see the same Kito directory: one
+that sees another says the server is not one of yours.
+
+`--server <name>` goes with `clone`, `repos`, `people`, `audit`,
+`backup` and `sign-in`. The server and the repository at once still
+works, as before: `kito connect kito.example.com/shop` (or `kito connect
+host:7421 shop`, or `kito clone kito.example.com/shop`) signs in if it
+has to, keeps the server, and makes the directory `shop`. A directory
+connected before 0.40 keeps working, as who it was: the first `kito`
+command in it moves its connection to `servers.toml` (under a name of
+its own when another account of that server is kept already) and says
+so; nothing becomes current that way
+([ADR 0023](docs/adr/0023-servers-a-client-knows.md)).
 
 ```bash
 kito watch
@@ -918,7 +971,7 @@ whole `kito connect` line with it, and this prints it again:
 kito-server --dir /srv/kito fingerprint
 ```
 
-A client that is given a fingerprint keeps it (`.kito/remote.toml`): a
+A client that is given a fingerprint keeps it (`servers.toml`): a
 server that presents another certificate is refused before the token is
 sent. A server on the same machine may be connected without one, and is
 held to the certificate it showed the first time. For a server behind a
@@ -936,7 +989,7 @@ kito-server --dir /srv/kito serve --listen 0.0.0.0:7421
 The other way in is SSH, where the person is who SSH says they are:
 
 ```bash
-kito connect ssh://ada@host/srv/kito shop
+kito connect ssh://ada@host/srv/kito    # then kito clone shop; or both at once, with shop after it
 ```
 
 For that, give each key a forced command in `authorized_keys` that names
@@ -1058,7 +1111,7 @@ themselves:
 kito people link bob github:bob   # admins
 kito people unlink bob github
 kito people token bob             # prints the new token once
-kito people token                 # your own: this directory goes on with it
+kito people token                 # your own: kept with your servers, every directory goes on
 kito people token --remove        # your own, taken away
 kito people token bob --alone     # bob's leaked: every identity unlinked too
 kito people unlink github         # your own
@@ -1074,8 +1127,8 @@ An account of your own is linked by signing in to it, from the server's
 pages (`/-/sign-in/github?link=1`): naming a login proves nothing. A new
 token in place of one, a token taken away and an identity unlinked end
 the person's other sessions at once, and the connections that were
-opened with the old token; the other directories connected with it are
-connected again with the new one (`kito connect`).
+opened with the old token; a client that has the old one is
+connected again with the new one (`kito connect <server> --token …`).
 
 A server written before 0.29 is read as it was meant: each repository a
 person had (`*`: every repository it has then) with the role they had in
@@ -1180,9 +1233,9 @@ confined (Linux 5.13 or later, with Landlock):
   merged result for the checks, the lane's working copy for a command) and
   in a temporary directory of their own;
 - they do **not read** Kito's own data (`.kito/`: the history, the other
-  lanes, the token of a connected directory), the other repositories of a
-  server and the server's own files, or the keys of the user that runs
-  them (`~/.ssh`, `~/.aws`, `~/.gnupg` and a few more);
+  lanes; `servers.toml`, with the tokens of your servers), the other
+  repositories of a server and the server's own files, or the keys of
+  the user that runs them (`~/.ssh`, `~/.aws`, `~/.gnupg` and a few more);
 - the checks open **no TCP connection**; a command in a lane may.
 
 Nor can they command the daemon: its socket asks for a key that is in

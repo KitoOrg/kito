@@ -2,7 +2,9 @@
 //!
 //! A repository is either here, with its daemon on a Unix socket, or kept
 //! by a server (`kito-server`): then the directory holds
-//! `.kito/remote.toml`, which says how the server is reached, and a daemon
+//! `.kito/remote.toml`, which names the server among the person's (see
+//! [`crate::servers`]) or, connected before 0.40, says how the server is
+//! reached and with what token; and a daemon
 //! of its own on the same kind of socket, which asks the server over TCP
 //! or through a command such as `ssh` and keeps here the lanes that are
 //! worked on from here.
@@ -33,7 +35,8 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(120);
 /// How a directory reaches a repository kept by a server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
-    /// `host:port` of a server reached over TCP.
+    /// `host:port` of a server reached over TCP. In what a directory that
+    /// names its server keeps, the name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
     /// A command whose standard input and output speak the protocol:
@@ -61,13 +64,67 @@ pub struct Remote {
     /// is then a session's, and `kito sign-in` gets another this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<String>,
+    /// The entry of the person's `servers.toml` this connection is, when
+    /// the directory names its server (ADR 0023): what a new session or
+    /// token is kept in.
+    #[serde(skip)]
+    pub name: Option<String>,
+}
+
+/// What a directory that names its server keeps: the name and the
+/// repository, nothing secret.
+#[derive(Serialize)]
+struct Named<'a> {
+    server: &'a str,
+    repo: &'a str,
 }
 
 impl Remote {
-    /// The remote a directory is connected to, if it is.
+    /// The remote a directory is connected to, if it is: the whole
+    /// connection, from the person's `servers.toml` when the directory
+    /// names its server.
     pub fn load(root: &Path) -> Option<Remote> {
+        Some(Remote::read(root)?.filled(&crate::servers::Servers::load()))
+    }
+
+    /// What the directory's `remote.toml` says, as it says it.
+    pub fn read(root: &Path) -> Option<Remote> {
         let text = std::fs::read_to_string(root.join(kito_store::STORE_DIR).join(REMOTE_FILE)).ok()?;
         toml::from_str(&text).ok()
+    }
+
+    /// Whether this is what a directory that names its server keeps: a
+    /// name and a repository. One connected before 0.40 keeps how the
+    /// server is reached and known, and a token or a command.
+    pub fn names_its_server(&self) -> bool {
+        self.server.is_some()
+            && self.command.is_empty()
+            && self.token.is_none()
+            && self.fingerprint.is_none()
+            && !self.authority
+            && !self.plain
+            && self.sign_in.is_none()
+    }
+
+    /// The whole connection, from the entry of `servers` a directory names.
+    pub fn filled(self, servers: &crate::servers::Servers) -> Remote {
+        let Some(name) = self.server.clone().filter(|_| self.names_its_server()) else {
+            return self;
+        };
+        match servers.servers.get(&name) {
+            Some(entry) => entry.remote(&name, &self.repo),
+            // A server the person is not connected to: reached nowhere.
+            None => Remote { server: None, name: Some(name), repo: self.repo, ..Remote::default() },
+        }
+    }
+
+    /// Makes `root` a client of the repository `repo` of the person's
+    /// server `name`, written whole. Nothing secret is in it.
+    pub fn save_named(root: &Path, name: &str, repo: &str) -> std::io::Result<()> {
+        let dir = root.join(kito_store::STORE_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let text = toml::to_string(&Named { server: name, repo }).map_err(std::io::Error::other)?;
+        crate::servers::write_whole(&dir.join(REMOTE_FILE), text.as_bytes())
     }
 
     /// Makes `root` a client of this remote. The file holds the token: it
@@ -123,9 +180,10 @@ impl Remote {
 
     /// Where the server is, in words.
     pub fn place(&self) -> String {
-        match &self.server {
-            Some(server) => server.clone(),
-            None => self.command.join(" "),
+        match (&self.server, &self.name) {
+            (Some(server), _) => server.clone(),
+            (None, Some(name)) if self.command.is_empty() => name.clone(),
+            (None, _) => self.command.join(" "),
         }
     }
 }
@@ -172,6 +230,8 @@ pub struct Client {
     /// The version of Kito the server said it is when it was greeted;
     /// none: a daemon, or a server that does not say.
     server: Option<String>,
+    /// Who the server said is asking, when it was greeted.
+    user: Option<String>,
 }
 
 impl Drop for Client {
@@ -208,6 +268,7 @@ impl Client {
             child: None,
             next_id: 1,
             server: None,
+            user: None,
         })
     }
 
@@ -231,7 +292,7 @@ impl Client {
                         (Box::new(BufReader::new(stream)), Box::new(writer))
                     }
                 };
-                Client { reader, writer, child: None, next_id: 1, server: None }
+                Client { reader, writer, child: None, next_id: 1, server: None, user: None }
             }
             (None, [program, args @ ..]) => {
                 let mut child = Command::new(program)
@@ -249,10 +310,17 @@ impl Client {
                     child: Some(child),
                     next_id: 1,
                     server: None,
+                    user: None,
                 }
             }
             (None, []) => {
-                return Err(ClientError::Server("the remote names neither a server nor a command".into()))
+                return Err(ClientError::Server(match &remote.name {
+                    Some(name) => format!(
+                        "{name} is not one of your servers (`kito server list`): `kito connect` to it first, \
+                         as `--as {name}` if you gave it that name"
+                    ),
+                    None => "the remote names neither a server nor a command".into(),
+                }))
             }
         })
     }
@@ -297,6 +365,7 @@ impl Client {
         match answer.get("ok") {
             Some(ok) => {
                 client.server = ok["server"].as_str().map(str::to_owned);
+                client.user = ok["user"].as_str().map(str::to_owned);
                 Ok(client)
             }
             None => Err(ClientError::Protocol(format!("unexpected greeting: {answer}"))),
@@ -306,6 +375,11 @@ impl Client {
     /// The version of Kito the server said it is, when it was greeted.
     pub fn server_version(&self) -> Option<&str> {
         self.server.as_deref()
+    }
+
+    /// Who the server said is asking, when it was greeted.
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
     }
 
     /// Signs in to a server in one of the ways its plugins offer (ADR

@@ -622,12 +622,17 @@ pub fn program(dir: &Path, name: &str) -> PathBuf {
 /// directory (`$KITO_CONFIG_DIR`, then `$XDG_CONFIG_HOME/kito`, then
 /// `~/.config/kito`; on Windows `%APPDATA%\kito`).
 pub fn plugins_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("plugins"))
+}
+
+/// A person's Kito directory, where what is theirs on this machine is
+/// kept: their plugins, the servers they are connected to.
+pub fn config_dir() -> Option<PathBuf> {
     let non_empty = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let base = non_empty("KITO_CONFIG_DIR")
+    non_empty("KITO_CONFIG_DIR")
         .or_else(|| non_empty("XDG_CONFIG_HOME").map(|dir| dir.join("kito")))
         .or_else(|| non_empty("HOME").map(|home| home.join(".config").join("kito")))
-        .or_else(|| non_empty("APPDATA").map(|dir| dir.join("kito")))?;
-    Some(base.join("plugins"))
+        .or_else(|| non_empty("APPDATA").map(|dir| dir.join("kito")))
 }
 
 /// A plugin that is installed.

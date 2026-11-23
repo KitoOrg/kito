@@ -27,6 +27,15 @@ fn setup() {
     });
 }
 
+/// The person's servers, with a token in them (ADR 0023): never read by a
+/// confined command.
+fn servers() -> PathBuf {
+    let path = PathBuf::from(std::env::var_os("KITO_CONFIG_DIR").unwrap()).join("servers.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "[servers.here]\naddress = \"127.0.0.1:7421\"\ntoken = \"kito_secret\"\n").unwrap();
+    path
+}
+
 /// What a check written in a lane tries, each attempt on a line of
 /// `result.txt` in its own directory. It always succeeds: the test reads
 /// what happened.
@@ -43,12 +52,15 @@ LABEL="reads the configuration of Kito" try cat "{root}/.kito/config.toml"
 LABEL="reads the key of the socket" try cat "{root}/.kito/socket.key"
 LABEL="lists the lanes" try ls "{root}/.kito/lanes"
 LABEL="reads what is hidden" try cat "{secret}"
+LABEL="reads the person's servers" try cat "{servers}"
+LABEL="reads a history set aside" try cat "{root}/.kito-local-2026-11-23T101500Z/format"
 LABEL="opens a connection" try python3 -c 'import socket; socket.create_connection(("127.0.0.1", {port}), 2)'
 LABEL="is told it is confined" try test "$KITO_SANDBOX" = 1
 }} > result.txt
 "#,
         root = root.display(),
         secret = secret.display(),
+        servers = servers().display(),
     )
 }
 
@@ -70,6 +82,7 @@ fn shop(mode: &str, network: bool) -> (tempfile::TempDir, PathBuf, Repo, std::ne
     fs::create_dir(&root).unwrap();
     write(&base, "keys/deploy.key", "a secret\n");
     drop(Repo::init(&root).unwrap());
+    write(&root, ".kito-local-2026-11-23T101500Z/format", "a history set aside\n");
     let config = root.join(".kito/config.toml");
     let text = fs::read_to_string(&config).unwrap();
     let text = text
@@ -120,6 +133,8 @@ fn the_checks_of_a_lane_are_confined_to_their_copy() {
         ("reads the key of the socket", false),
         ("lists the lanes", false),
         ("reads what is hidden", false),
+        ("reads the person's servers", false),
+        ("reads a history set aside", false),
         ("opens a connection", false),
         ("is told it is confined", true),
     ];

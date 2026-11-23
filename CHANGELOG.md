@@ -4,6 +4,71 @@ Each version is one phase of the project; [docs/phases.md](docs/phases.md)
 says what each built, how it was tested, and its limits. The release notes
 of a version are its section here.
 
+## [0.40.0]
+
+The servers a client knows
+([ADR 0023](docs/adr/0023-servers-a-client-knows.md)): a person signs
+in to a server once, by naming it, and the connection is theirs, not a
+directory's. A directory never changes who it acts as, and only `kito
+connect` and `kito server use` make a server current.
+
+- **`kito connect <server>`** (`kito.example.com`, `host:port`,
+  `kito://host[:port]`, `ssh://user@host/path`) signs in as before
+  (`--token`, `$KITO_TOKEN`, a token pasted, `--sign-in`, the
+  certificate checked as before), keeps the server in `servers.toml` in
+  your Kito directory, makes it current, and says who you are there and
+  the repositories you may use. It makes no directory. `--as <name>`
+  keeps it under another name: a second account, or another port.
+- **A name is one server's, and one person's there.** Connecting as
+  somebody else under a name that is yours is refused (``you are ada on
+  `host`: to be bob there too, add `--as <name>`…``); connecting again as
+  yourself replaces what was kept. A name another server has is refused
+  with `--as`, and otherwise the new server is kept as `host-2`, which is
+  said.
+- **`kito clone <repo> [dir] [--server <name>]`** makes a directory of a
+  repository of the current server. `clone` is no longer another name of
+  `connect`; `kito clone <address>` still connects.
+- **`kito connect <server>/<repo> [dir]`** and `kito connect <server>
+  <repo> [dir]` work as they did, and keep the server too. A server known
+  and still letting you in is not signed in to again.
+- **`kito server`** lists your servers (name, where, who you are there,
+  the current one; never a token); `kito server use <name>` switches,
+  `kito server remove <name>` forgets one, says first when it holds your
+  token (kept nowhere else), and ends its session there when it holds
+  one.
+- **`--server <name>`** on `clone`, `repos`, `people`, `audit`,
+  `backup` and `sign-in`: in a connected directory they ask its server
+  unless it says another, anywhere else the current one; with servers
+  known and none current, they say so and list them.
+- **A connected directory names its server** in `.kito/remote.toml`
+  (`server`, `repo`), and holds no token. A session renewed with `kito
+  sign-in`, or a token of your own from `kito people token`, serves every
+  directory of the server at once, their daemons too.
+- **A directory connected before this version works as it did, as who
+  it was.** The first `kito` command in it moves its connection to
+  `servers.toml`: into the entry that is the very same connection, or
+  under a name of its own (`host-2` when another account of that server
+  has `host`), saying so in a line; it rewrites its `remote.toml` to
+  name it and stops its daemon, which the next command starts again.
+  Nothing becomes current. The daemon, the hooks and the MCP server never
+  rewrite it.
+- **`kito repos add <name> --push .`** inside a repository of your own
+  (from any directory in it) records what is saved, sends it, then
+  connects the directory to it in place: its `.kito` is kept, whole, in
+  `.kito-local-<UTC date-time>`; files are left as they are. Open lanes
+  are refused before anything is sent; permanent lanes go with it and are
+  named. A daemon that does not stop leaves everything where it is.
+  `--keep-local` only sends, as before. A failure after the move puts
+  `.kito` back.
+- `servers.toml` is readable by its owner only (on Windows, as the
+  profile is), written whole and renamed into place, under a lock. What
+  runs confined for a lane (the checks, `kito lane run`) reads neither
+  it nor a `.kito-local-…` history, as it does not read `.kito`.
+- The server answers `server.sign_out`: the session the connection was
+  opened with ends.
+- `scripts/demo-phase12.sh` keeps its people's servers in a directory of
+  its own, each under their name.
+
 ## [0.39.5]
 
 The server, after its second review. 0.39.3 was reviewed again before a

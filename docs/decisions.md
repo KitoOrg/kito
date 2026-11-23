@@ -2133,3 +2133,89 @@ a server's processes; it orders what plugins hear only within one
 process, since each tells its own. This is what ADR 0014 says now,
 rather than an order across processes that was never kept: a plugin
 that needs it reads the log.
+
+### D-203 · A directory names its server by a field it already had
+A directory that names its server keeps `server = "<name>"` and `repo`,
+the field a directory connected before 0.40 used for `host:port`
+([ADR 0023](adr/0023-servers-a-client-knows.md)). Which of the two a
+file is, is said by what else it holds: one connected before 0.40
+always kept a token (or a command for SSH) and, since 0.12, how the
+server is known; one that holds nothing but `server` and `repo` names
+it. A new field would have said it too, and older clients would have
+read the new file as a server at `<name>` all the same.
+
+### D-204 · An old directory takes only the entry that is its own connection
+Moving a directory connected before 0.40 uses an entry of
+`servers.toml` only when it is the very same connection: address or
+command, token, way to sign in, fingerprint, authority and plain. First
+written, it used any entry of the same address, as the spec said: a
+second account's directory then acted as the first account, and its
+token, kept nowhere else, was lost. Its own connection is now added
+under the host's name, or the first free `host-2`…, and the line it
+prints says that another account of that server (or that server known
+another way) has the host's name. The move makes nothing current: a
+project unpacked from somebody else would have made their server the
+one a later `kito repos add --push .` sends to
+([ADR 0023](adr/0023-servers-a-client-knows.md), amended). `user` comes
+from an entry of the same token, else from the first connection made
+(D-210).
+
+### D-205 · The daemon reads the connection again, not the file once
+The daemon of a connected directory read `remote.toml` when it started,
+and a new token or session reached it because the command that made one
+stopped it. A session is now kept for every directory of a server: the
+daemon reads the connection again before each new connection to the
+server, and the one in the directory where the command ran is stopped as
+before. A daemon elsewhere may answer one request with the server's
+refusal before it connects again; the requests it repeats by itself do
+not.
+
+### D-206 · `server.sign_out` on the clients' port
+Forgetting a server ends its session there. The server ended sessions
+only for a browser (`DELETE /-/session`), on a port a client may not
+reach; `server.sign_out` ends the session a connection was opened with,
+answers `ended: false` for a token, and an older server's refusal is
+said and leaves the session to run out. Nothing else of the server
+changed for this version.
+
+### D-207 · Open lanes refuse a move, permanent lanes do not
+`kito repos add --push .` refuses to connect a repository in place while
+it has open lanes, whose working copies would stay behind. The
+permanent lanes (`staging`) are no agent's working copy and go with the
+store: they do not count, and are named in what is printed (their
+working copies are in the history set aside).
+
+### D-208 · Another server's name is never taken over
+`kito connect` keeps a server under its host's name, and two servers can
+have one: `host:7421` and `ssh://host/srv/kito`, or two ports. Given
+with `--as`, a name another server has is refused, saying which; found
+by itself, the new server is kept under the first of `host-2`, `host-3`…
+that is free or is already this server, so connecting to it again finds
+it there; that is said on the standard error. The check is made again
+under the lock of the file, against a command that kept one meanwhile.
+
+### D-209 · Another person under a known name is refused, and a session opened for it ends
+A name is one person's on its server. A `--token` or a sign-in that
+the server answers as somebody else than the entry's `user` is refused
+before anything is kept, with the two ways out (`--as`, `kito server
+remove`). An entry that does not say who it is for (one made by the
+move) is asked with what it keeps; one that no longer lets anybody in is
+replaced. A sign-in made for a refused connection opened a session that
+nothing keeps: it is ended (`server.sign_out`).
+
+### D-210 · Who the person is, taken from the greeting
+The server says who is asking in its greeting. The client now keeps it
+(`Client::user`), and the first command of the CLI that reaches a server
+with an entry that has no `user` writes it, when the entry still has the
+token the connection was opened with. The daemon only reads: a person
+who only uses lanes in a moved directory sees `not asked yet` in `kito
+server list` until a command of their own reaches the server.
+
+### D-211 · What is sent in place is recorded first, and moved only from a stopped daemon
+`kito repos add --push` asks the repository's daemon to record what is
+saved (`sync`) before it lists the main lane's files, so that nothing
+is in the files sent and not in the history, or the other way. Before
+`.kito` is moved aside, the daemon must be gone: one that still answers
+after `daemon stop` leaves everything where it is, and the error says
+the repository is on the server. A `--push` directory inside a
+repository of this machine, and not one itself, is that repository.

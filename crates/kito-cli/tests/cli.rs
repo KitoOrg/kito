@@ -73,6 +73,25 @@ fn json(cwd: &Path, args: &[&str]) -> Value {
     serde_json::from_str(&ok(cwd, args)).expect("JSON output")
 }
 
+/// Kito alone, as a person whose own Kito directory is `config`: the
+/// servers they are connected to are kept there, whatever directory
+/// they are in.
+fn kito_as(config: &Path, cwd: &Path, args: &[&str]) -> Output {
+    command(cwd, args).env("KITO_NO_CLAUDE", "1").env("KITO_CONFIG_DIR", config).output().unwrap()
+}
+
+/// As `ok`, for the person whose Kito directory is `config`.
+fn ok_as(config: &Path, cwd: &Path, args: &[&str]) -> String {
+    let out = kito_as(config, cwd, args);
+    assert!(
+        out.status.success(),
+        "kito {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .current_dir(cwd)
@@ -1680,6 +1699,12 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
         assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
+    // Each person has their own Kito directory, where their servers are kept.
+    // ada, rose and bob on one machine: their servers are kept in one Kito
+    // directory, each account under a name of its own (`--as`).
+    let ada = base.join(".me");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&ada, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&ada, cwd, args);
     // A git repository for the server to host.
     let src = base.join("src-repo");
     fs::create_dir_all(src.join("src")).unwrap();
@@ -1738,10 +1763,15 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     assert!(connected.contains("is connected to `shop` on") && connected.contains("as ada."), "{connected}");
     let here = base.join("shop");
     // A server on this machine is taken at its word the first time, and
-    // held to it from then on: the directory keeps its fingerprint.
+    // held to it from then on: ada's servers keep its fingerprint; the
+    // directory names the server, and keeps no token.
     let print = run(&["fingerprint"]).trim().to_owned();
-    let kept = fs::read_to_string(here.join(".kito/remote.toml")).unwrap();
+    let kept = fs::read_to_string(ada.join("servers.toml")).unwrap();
     assert!(kept.contains(&format!("fingerprint = \"{print}\"")), "{kept}");
+    assert_eq!(
+        fs::read_to_string(here.join(".kito/remote.toml")).unwrap(),
+        format!("server = \"{address}\"\nrepo = \"shop\"\n")
+    );
     // The directory is the project: the main lane's files are in it.
     assert!(connected.contains("The main lane is in it (1 file)"), "{connected}");
     assert_eq!(fs::read_to_string(here.join("src/shop.py")).unwrap(), SHOP_PY);
@@ -1875,27 +1905,27 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     // a Kito repository or a git one.
     let rose = run(&["user", "add", "rose", "--role", "admin", "--repo", "shop:read"]);
     let rose = rose.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
-    ok(&base, &["connect", &address, "shop", "admin", "--token", &rose]);
+    ok(&base, &["connect", &address, "shop", "admin", "--token", &rose, "--as", "rose"]);
     let admin = base.join("admin");
+    let ok_rose = |cwd: &Path, args: &[&str]| ok(cwd, args);
     assert!(!kito(&here, &["repos", "add", "notes"]).status.success());
-    assert!(ok(&admin, &["repos", "add", "notes"]).contains("`notes` is on"));
+    assert!(ok_rose(&admin, &["repos", "add", "notes"]).contains("`notes` is on"));
     assert_eq!(fs::read_to_string(serverdir.join("repos/notes/README.md")).unwrap(), "# notes\n");
     let mine = base.join("mine");
     fs::create_dir_all(&mine).unwrap();
     fs::write(mine.join("notes.py"), "def note():\n    return 1\n").unwrap();
     ok(&mine, &["init"]);
     ok(&mine, &["checkpoint", "-m", "a note"]);
-    assert!(
-        ok(&admin, &["repos", "add", "pushed", "--push", mine.to_str().unwrap()]).contains("`pushed` is on")
-    );
+    assert!(ok_rose(&admin, &["repos", "add", "pushed", "--push", mine.to_str().unwrap()])
+        .contains("`pushed` is on"));
     ok(&mine, &["daemon", "stop"]);
     assert!(fs::read_to_string(serverdir.join("repos/pushed/notes.py")).unwrap().contains("note"));
     assert!(serverdir.join("repos/pushed/.kito/format").is_file());
-    ok(&admin, &["repos", "add", "fromgit", "--push", src.to_str().unwrap()]);
+    ok_rose(&admin, &["repos", "add", "fromgit", "--push", src.to_str().unwrap()]);
     assert_eq!(fs::read_to_string(serverdir.join("repos/fromgit/src/shop.py")).unwrap(), SHOP_PY);
-    ok(&admin, &["repos", "rename", "fromgit", "shop2"]);
-    ok(&admin, &["repos", "archive", "shop2"]);
-    let all = ok(&admin, &["repos", "all"]);
+    ok_rose(&admin, &["repos", "rename", "fromgit", "shop2"]);
+    ok_rose(&admin, &["repos", "archive", "shop2"]);
+    let all = ok_rose(&admin, &["repos", "all"]);
     assert!(all.contains("pushed") && all.contains("shop2                archived by rose"), "{all}");
     assert!(all.contains("fromgit              is shop2 now"), "{all}");
     assert!(!kito(&admin, &["repos", "delete", "shop2", "--confirm", "shop2"]).status.success());
@@ -1933,8 +1963,21 @@ fn a_directory_connected_to_a_server_shows_the_repository_kept_there() {
     // merged and checked, and waits for ada, who may.
     let bob = run(&["user", "add", "bob", "--repo", "shop:write"]);
     let bob = bob.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
-    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob]);
+    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob, "--as", "bob"]);
     let bobdir = base.join("bob-dir");
+    // Three accounts of one server on one machine, each directory as its own.
+    let listed = ok(&base, &["server", "list"]);
+    let lines: Vec<String> =
+        listed.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(
+        lines,
+        [
+            format!("{address} {address} as ada"),
+            format!("* bob {address} as bob"),
+            format!("rose {address} as rose"),
+        ],
+        "{listed}"
+    );
     ok(&bobdir, &["lane", "open", "helper", "--intent", "a note at the end", "--scope", "src/shop.py"]);
     fs::write(bobdir.join(".kito/lanes/2/work/src/shop.py"), format!("{cents}# prices are in cents\n"))
         .unwrap();
@@ -2576,6 +2619,10 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     let at_hello = serverdir.join("plugins/hello/sign-in");
     fs::create_dir_all(at_hello.parent().unwrap()).unwrap();
     let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    // Bob's own Kito directory, where his servers are kept.
+    let me = base.join(".bob");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&me, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
 
     // A way the server does not have, and somebody it does not have:
     // nothing is connected.
@@ -2586,13 +2633,15 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     assert!(!eve.status.success());
     assert!(errors(&eve).contains("hello:eve is nobody on this server"), "{}", errors(&eve));
     assert!(!base.join("shop").exists());
+    assert!(!me.join("servers.toml").exists(), "a server nobody signed in to is not kept");
 
     // bob is told where to go and what to enter, and is connected when
     // he has: the command waits meanwhile.
     fs::remove_file(&at_hello).unwrap();
-    let (dir, at) = (base.clone(), address.clone());
+    let (dir, at, config) = (base.clone(), address.clone(), me.clone());
     // One address, and the only way the server offers: like `git clone`.
-    let waiting = std::thread::spawn(move || kito(&dir, &["clone", &format!("kito://{at}/shop")]));
+    let waiting =
+        std::thread::spawn(move || kito_as(&config, &dir, &["clone", &format!("kito://{at}/shop")]));
     std::thread::sleep(std::time::Duration::from_millis(1200));
     assert!(!base.join("shop").exists(), "connected before anybody signed in");
     fs::write(&at_hello, "bob").unwrap();
@@ -2604,8 +2653,10 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     let said = String::from_utf8_lossy(&connected.stdout).into_owned();
     assert!(said.contains("is connected to `shop` on") && said.contains("as bob."), "{said}");
     let shop = base.join("shop");
-    let kept = fs::read_to_string(shop.join(".kito/remote.toml")).unwrap();
+    // The session is kept with his servers, and the directory names the server.
+    let kept = fs::read_to_string(me.join("servers.toml")).unwrap();
     assert!(kept.contains("token = \"kitos_") && kept.contains("sign_in = \"hello\""), "{kept}");
+    assert!(!fs::read_to_string(shop.join(".kito/remote.toml")).unwrap().contains("token"));
     assert!(ok(&shop, &["repos"]).contains("shop"));
 
     // A session that ended says how to get another, and that works.
@@ -2625,6 +2676,47 @@ fn somebody_signs_in_to_a_server_as_who_a_plugin_says_they_are() {
     assert!(!no.status.success());
     assert!(errors(&no).contains("they said no at hello"), "{}", errors(&no));
     assert!(ok(&shop, &["repos"]).contains("shop"));
+
+    // One session serves every directory of the server: a second one is
+    // made without signing in, and one sign-in serves both when it ended,
+    // their daemons too.
+    let too = base.join("shop-too");
+    assert!(ok(&base, &["clone", "shop", "shop-too"]).contains("as bob."));
+    ok(&too, &["status"]);
+    fs::remove_file(serverdir.join("sessions.toml")).unwrap();
+    for dir in [&shop, &too] {
+        assert!(errors(&kito(dir, &["repos"])).contains("this session ended"));
+    }
+    fs::write(&at_hello, "bob").unwrap();
+    assert!(ok(&too, &["sign-in"]).contains("as bob: the session lasts 30 days."));
+    for dir in [&shop, &too] {
+        assert!(ok(dir, &["repos"]).contains("shop"));
+        ok(dir, &["status"]);
+        assert!(ok(dir, &["lanes"]).contains("No open lanes"));
+    }
+
+    // Forgotten, the server is asked to end the session; the directories
+    // that name it say what to do.
+    let sessions = || {
+        fs::read_to_string(serverdir.join("sessions.toml"))
+            .unwrap_or_default()
+            .matches("user = \"bob\"")
+            .count()
+    };
+    assert_eq!(sessions(), 1);
+    let said = ok(&base, &["server", "remove", &address]);
+    assert!(said.contains("is forgotten") && said.contains("Your session there ended."), "{said}");
+    assert_eq!(sessions(), 0);
+    assert!(!fs::read_to_string(me.join("servers.toml")).unwrap().contains(&address));
+    let gone = kito(&shop, &["repos"]);
+    assert!(
+        !gone.status.success() && errors(&gone).contains("is not one of your servers"),
+        "{}",
+        errors(&gone)
+    );
+    for dir in [&shop, &too] {
+        ok(dir, &["daemon", "stop"]);
+    }
 }
 
 #[test]
@@ -2690,12 +2782,30 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     let at_hello = serverdir.join("plugins/hello/sign-in");
     fs::create_dir_all(at_hello.parent().unwrap()).unwrap();
     let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
-    let kept_in = |dir: &Path| fs::read_to_string(dir.join(".kito/remote.toml")).unwrap();
+    // Each person's own Kito directory, where their servers are kept: the
+    // directories of one person share it. Carol's desk is on another machine.
+    let config_of = |dir: &Path| -> PathBuf {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        match name.as_str() {
+            "carol-desk" => base.join(".carol-elsewhere"),
+            name => base.join(format!(".{}", name.split('-').next().unwrap())),
+        }
+    };
+    let kito = |dir: &Path, args: &[&str]| kito_as(&config_of(dir), dir, args);
+    let ok = |dir: &Path, args: &[&str]| ok_as(&config_of(dir), dir, args);
+    let json =
+        |dir: &Path, args: &[&str]| -> Value { serde_json::from_str(&ok(dir, args)).expect("JSON output") };
+    let connect = |dir: &str, how: &[&str]| -> String {
+        let mut args = vec!["connect", &address, "shop", dir];
+        args.extend_from_slice(how);
+        ok_as(&config_of(&base.join(dir)), &base, &args)
+    };
+    let kept_in = |dir: &Path| fs::read_to_string(config_of(dir).join("servers.toml")).unwrap();
     let unknown = "this token is not one the server knows";
 
-    ok(&base, &["connect", &address, "shop", "ada-dir", "--token", &ada]);
-    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &bob]);
-    ok(&base, &["connect", &address, "shop", "bob-desk", "--token", &bob]);
+    connect("ada-dir", &["--token", &ada]);
+    connect("bob-dir", &["--token", &bob]);
+    connect("bob-desk", &["--token", &bob]);
     let (adadir, bobdir, bobdesk) = (base.join("ada-dir"), base.join("bob-dir"), base.join("bob-desk"));
 
     // The admins see how each person signs in, never with what.
@@ -2712,38 +2822,46 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
         ]
     );
 
-    // Bob gets a new token of his own: said this once, and written where
-    // this directory keeps the one it connects with, so that it goes on,
-    // its daemon too.
+    // Bob gets a new token of his own: said this once, and kept with his
+    // servers, so that every directory of that server goes on with it,
+    // their daemons too.
     ok(&bobdir, &["status"]);
+    ok(&bobdesk, &["status"]);
     let said = ok(&bobdir, &["people", "token"]);
     let new = token_in(&said);
     assert!(said.contains("Your new token on") && said.contains(", shown this once:"), "{said}");
-    let others = "This directory has it. The other directories connected with the one you had need it too: \
-                  `kito connect` them again with it.";
-    assert!(said.contains(others), "{said}");
+    let others =
+        format!("It is kept with your servers: every directory connected to `{address}` uses it already.");
+    assert!(said.contains(&others), "{said}");
     assert!(new != bob && kept_in(&bobdir).contains(&format!("token = \"{new}\"")), "{}", kept_in(&bobdir));
     assert!(!kept_in(&bobdir).contains(&bob));
     assert!(ok(&bobdir, &["repos"]).contains("shop"));
     ok(&bobdir, &["status"]);
     assert!(ok(&bobdir, &["lanes"]).contains("No open lanes"));
-    // His other directory has the one before, which stopped at once, for
-    // its daemon too. Connected again with the new one, it goes on.
-    let refused = kito(&bobdesk, &["repos"]);
-    assert!(!refused.status.success() && errors(&refused).contains(unknown), "{}", errors(&refused));
-    assert!(errors(&kito(&bobdesk, &["lanes"])).contains(unknown));
-    let again = ok(&base, &["connect", &address, "shop", "bob-desk", "--token", &new]);
-    assert!(again.contains("as bob.") && again.contains("The main lane is in it (1 file)"), "{again}");
-    assert!(ok(&bobdesk, &["lanes"]).contains("No open lanes"));
-    // For a program, with whether this directory has it; and by his own
-    // name he is himself.
+    // His other directory has it too, its daemon as well, which connects
+    // again with it.
+    assert!(ok(&bobdesk, &["repos"]).contains("shop"));
+    let mut lanes = kito(&bobdesk, &["lanes"]);
+    for _ in 0..50 {
+        if lanes.status.success() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        lanes = kito(&bobdesk, &["lanes"]);
+    }
+    assert!(String::from_utf8_lossy(&lanes.stdout).contains("No open lanes"), "{}", errors(&lanes));
+    // For a program, with whether it was kept; and by his own name he is
+    // himself.
     let said = json(&bobdir, &["--json", "people", "token"]);
     let newer = said["token"].as_str().unwrap().to_owned();
     assert_eq!(said, serde_json::json!({ "user": "bob", "token": newer, "logins": [], "kept_here": true }));
     assert!(kept_in(&bobdir).contains(&newer) && !kept_in(&bobdir).contains(&new));
     let said = ok(&bobdir, &["people", "token", "bob"]);
-    assert!(said.contains("Your new token on") && said.contains("This directory has it."), "{said}");
+    assert!(said.contains("Your new token on") && said.contains("It is kept with your servers"), "{said}");
     assert!(kept_in(&bobdir).contains(&token_in(&said)) && ok(&bobdir, &["repos"]).contains("shop"));
+    // Never printed by what lists his servers.
+    let listed = ok(&bobdir, &["server", "list"]);
+    assert!(listed.contains(&address) && listed.contains("as bob") && !listed.contains("kito_"), "{listed}");
 
     // Nobody else's is his to change; a token is all he signs in with;
     // and a login named proves nothing.
@@ -2786,7 +2904,7 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     let given = token_in(&said);
     assert!(errors(&kito(&bobdir, &["repos"])).contains(unknown));
     assert!(!kept_in(&adadir).contains(&given) && ok(&adadir, &["repos"]).contains("shop"));
-    ok(&base, &["connect", &address, "shop", "bob-dir", "--token", &given]);
+    connect("bob-dir", &["--token", &given]);
 
     // A new token takes no identity away: whoever held the one before may
     // have attached an account of theirs to him. She is told what is left,
@@ -2804,24 +2922,14 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     assert!(people(&adadir).contains(&"bob member shop (write); signs in with a token".to_owned()));
     let said = no(&adadir, &["people", "token", "bob", "--alone", "--remove"]);
     assert!(said.contains("cannot be used with"), "{said}");
-    ok(
-        &base,
-        &[
-            "connect",
-            &address,
-            "shop",
-            "bob-dir",
-            "--token",
-            &token_in(&ok(&adadir, &["people", "token", "bob", "--alone"])),
-        ],
-    );
+    connect("bob-dir", &["--token", &token_in(&ok(&adadir, &["people", "token", "bob", "--alone"]))]);
 
     // With an identity too, he takes his token away from the directory
     // that connects with it, which is told how to go on: by signing in.
     ok(&adadir, &["people", "link", "bob", "hello:bob"]);
     let said = ok(&bobdir, &["people", "token", "--remove"]);
     assert!(said.contains("You have no token on") && said.contains("you sign in instead."), "{said}");
-    let how = "This directory was connected with it: `kito sign-in <method>` connects it again.";
+    let how = "You connected with it: `kito sign-in <method>` signs you in again.";
     assert!(said.contains(how), "{said}");
     assert!(errors(&kito(&bobdir, &["repos"])).contains(unknown));
     fs::write(&at_hello, "bob").unwrap();
@@ -2832,17 +2940,17 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
     // carol signs in: her directory holds a session, and goes on as it
     // is. The token she asks for is said to her, for somewhere else.
     fs::write(&at_hello, "carol").unwrap();
-    ok(&base, &["connect", &address, "shop", "carol-dir", "--sign-in", "hello"]);
+    connect("carol-dir", &["--sign-in", "hello"]);
     let caroldir = base.join("carol-dir");
     let session = kept_in(&caroldir);
     assert!(session.contains("token = \"kitos_") && session.contains("sign_in = \"hello\""), "{session}");
     let said = ok(&caroldir, &["people", "token"]);
     let hers = token_in(&said);
     assert!(said.contains("Your new token on"), "{said}");
-    assert!(said.contains("This directory goes on as it is connected."), "{said}");
+    assert!(said.contains("You go on as you are connected to"), "{said}");
     assert_eq!(kept_in(&caroldir), session);
     assert!(ok(&caroldir, &["repos"]).contains("shop"));
-    ok(&base, &["connect", &address, "shop", "carol-desk", "--token", &hers]);
+    connect("carol-desk", &["--token", &hers]);
     let caroldesk = base.join("carol-desk");
     assert!(ok(&caroldesk, &["repos"]).contains("shop"));
     // She takes it away again: sign-in only. What it connected stops,
@@ -2852,7 +2960,7 @@ fn how_people_sign_in_is_changed_from_a_connected_directory() {
         said.contains("You have no token on") && said.contains("any more: you sign in instead."),
         "{said}"
     );
-    assert!(!said.contains("This directory was connected with it"), "{said}");
+    assert!(!said.contains("You connected with it"), "{said}");
     assert!(errors(&kito(&caroldesk, &["repos"])).contains(unknown));
     assert!(ok(&caroldir, &["repos"]).contains("shop"));
     let said = no(&caroldir, &["people", "unlink", "hello"]);
@@ -2995,6 +3103,9 @@ fn a_directory_connected_to_a_server_runs_the_plugins_the_server_lets_it() {
     // directory's daemon is one person's: it is started again as theirs.
     me(&shop, &["daemon", "stop"]);
     let other = base.join("other-config");
+    // Connected to the server as well: the directory names it.
+    fs::create_dir_all(&other).unwrap();
+    fs::copy(mine.join("servers.toml"), other.join("servers.toml")).unwrap();
     let theirs = |args: &[&str]| {
         let out =
             command(&shop, args).env("KITO_NO_CLAUDE", "1").env("KITO_CONFIG_DIR", &other).output().unwrap();
@@ -3791,4 +3902,541 @@ fn what_was_done_is_found_and_counted() {
     assert!(root.join(".kito/activity.jsonl").is_file());
     assert!(kito(root, &["stats", "--since", "yesterday"]).status.code() != Some(0));
     ok(root, &["daemon", "stop"]);
+}
+
+/// A server of its own, running until dropped, with a repository `shop`
+/// and ada, an admin, and bob, who may write in it: its address and their tokens.
+struct Running {
+    child: std::process::Child,
+    dir: PathBuf,
+    address: String,
+    ada: String,
+    bob: String,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = kito(&self.dir.join("repos/shop"), &["daemon", "stop"]);
+    }
+}
+
+fn running(base: &Path, name: &str) -> Running {
+    let dir = base.join(name);
+    let server = |args: &[&str]| {
+        let mut command = Command::new(kito_server());
+        command
+            .arg("--dir")
+            .arg(&dir)
+            .args(args)
+            .env("KITOD_BIN", kitod())
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", base.join(".server-config"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        command
+    };
+    let run = |args: &[&str]| -> String {
+        let out = server(args).output().unwrap();
+        assert!(out.status.success(), "kito-server {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let src = base.join(format!("{name}-src"));
+    fs::create_dir_all(src.join("src")).unwrap();
+    fs::write(src.join("src/shop.py"), SHOP_PY).unwrap();
+    git(&src, &["init", "-q", "-b", "main"]);
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-q", "-m", "start"]);
+    run(&["init", dir.to_str().unwrap()]);
+    run(&["repo", "add", "shop", "--from", src.to_str().unwrap()]);
+    let ada = run(&["user", "add", "ada", "--role", "admin"]);
+    let ada = ada.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    let bob = run(&["user", "add", "bob", "--repo", "shop:write"]);
+    let bob = bob.lines().find(|line| line.starts_with("kito_")).unwrap().trim().to_owned();
+    let mut child = server(&["serve", "--listen", "127.0.0.1:0"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line)
+        .unwrap();
+    let address =
+        line.trim().strip_prefix("kito-server: listening on ").unwrap().split(',').next().unwrap().to_owned();
+    Running { child, dir, address, ada, bob }
+}
+
+#[test]
+fn servers_are_connected_to_kept_switched_between_and_forgotten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (one, two) = (running(&base, "one"), running(&base, "two"));
+    let me = base.join(".ada");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&me, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
+    let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    let kept = || fs::read_to_string(me.join("servers.toml")).unwrap();
+
+    // Nothing known yet: said, with what to do.
+    let none = kito(&base, &["repos"]);
+    assert!(
+        !none.status.success() && errors(&none).contains("`kito connect <server>` first"),
+        "{}",
+        errors(&none)
+    );
+    assert!(ok(&base, &["server"]).contains("No server yet"));
+
+    // The server alone: signed in, kept, current; no directory is made.
+    let said = ok(&base, &["connect", &one.address, "--token", &one.ada]);
+    assert!(said.contains(&format!(
+        "Connected to {} as ada: `{}` is your current server.",
+        one.address, one.address
+    )));
+    assert!(said.contains("The repositories you may use there: shop."), "{said}");
+    assert!(said.contains("`kito clone shop` makes a directory of one."), "{said}");
+    assert!(!base.join("shop").exists());
+    assert!(kept().starts_with(&format!("current = \"{}\"\n", one.address)), "{}", kept());
+    assert!(kept().contains(&format!("token = \"{}\"", one.ada)) && kept().contains("user = \"ada\""));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(me.join("servers.toml")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "servers.toml is its owner's alone");
+    }
+
+    // A directory of a repository of it: it names the server, no token.
+    let cloned = ok(&base, &["clone", "shop"]);
+    assert!(cloned.contains("is connected to `shop` on") && cloned.contains("as ada."), "{cloned}");
+    let shop = base.join("shop");
+    assert_eq!(
+        fs::read_to_string(shop.join(".kito/remote.toml")).unwrap(),
+        format!("server = \"{}\"\nrepo = \"shop\"\n", one.address)
+    );
+    assert_eq!(fs::read_to_string(shop.join("src/shop.py")).unwrap(), SHOP_PY);
+    let refused = kito(&base, &["clone", "nope"]);
+    assert!(errors(&refused).contains("there is no repository `nope` for ada"), "{}", errors(&refused));
+    assert!(!base.join("nope").exists());
+    // Connected again while what is kept lets ada in: nobody signs in.
+    assert!(ok(&base, &["connect", &one.address]).contains("as ada"));
+
+    // A second server, under a name of her choosing: current now.
+    ok(&base, &["connect", &two.address, "--token", &two.ada, "--as", "two"]);
+    assert_eq!(ok(&base, &["repos"]), "shop\n");
+    ok(&base, &["repos", "add", "notes"]);
+    assert!(two.dir.join("repos/notes/README.md").is_file() && !one.dir.join("repos/notes").exists());
+    let listed = ok(&base, &["server", "list"]);
+    let lines: Vec<String> =
+        listed.lines().map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(
+        lines,
+        [format!("{} {} as ada", one.address, one.address), format!("* two {} as ada", two.address)],
+        "{listed}"
+    );
+    assert!(!listed.contains("kito_"), "no token is ever listed: {listed}");
+    let listed = ok(&base, &["--json", "server", "list"]);
+    let parsed: Value = serde_json::from_str(&listed).unwrap();
+    assert!(
+        parsed["current"] == "two" && parsed["servers"][1]["user"] == "ada" && !listed.contains("kito_"),
+        "{listed}"
+    );
+
+    // A connected directory uses its own server whatever is current;
+    // --server says another, for one command.
+    assert_eq!(ok(&shop, &["repos"]), "shop  (this directory)\n");
+    assert_eq!(ok(&shop, &["repos", "--server", "two"]), "notes\nshop\n");
+    assert_eq!(ok(&base, &["repos", "--server", &one.address]), "shop\n");
+    let unknown = kito(&base, &["repos", "--server", "three"]);
+    assert!(errors(&unknown).contains("`three` is not one of your servers"), "{}", errors(&unknown));
+    ok(&base, &["clone", "notes", "two-notes"]);
+    assert!(base.join("two-notes/README.md").is_file());
+    let people = ok(&base, &["people", "--server", &one.address]);
+    assert!(people.starts_with("ada"), "{people}");
+    let backups = ok(&base, &["backup"]);
+    assert!(backups.contains(&two.address), "{backups}");
+    assert!(ok(&base, &["audit", "--server", "two", "--kind", "repo"]).contains("notes"));
+
+    // Switched: the current one answers.
+    assert!(ok(&base, &["server", "use", &one.address]).contains("is your current server"));
+    assert_eq!(ok(&base, &["repos"]), "shop\n");
+    let wrong = kito(&base, &["server", "use", "three"]);
+    assert!(!wrong.status.success() && errors(&wrong).contains("`three` is not one of your servers"));
+
+    // The old form still makes the directory, and keeps the server it names.
+    let old = ok(&base, &["connect", &format!("{}/shop", two.address), "two-shop", "--token", &two.ada]);
+    assert!(
+        old.contains("is connected to `shop` on") && old.contains("The main lane is in it (1 file)"),
+        "{old}"
+    );
+    assert!(kept().starts_with(&format!("current = \"{}\"\n", two.address)), "{}", kept());
+    assert_eq!(
+        fs::read_to_string(base.join("two-shop/.kito/remote.toml")).unwrap(),
+        format!("server = \"{}\"\nrepo = \"shop\"\n", two.address)
+    );
+
+    // Forgotten: listed no more, and its directories say so. A token is
+    // the person's: no session to end.
+    let said = ok(&base, &["server", "remove", "two"]);
+    assert!(said.contains("`two` is forgotten") && !said.contains("session"), "{said}");
+    assert!(!ok(&base, &["server", "list"]).contains("* two"));
+    let notes = base.join("two-notes");
+    let gone = kito(&notes, &["repos"]);
+    assert!(errors(&gone).contains("two is not one of your servers"), "{}", errors(&gone));
+    for dir in [&shop, &notes, &base.join("two-shop")] {
+        ok(dir, &["daemon", "stop"]);
+    }
+}
+
+#[test]
+fn a_directory_connected_the_old_way_keeps_working_and_comes_to_name_its_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let one = running(&base, "one");
+    let me = base.join(".ada");
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
+    // Two directories connected before 0.40: an address and a token each.
+    let fingerprint = String::from_utf8(
+        Command::new(kito_server()).arg("--dir").arg(&one.dir).arg("fingerprint").output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let (first, second) = (base.join("first"), base.join("second"));
+    let old = format!(
+        "server = \"{}\"\nrepo = \"shop\"\ntoken = \"{}\"\nfingerprint = \"{fingerprint}\"\n",
+        one.address, one.ada
+    );
+    for dir in [&first, &second] {
+        fs::create_dir_all(dir.join(".kito")).unwrap();
+        fs::write(dir.join(".kito/remote.toml"), &old).unwrap();
+    }
+
+    // Two commands at once, one in each: both work, and take turns to
+    // move their directory to the form that names its server.
+    let ran: Vec<Output> = [&first, &second]
+        .map(|dir| {
+            let (dir, me) = (dir.clone(), me.clone());
+            std::thread::spawn(move || kito_as(&me, &dir, &["repos"]))
+        })
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    for out in &ran {
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "shop  (this directory)\n");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains(&format!("names its server now: `{}`", one.address)), "{said}");
+    }
+    let named = format!("server = \"{}\"\nrepo = \"shop\"\n", one.address);
+    for dir in [&first, &second] {
+        assert_eq!(fs::read_to_string(dir.join(".kito/remote.toml")).unwrap(), named);
+    }
+    let kept = fs::read_to_string(me.join("servers.toml")).unwrap();
+    assert_eq!(kept.matches("[servers.").count(), 1, "{kept}");
+    assert!(kept.contains(&format!("fingerprint = \"{fingerprint}\"")) && kept.contains(&one.ada), "{kept}");
+    // Moved once: said once.
+    let again = kito_as(&me, &first, &["repos"]);
+    assert!(again.status.success() && again.stderr.is_empty(), "{}", String::from_utf8_lossy(&again.stderr));
+    // Its daemon and its lanes work as before.
+    assert!(ok(&first, &["lanes"]).contains("No open lanes"));
+    assert!(ok(&first, &["lane", "attach", "main"]).contains("lane/main"));
+    assert_eq!(fs::read_to_string(first.join("src/shop.py")).unwrap(), SHOP_PY);
+    // A directory nobody moved yet, read by the daemon alone, works too:
+    // the daemon never writes it.
+    let third = base.join("third");
+    fs::create_dir_all(third.join(".kito")).unwrap();
+    fs::write(third.join(".kito/remote.toml"), &old).unwrap();
+    let remote = kitod::client::Remote::load(&third).unwrap();
+    assert_eq!((remote.token.as_deref(), remote.name), (Some(one.ada.as_str()), None));
+    let mut daemon = Command::new(kitod())
+        .arg("--repo")
+        .arg(&third)
+        .env("KITO_CONFIG_DIR", &me)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut asked = None;
+    for _ in 0..200 {
+        if let Ok(mut client) = kitod::client::Client::connect(&third) {
+            asked = client.call::<Value>("lanes", serde_json::json!({})).ok();
+            if asked.is_some() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(asked, Some(serde_json::json!([])));
+    assert_eq!(fs::read_to_string(third.join(".kito/remote.toml")).unwrap(), old);
+    for dir in [&first, &second] {
+        ok(dir, &["daemon", "stop"]);
+    }
+}
+
+#[test]
+fn the_repository_you_are_in_is_sent_and_connected_to_it_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let one = running(&base, "one");
+    let me = base.join(".ada");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&me, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
+    ok(&base, &["connect", &one.address, "--token", &one.ada]);
+
+    // A repository of this machine, with a file Kito does not record.
+    let mine = base.join("mine");
+    fs::create_dir_all(mine.join("src")).unwrap();
+    fs::write(mine.join("src/notes.py"), "def note():\n    return 1\n").unwrap();
+    fs::write(mine.join(".kitoignore"), "*.log\n").unwrap();
+    fs::write(mine.join("debug.log"), "mine alone\n").unwrap();
+    ok(&mine, &["init"]);
+    ok(&mine, &["checkpoint", "-m", "a note"]);
+    // Changed after the checkpoint: the main lane has it as it is now.
+    fs::write(mine.join("src/notes.py"), "def note():\n    return 2\n").unwrap();
+    ok(&mine, &["sync"]);
+    let history = ok(&mine, &["log"]);
+    // A permanent lane goes with it, and is named.
+    assert!(ok(&mine, &["lane", "create", "staging"]).contains("staging"));
+    // Written just before: recorded before anything is packed.
+    fs::write(mine.join("src/late.py"), "late = True\n").unwrap();
+
+    // Sent from a directory inside it: the repository it is in.
+    let said = ok(&mine.join("src"), &["repos", "add", "notes", "--push", "."]);
+    assert!(
+        said.contains("`notes` is on") && said.contains("This directory is connected to it now"),
+        "{said}"
+    );
+    assert!(said.contains("Its permanent lanes (staging) are in the repository on the server"), "{said}");
+    assert_eq!(fs::read_to_string(one.dir.join("repos/notes/src/late.py")).unwrap(), "late = True\n");
+    // The local history is kept, whole, beside it, and named.
+    let aside: Vec<PathBuf> = fs::read_dir(&mine)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(".kito-local-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert!(aside[0].join("format").is_file() && aside[0].join("remote.toml").metadata().is_err());
+    assert!(said.contains(&aside[0].display().to_string()), "{said}");
+    // The directory names the server; its files are as they were.
+    assert_eq!(
+        fs::read_to_string(mine.join(".kito/remote.toml")).unwrap(),
+        format!("server = \"{}\"\nrepo = \"notes\"\n", one.address)
+    );
+    assert_eq!(fs::read_to_string(mine.join("src/notes.py")).unwrap(), "def note():\n    return 2\n");
+    assert_eq!(fs::read_to_string(mine.join("debug.log")).unwrap(), "mine alone\n");
+    assert_eq!(
+        fs::read_to_string(one.dir.join("repos/notes/src/notes.py")).unwrap(),
+        "def note():\n    return 2\n"
+    );
+    // It works as a directory of the repository on the server, history and all.
+    assert_eq!(ok(&mine, &["repos"]), "notes  (this directory)\nshop\n");
+    assert!(ok(&mine, &["log"]).contains("a note") && history.contains("a note"));
+    let opened = ok(
+        &mine,
+        &["lane", "open", "builder", "--intent", "notes count from two", "--scope", "src/notes.py"],
+    );
+    assert!(opened.contains("lane/2 opened"), "{opened}");
+    ok(&mine, &["lane", "close", "2"]);
+    let status = ok(&mine, &["daemon", "status"]);
+    assert!(status.contains("Connected to ...... `notes` on"), "{status}");
+    assert!(!status.contains(".kito-local-"), "the history set aside is no file of the project: {status}");
+
+    // Only sent: the repository stays as it is.
+    let kept = base.join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    fs::write(kept.join("kept.py"), "x = 1\n").unwrap();
+    ok(&kept, &["init"]);
+    ok(&kept, &["checkpoint", "-m", "kept"]);
+    let said = ok(&kept, &["repos", "add", "kept", "--push", ".", "--keep-local"]);
+    assert!(said.contains("`kept` is on") && !said.contains("connected to it now"), "{said}");
+    assert!(kept.join(".kito/format").is_file() && !kept.join(".kito/remote.toml").exists());
+    assert!(one.dir.join("repos/kept/kept.py").is_file());
+    assert!(kito(&kept, &["repos", "add", "x", "--keep-local"]).status.code() != Some(0));
+    for dir in [&mine, &kept] {
+        ok(dir, &["daemon", "stop"]);
+    }
+}
+
+#[test]
+fn a_repository_with_open_lanes_is_not_sent_to_be_connected_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let one = running(&base, "one");
+    let me = base.join(".ada");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&me, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
+    ok(&base, &["connect", &one.address, "--token", &one.ada]);
+    let busy = base.join("busy");
+    fs::create_dir_all(&busy).unwrap();
+    fs::write(busy.join("busy.py"), "def busy():\n    return 1\n").unwrap();
+    ok(&busy, &["init"]);
+    ok(&busy, &["checkpoint", "-m", "busy"]);
+    ok(&busy, &["lane", "open", "builder", "--intent", "busy returns two", "--scope", "busy.py"]);
+
+    // Refused before anything is sent, and why.
+    let refused = kito(&busy, &["repos", "add", "busy", "--push", "."]);
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(!refused.status.success() && said.contains("this repository has open lanes (lane/1)"), "{said}");
+    assert!(said.contains("close or integrate them first, or only send it with --keep-local"), "{said}");
+    assert!(!one.dir.join("repos/busy").exists());
+    assert!(busy.join(".kito/format").is_file() && !busy.join(".kito/remote.toml").exists());
+    let names: Vec<String> = fs::read_dir(&busy)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().all(|name| !name.starts_with(".kito-local-")), "{names:?}");
+    // The lane goes on here.
+    assert!(ok(&busy, &["lanes"]).contains("lane/1"));
+    ok(&busy, &["daemon", "stop"]);
+}
+
+#[test]
+fn moving_old_directories_never_changes_who_they_act_as_nor_the_current_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let one = running(&base, "one");
+    let fingerprint = String::from_utf8(
+        Command::new(kito_server()).arg("--dir").arg(&one.dir).arg("fingerprint").output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let old = |token: &str| {
+        format!(
+            "server = \"{}\"\nrepo = \"shop\"\ntoken = \"{token}\"\nfingerprint = \"{fingerprint}\"\n",
+            one.address
+        )
+    };
+    // ada's directory and bob's, connected before 0.40 on one machine, under
+    // one Kito directory: moved one after the other, then at the same time.
+    for together in [false, true] {
+        let me = base.join(format!(".me-{together}"));
+        let (adas, bobs) = (base.join(format!("ada-{together}")), base.join(format!("bob-{together}")));
+        for (dir, token) in [(&adas, &one.ada), (&bobs, &one.bob)] {
+            fs::create_dir_all(dir.join(".kito")).unwrap();
+            fs::write(dir.join(".kito/remote.toml"), old(token)).unwrap();
+        }
+        let ran: Vec<Output> = match together {
+            false => [&adas, &bobs].iter().map(|dir| kito_as(&me, dir, &["repos"])).collect(),
+            true => [&adas, &bobs]
+                .map(|dir| {
+                    let (dir, me) = (dir.clone(), me.clone());
+                    std::thread::spawn(move || kito_as(&me, &dir, &["repos"]))
+                })
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect(),
+        };
+        let mut said = String::new();
+        for out in &ran {
+            said.push_str(&String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success(), "{said}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "shop  (this directory)\n");
+        }
+        let beside = format!(
+            "another account of that server, or that server known another way, is kept as `{}`",
+            one.address
+        );
+        assert!(said.contains(&beside), "{said}");
+        // Two entries, each with its own token; each directory acts as its
+        // own account, as the server answered it.
+        let kept = fs::read_to_string(me.join("servers.toml")).unwrap();
+        assert!(kept.contains(&one.ada) && kept.contains(&one.bob), "{kept}");
+        let listed: Value = serde_json::from_str(&ok_as(&me, &base, &["--json", "server", "list"])).unwrap();
+        let user_of = |dir: &Path| {
+            let named = fs::read_to_string(dir.join(".kito/remote.toml")).unwrap();
+            let entry = listed["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| {
+                    named.starts_with(&format!("server = \"{}\"\n", entry["name"].as_str().unwrap()))
+                })
+                .unwrap_or_else(|| panic!("{named}: {listed}"))
+                .clone();
+            entry["user"].as_str().unwrap_or("?").to_owned()
+        };
+        assert_eq!((user_of(&adas), user_of(&bobs)), ("ada".to_owned(), "bob".to_owned()), "{listed}");
+        // Nothing became current: a command outside a directory asks which.
+        assert_eq!(listed["current"], Value::Null, "{listed}");
+        let refused = kito_as(&me, &base, &["repos"]);
+        let names = format!("{}, {}-2", one.address, one.address);
+        let wanted = format!("no current server: `kito server use <name>` (you have: {names})");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(&wanted),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+}
+
+#[test]
+fn connecting_never_replaces_another_server_nor_another_person() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonical().unwrap();
+    let (one, two) = (running(&base, "one"), running(&base, "two"));
+    let me = base.join(".me");
+    let kito = |cwd: &Path, args: &[&str]| kito_as(&me, cwd, args);
+    let ok = |cwd: &Path, args: &[&str]| ok_as(&me, cwd, args);
+    let errors = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    let kept = || fs::read_to_string(me.join("servers.toml")).unwrap();
+    let (first, second) = (one.address.as_str(), two.address.as_str());
+
+    // Another person under a name that is ada's: refused, nothing changes.
+    ok(&base, &["connect", first, "--token", &one.ada]);
+    let before = kept();
+    let refused = kito(&base, &["connect", first, "--token", &one.bob]);
+    let wanted = format!(
+        "you are ada on `{first}`: to be bob there too, add `--as <name>`; to stop being ada there, `kito server \
+         remove {first}` first"
+    );
+    assert!(!refused.status.success() && errors(&refused).contains(&wanted), "{}", errors(&refused));
+    assert_eq!(kept(), before);
+    // The same person signs in again: kept as now.
+    assert!(ok(&base, &["connect", first, "--token", &one.ada]).contains("as ada"));
+    // Two accounts of one server under two names; each directory acts as its own.
+    ok(&base, &["connect", first, "--token", &one.bob, "--as", "bob"]);
+    ok(&base, &["clone", "shop", "ada-shop", "--server", first]);
+    ok(&base, &["clone", "shop", "bob-shop"]);
+    let (adas, bobs) = (base.join("ada-shop"), base.join("bob-shop"));
+    ok(&adas, &["lane", "open", "pricer", "--intent", "prices in cents", "--scope", "src/shop.py:total"]);
+    ok(
+        &bobs,
+        &["lane", "open", "receipts", "--intent", "receipts in euros", "--scope", "src/shop.py:receipt"],
+    );
+    let board = ok(&adas, &["board"]);
+    assert!(board.contains("pricer (of ada)") && board.contains("receipts (of bob)"), "{board}");
+
+    // A name another server has: refused with --as, never replaced.
+    let taken = kito(&base, &["connect", second, "--token", &two.ada, "--as", "bob"]);
+    let wanted = format!("`bob` is the name of another server of yours ({first})");
+    assert!(!taken.status.success() && errors(&taken).contains(&wanted), "{}", errors(&taken));
+    // Without --as, the new one is kept under a free name, and said.
+    ok(&base, &["connect", first, "--token", &one.ada, "--as", second]);
+    let moved = kito(&base, &["connect", second, "--token", &two.ada]);
+    let wanted =
+        format!("`{second}` is the name of another server of yours: this one is kept as `{second}-2`");
+    assert!(moved.status.success() && errors(&moved).contains(&wanted), "{}", errors(&moved));
+    assert!(kept().contains(&format!("[servers.\"{second}-2\"]\naddress = \"{second}\"")), "{}", kept());
+    assert!(kept().contains(&format!("[servers.\"{second}\"]\naddress = \"{first}\"")), "{}", kept());
+    // Connected again, it finds its own name.
+    let again = kito(&base, &["connect", second]);
+    assert!(again.status.success() && errors(&again).contains(&format!("kept as `{second}-2`")));
+    assert!(!kept().contains(&format!("{second}-3")), "{}", kept());
+
+    // Forgetting a person's token says so, first.
+    let said = ok(&base, &["server", "remove", "bob"]);
+    assert!(
+        said.starts_with(
+            "`bob` holds your token there, which Kito keeps nowhere else: it is forgotten with it, \
+                          and only an admin of that server can give you another.\n`bob` is forgotten"
+        ),
+        "{said}"
+    );
+    ok(&adas, &["lane", "close", "1"]);
+    for dir in [&adas, &bobs] {
+        ok(dir, &["daemon", "stop"]);
+    }
 }

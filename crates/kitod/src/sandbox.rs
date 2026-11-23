@@ -7,8 +7,9 @@
 //!
 //! - writes only where it is told it may: its own copy of the files and a
 //!   temporary directory;
-//! - does not read what is hidden from it: Kito's own data, the other
-//!   repositories of a server, the keys of the user that runs it;
+//! - does not read what is hidden from it: Kito's own data, the person's
+//!   servers and their tokens, the other repositories of a server, the
+//!   keys of the user that runs it;
 //! - opens no TCP connection, when it is given no network.
 //!
 //! It is done with Landlock (Linux 5.13; the network part needs 6.7): a
@@ -133,6 +134,14 @@ fn base(root: &Path, config: &crate::config::SandboxConfig, private: &[PathBuf],
         let _ = std::fs::create_dir_all(dir);
     }
     let mut hide = vec![root.join(kito_store::STORE_DIR)];
+    // The tokens of the person's servers, kept out of `.kito` since 0.40 (ADR 0023).
+    hide.extend(crate::servers::config_dir().map(|dir| dir.join(crate::servers::SERVERS_FILE)));
+    // A local history set aside when the directory was connected in place.
+    let set_aside = std::fs::read_dir(root).into_iter().flatten().flatten().map(|entry| entry.path());
+    hide.extend(set_aside.filter(|path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(crate::servers::LOCAL_BACKUP_PREFIX))
+    }));
     hide.extend(around(root));
     hide.extend(config.hide.iter().map(|path| configured(root, path)));
     let mut write = private.to_vec();

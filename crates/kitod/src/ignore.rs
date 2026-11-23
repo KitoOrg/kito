@@ -70,7 +70,10 @@ impl IgnoreRules {
         if parts.is_empty() {
             return false;
         }
-        if parts.contains(&".git".as_ref()) || parts[0] == ".kito" {
+        // A store set aside when its directory was connected to a server
+        // is no file of the project either (ADR 0023).
+        let set_aside = parts[0].to_string_lossy().starts_with(crate::servers::LOCAL_BACKUP_PREFIX);
+        if parts.contains(&".git".as_ref()) || parts[0] == ".kito" || set_aside {
             return true;
         }
         let mut prefix = PathBuf::new();
@@ -126,6 +129,8 @@ mod tests {
         assert!(ignored(".git", true) && ignored(".git/config", false) && ignored("sub/.git/HEAD", false));
         assert!(ignored(".kito/oplog/0.seg", false));
         assert!(!ignored("src/.kito", false), ".kito only counts at the root");
+        assert!(ignored(".kito-local-2026-11-23T101500Z/format", false));
+        assert!(!ignored("src/.kito-local-2026-11-23T101500Z", true));
         // .gitignore at the root.
         assert!(ignored("target", true) && ignored("target/debug/x", false));
         assert!(!ignored("target", false), "`target/` only applies to directories");

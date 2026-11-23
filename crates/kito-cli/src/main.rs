@@ -14,6 +14,7 @@ use kitod::rename::RenameResult;
 use kitod::repo::{CheckpointResult, LogItem, RollbackResult};
 use kitod::rpc::DaemonStatus;
 use kitod::semantic::Why;
+use kitod::servers::{Server, Servers};
 use kitod::Repo;
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -46,7 +47,7 @@ struct Cli {
 /// The commands of `kito --help`, in groups, the most used first. A
 /// command missing here is listed at the end, under "More".
 const GROUPS: &[(&str, &[&str])] = &[
-    ("Start", &["init", "import", "connect", "sign-in", "status"]),
+    ("Start", &["init", "import", "connect", "clone", "server", "sign-in", "status"]),
     (
         "Lanes",
         &["board", "lanes", "lane", "task", "intent", "integrate", "conflicts", "resolve", "who", "rename"],
@@ -288,9 +289,13 @@ enum ReposCmd {
         token_file: Option<PathBuf>,
         /// A repository of this machine, sent whole
         ///
-        /// A Kito one with all its history, or a git one.
+        /// A Kito one with all its history, or a git one. The one you are
+        /// in (`--push .`) is then connected to it, its history set aside.
         #[arg(long, value_name = "DIR")]
         push: Option<PathBuf>,
+        /// Only send it: the repository you are in stays as it is
+        #[arg(long, requires = "push")]
+        keep_local: bool,
     },
     /// Take one out of use: hidden, deleted after 30 days
     Archive { name: String },
@@ -311,6 +316,16 @@ enum ReposCmd {
     },
     /// Rename one: directories connected with the old name still reach it
     Rename { from: String, to: String },
+}
+
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// Each server: its name, where it is, who you are there, the current one
+    List,
+    /// Make one the current server
+    Use { name: String },
+    /// Forget one, and end its session there
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -467,8 +482,11 @@ enum Cmd {
     Revoke { name: String },
     /// The audit log of the server (admins)
     ///
-    /// The server this directory is connected to.
+    /// This directory's server, or your current one.
     Audit {
+        /// Of this server of yours instead (`kito server list`)
+        #[arg(long, value_name = "NAME")]
+        server: Option<String>,
         /// Each request, not what changed the server
         #[arg(long)]
         requests: bool,
@@ -487,16 +505,25 @@ enum Cmd {
     },
     /// The backups of the server (admins): list them, or `now`
     ///
-    /// The server this directory is connected to. Without `now`, they are listed.
-    Backup { what: Option<String> },
+    /// This directory's server, or your current one. Without `now`, they
+    /// are listed.
+    Backup {
+        what: Option<String>,
+        /// Of this server of yours instead (`kito server list`)
+        #[arg(long, value_name = "NAME")]
+        server: Option<String>,
+    },
     /// The people of the server (admins), and how each signs in
     ///
-    /// The server this directory is connected to. Anybody gets a new
+    /// This directory's server, or your current one. Anybody gets a new
     /// token of their own (`kito people token`) and unlinks an identity
     /// of their own.
     People {
         #[command(subcommand)]
         command: Option<PeopleCmd>,
+        /// Of this server of yours instead (`kito server list`)
+        #[arg(long, global = true, value_name = "NAME")]
+        server: Option<String>,
     },
     /// What the assistants are told here
     ///
@@ -676,16 +703,17 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Connect a directory to a repository kept by a Kito server
+    /// Sign in to a Kito server, kept as your current server
     ///
-    /// For example `kito connect kito.example.com/shop`.
-    #[command(visible_alias = "clone")]
+    /// For example `kito connect kito.example.com`, then `kito clone shop`.
+    /// With a repository too (`kito connect kito.example.com/shop`), a
+    /// directory of it is made as `kito clone` makes one.
     Connect {
-        /// The repository's address: host[:port]/repository
+        /// The server: host[:port], kito://host[:port] or ssh://user@host/path
         ///
-        /// Or kito://host[:port]/repository; the port is 7421 when none is
-        /// said. Also the server alone, then the repository: host:port shop,
-        /// ssh://user@host/path/of/the/server shop.
+        /// The port is 7421 when none is said. With a repository:
+        /// host[:port]/repository, or the server and then the repository
+        /// (host:port shop, ssh://user@host/path/of/the/server shop).
         #[arg(value_name = "ADDRESS")]
         server: String,
         /// The repository, when the address is of the server alone; else
@@ -694,6 +722,11 @@ enum Cmd {
         name: Option<String>,
         /// The directory to connect (default: a new one named as the repository)
         dir: Option<PathBuf>,
+        /// The name the server is kept under (default: its host)
+        ///
+        /// For a second account on the same server, or a server on another port.
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
         /// The token the server gave you, for host:port (default: $KITO_TOKEN)
         #[arg(long)]
         token: Option<String>,
@@ -727,20 +760,57 @@ enum Cmd {
         #[arg(long)]
         no_assistants: bool,
     },
-    /// Sign in again to the server this directory is connected to
+    /// Make a directory of a repository of your current server
     ///
-    /// When the session ended, or to be somebody else.
+    /// For example `kito clone shop`. The files of its main lane come into
+    /// it; from then on `kito` there works as in a repository.
+    Clone {
+        /// The repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The directory (default: a new one named as the repository)
+        dir: Option<PathBuf>,
+        /// Of this server of yours instead (`kito server list`)
+        #[arg(long, value_name = "NAME")]
+        server: Option<String>,
+        /// Do not set the directory up for Claude Code
+        #[arg(long)]
+        no_claude: bool,
+        /// Set this assistant up here (again for more)
+        #[arg(long = "assistant", value_name = "NAME", conflicts_with = "no_assistants")]
+        assistants: Vec<String>,
+        /// Set no assistant up here
+        #[arg(long)]
+        no_assistants: bool,
+    },
+    /// The servers you are connected to, and the current one
+    ///
+    /// A directory connected to a repository always uses its own server.
+    Server {
+        #[command(subcommand)]
+        command: Option<ServerCmd>,
+    },
+    /// Sign in again to this directory's server, or your current one
+    ///
+    /// When the session ended, or to be somebody else. Every directory
+    /// connected to that server goes on with the new session.
     SignIn {
-        /// The way to sign in (default: the one this directory was connected with)
+        /// The way to sign in (default: the one you signed in with)
         method: Option<String>,
+        /// To this server of yours instead (`kito server list`)
+        #[arg(long, value_name = "NAME")]
+        server: Option<String>,
     },
     /// The repositories you may use on the server; admins manage them
     ///
-    /// The server this directory is connected to. Admins add, archive,
+    /// This directory's server, or your current one. Admins add, archive,
     /// rename and delete them.
     Repos {
         #[command(subcommand)]
         command: Option<ReposCmd>,
+        /// Of this server of yours instead (`kito server list`)
+        #[arg(long, global = true, value_name = "NAME")]
+        server: Option<String>,
     },
     /// What happens in the repository, as it happens
     Watch {
@@ -3243,46 +3313,48 @@ fn remote_for(
     Ok(Remote { server: Some(server.to_owned()), repo: repo.to_owned(), token, ..Remote::default() })
 }
 
-/// The port of a Kito server when an address says none.
-const DEFAULT_PORT: u16 = 7421;
-
-/// What `kito connect` was given, as the server, the repository and the
-/// directory: one address (`kito.example.com/shop`,
-/// `kito://host:port/shop`), or the server and then the repository.
+/// What `kito connect` was given, as the server, the repository if one
+/// is said, and the directory: the server alone (`kito.example.com`,
+/// `kito://host:port`), one address (`kito.example.com/shop`), or the
+/// server and then the repository.
 fn address_of(
     given: &str,
     second: Option<&str>,
-    dir: Option<PathBuf>,
-) -> Result<(String, String, Option<PathBuf>), String> {
-    let plain = given.strip_prefix("kito://").unwrap_or(given);
-    let one_address = !given.starts_with("ssh://") && plain.contains('/');
-    if !one_address {
-        let repo = second.ok_or_else(|| {
-            format!("say the repository too: `kito connect {given}/<repository>`, or `kito connect {given} <repository>`")
-        })?;
-        return Ok((given.to_owned(), repo.to_owned(), dir));
+    third: Option<PathBuf>,
+) -> Result<(String, Option<String>, Option<PathBuf>), String> {
+    if given.starts_with("ssh://") {
+        return Ok((given.to_owned(), second.map(str::to_owned), third));
     }
     if given.starts_with("http://") || given.starts_with("https://") {
         return Err(format!(
-            "{given} is the address of a web page: give the server's own, as `kito connect host[:port]/<repository>`"
+            "{given} is the address of a web page: give the server's own, as `kito connect host[:port]`"
         ));
     }
-    if dir.is_some() {
+    let plain = given.strip_prefix("kito://").unwrap_or(given).trim_end_matches('/');
+    let Some((host, repo)) = plain.split_once('/') else {
+        if plain.is_empty() {
+            return Err(format!("{given}: a server is host[:port]"));
+        }
+        return Ok((with_port(plain), second.map(str::to_owned), third));
+    };
+    if third.is_some() {
         return Err("an address names the repository already: give only the directory after it".into());
     }
-    let (host, repo) = plain.trim_end_matches('/').split_once('/').unwrap_or((plain, ""));
     if host.is_empty() || repo.is_empty() || repo.contains('/') {
         return Err(format!("{given}: an address is host[:port]/<repository>"));
     }
-    // A port said, or not: `[::1]:7421`, `host:7421`, `host`.
+    Ok((with_port(host), Some(repo.to_owned()), second.map(PathBuf::from)))
+}
+
+/// `host:port`: the port said, or the usual one (`[::1]:7421`, `host:7421`).
+fn with_port(host: &str) -> String {
     let has_port = host.rsplit_once(':').is_some_and(|(before, port)| {
         port.parse::<u16>().is_ok() && (!before.contains(':') || before.ends_with(']'))
     });
-    let server = match has_port {
+    match has_port {
         true => host.to_owned(),
-        false => format!("{host}:{DEFAULT_PORT}"),
-    };
-    Ok((server, repo.to_owned(), second.map(PathBuf::from)))
+        false => format!("{host}:{}", kitod::servers::DEFAULT_PORT),
+    }
 }
 
 /// Opens a page in the person's browser, when somebody is there to see it.
@@ -3489,27 +3561,139 @@ fn sign_in_to(mut remote: Remote, method: &str) -> Result<(Remote, Value), Strin
     Ok((remote, signed))
 }
 
-fn cmd_sign_in(cli: &Cli, method: &Option<String>) -> Outcome {
-    let root = root_of(cli)?;
-    let remote = Remote::load(&root).ok_or(
-        "this directory is a repository of its own: `kito sign-in` is for one connected to a server",
-    )?;
-    if remote.server.is_none() {
-        return Err("this directory reaches its server through SSH, which knows you by your key".into());
+/// The person's servers, read; a file that cannot be read is said.
+fn my_servers() -> Result<Servers, String> {
+    match kitod::servers::config_dir() {
+        Some(dir) => Servers::read_in(&dir),
+        None => Ok(Servers::default()),
     }
-    let method = method.clone().or_else(|| remote.sign_in.clone()).ok_or(
-        "this directory was connected with a token: say the way to sign in, as in `kito sign-in github`",
-    )?;
+}
+
+/// The server a command asks that needs no directory (ADR 0023): the one
+/// named, else the one of the directory it runs in, else the current one.
+fn server_of(cli: &Cli, given: Option<&str>) -> Result<Remote, String> {
+    let servers = my_servers()?;
+    if let Some(name) = given {
+        return match servers.servers.get(name) {
+            Some(server) => Ok(server.remote(name, "")),
+            None => Err(format!(
+                "`{name}` is not one of your servers (`kito server list` says which are): `kito connect` to it \
+                 first"
+            )),
+        };
+    }
+    if let Some(remote) = root_of(cli).ok().and_then(|root| Remote::load(&root)) {
+        return Ok(remote);
+    }
+    let current = servers.current.as_deref();
+    match current.and_then(|name| servers.servers.get(name).map(|server| server.remote(name, ""))) {
+        Some(remote) => Ok(remote),
+        // Only `kito connect` and `kito server use` make one current.
+        None if !servers.servers.is_empty() => {
+            let names: Vec<&str> = servers.servers.keys().map(String::as_str).collect();
+            Err(format!("no current server: `kito server use <name>` (you have: {})", names.join(", ")))
+        }
+        None => {
+            Err("no server is known here: `kito connect <server>` first, as `kito connect kito.example.com`"
+                .into())
+        }
+    }
+}
+
+/// A server of the person's, asked as them: about the server itself.
+fn server_asked(cli: &Cli, given: Option<&str>) -> Result<(Remote, Client), String> {
+    let remote = server_of(cli, given)?;
+    let client = reached(&remote, false)?;
+    Ok((remote, client))
+}
+
+/// Connects to the remote's server, as `Client::remote`; and keeps who the
+/// person is there for an entry that does not say yet (one made by moving
+/// a directory to the new form), as the server said it.
+fn reached(remote: &Remote, repo: bool) -> Result<Client, String> {
+    let client = Client::remote(remote, repo).map_err(fail)?;
+    if let (Some(name), Some(user)) = (&remote.name, client.user()) {
+        let unsaid = |servers: &Servers| {
+            servers.servers.get(name).is_some_and(|entry| entry.user.is_none() && entry.token == remote.token)
+        };
+        if unsaid(&Servers::load()) {
+            let _ = Servers::change(|servers| {
+                if unsaid(servers) {
+                    if let Some(entry) = servers.servers.get_mut(name) {
+                        entry.user = Some(user.to_owned());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    Ok(client)
+}
+
+/// Moves a directory connected before 0.40, which keeps an address and a
+/// token of its own, to the form that names its server, once; said in a
+/// line. What fails leaves it as it was, working as before.
+fn name_its_server(cli: &Cli) {
+    let Ok(root) = root_of(cli) else { return };
+    match kitod::servers::adopt(&root) {
+        Ok(Some(adopted)) => {
+            let beside = match &adopted.beside {
+                Some(other) => format!(
+                    " (another account of that server, or that server known another way, is kept as `{other}`)"
+                ),
+                None => String::new(),
+            };
+            eprintln!(
+                "kito: {} names its server now: `{}`, kept with your servers{beside} (`kito server list`)",
+                root.display(),
+                adopted.name
+            );
+            // A daemon started before the move may be of the version before,
+            // which would not find the connection: the next command starts
+            // one again.
+            let _ = stop_daemon(&root);
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("kito: {} keeps its connection as it was: {e}", root.display()),
+    }
+}
+
+fn cmd_sign_in(cli: &Cli, method: &Option<String>, server: Option<&str>) -> Outcome {
+    let remote = server_of(cli, server)?;
+    if remote.server.is_none() {
+        if remote.command.is_empty() {
+            // Not one of the person's servers: said as reaching it says it.
+            Client::remote(&remote, false).map_err(fail)?;
+        }
+        return Err(format!("{} is reached through SSH, which knows you by your key", remote.place()));
+    }
+    let method = method.clone().or_else(|| remote.sign_in.clone()).ok_or_else(|| {
+        format!(
+            "{} was connected with a token: say the way to sign in, as in `kito sign-in github`",
+            remote.place()
+        )
+    })?;
     let (remote, signed) = sign_in_to(remote, &method)?;
     // Asked as the person they now are, before anything is kept.
-    Client::remote(&remote, true).map_err(fail)?;
-    remote.save(&root).map_err(fail)?;
-    // The directory's daemon holds the session it started with: the next
-    // command starts one that has this one.
-    if let Ok(mut client) = Client::connect(&root) {
-        let _ = client.call_value("shutdown", json!({}));
+    Client::remote(&remote, !remote.repo.is_empty()).map_err(fail)?;
+    let user = signed["user"].as_str().unwrap_or("?").to_owned();
+    match &remote.name {
+        Some(name) => Servers::change(|servers| {
+            let entry = servers.servers.entry(name.clone()).or_insert_with(|| Server::of(&remote));
+            entry.token = remote.token.clone();
+            entry.sign_in = remote.sign_in.clone();
+            entry.user = Some(user.clone());
+            Ok(())
+        })?,
+        // A directory still connected the old way keeps its own.
+        None => remote.save(&root_of(cli)?).map_err(fail)?,
     }
-    let (user, days) = (signed["user"].as_str().unwrap_or("?"), signed["days"].as_u64().unwrap_or(0));
+    // The directory's daemon asks with the session it has: the next
+    // command starts one that has this one.
+    if let Some(root) = root_of(cli).ok().filter(|root| Remote::read(root).is_some()) {
+        let _ = stop_daemon(&root);
+    }
+    let days = signed["days"].as_u64().unwrap_or(0);
     if cli.json {
         print_json(&json!({ "user": user, "method": method, "days": days, "server": remote.place() }));
     } else {
@@ -3522,19 +3706,223 @@ fn cmd_sign_in(cli: &Cli, method: &Option<String>) -> Outcome {
     Ok(())
 }
 
-fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, chosen: &Chosen) -> Outcome {
-    let dir = dir.clone().unwrap_or_else(|| PathBuf::from(repo));
+/// How `kito connect` was told to know the server and the person.
+#[derive(Default)]
+struct Ways {
+    as_name: Option<String>,
+    token: Option<String>,
+    sign_in: Option<String>,
+    fingerprint: Option<String>,
+    authority: bool,
+    plain: bool,
+}
+
+/// Who the person is on a server, as it answers: an error when what is
+/// kept no longer lets them in, or the server cannot be asked.
+fn whoami(remote: &Remote) -> Result<String, String> {
+    let me: Value = Client::remote(remote, false)
+        .and_then(|mut client| client.call("server.whoami", json!({})))
+        .map_err(fail)?;
+    Ok(me["user"].as_str().unwrap_or("?").to_owned())
+}
+
+/// `kito connect <server>`: signs in to a server and keeps it, as the
+/// current one (ADR 0023); with a repository, then what `kito clone`
+/// does.
+fn cmd_connect(
+    cli: &Cli,
+    given: &str,
+    second: Option<&str>,
+    third: Option<PathBuf>,
+    ways: &Ways,
+    chosen: &Chosen,
+) -> Outcome {
+    let (address, repo, dir) = address_of(given, second, third)?;
+    let wanted = Server::of(&remote_for(&address, "", &None, &None)?);
+    let asked_name = ways.as_name.clone().unwrap_or_else(|| wanted.name());
+    if asked_name.trim().is_empty() || asked_name.contains(['\n', '\r']) {
+        return Err(format!("`{asked_name}` is no name for a server: give one with --as"));
+    }
+    // A name is one server's: another server is never replaced.
+    let servers = my_servers()?;
+    let other_place = |name: &str| servers.servers.get(name).filter(|known| !known.same_place(&wanted));
+    let name = match (other_place(&asked_name), &ways.as_name) {
+        (None, _) => asked_name.clone(),
+        (Some(other), Some(_)) => {
+            return Err(format!(
+                "`{asked_name}` is the name of another server of yours ({}): give this one another name with \
+                 --as, or `kito server remove {asked_name}` first",
+                other.place()
+            ))
+        }
+        // The first of `host-2`, `host-3`… that is free or is this server.
+        (Some(_), None) => (2..)
+            .map(|n| format!("{asked_name}-{n}"))
+            .find(|name| other_place(name).is_none())
+            .unwrap_or_default(),
+    };
+    let known = servers.servers.get(&name).filter(|known| known.same_place(&wanted)).cloned();
+    let told = ways.token.is_some() || ways.sign_in.is_some();
+    let trust_told = ways.fingerprint.is_some() || ways.authority || ways.plain;
+    // Known, and what is kept still lets the person in: nobody signs in again.
+    let still = match &known {
+        Some(known) if !told && !trust_told => {
+            whoami(&known.remote(&name, "")).ok().map(|me| (known.clone(), me))
+        }
+        _ => None,
+    };
+    let (mut server, me) = match still {
+        Some(found) => found,
+        None => {
+            // Who the server is comes first: nobody signs in to another.
+            let remote = remote_for(&address, "", &ways.token, &ways.sign_in)?;
+            let remote = match &known {
+                // Known already, by what was checked when it was connected.
+                Some(known) if !trust_told => Remote {
+                    fingerprint: known.fingerprint.clone(),
+                    authority: known.authority,
+                    plain: known.plain,
+                    ..remote
+                },
+                _ => trusted(remote, &ways.fingerprint, ways.authority, ways.plain)?,
+            };
+            let remote = signed_in(remote, &ways.sign_in)?;
+            let me = whoami(&remote)?;
+            (Server::of(&remote), me)
+        }
+    };
+    server.user = Some(me.clone());
+    // Who the name is kept for, as the entry says or, when it does not,
+    // as what it keeps still answers; one it no longer lets in is replaced.
+    let was = known.as_ref().and_then(|known| match &known.user {
+        Some(user) => Some(user.clone()),
+        None => whoami(&known.remote(&name, "")).ok(),
+    });
+    let another = |was: &str| {
+        format!(
+            "you are {was} on `{name}`: to be {me} there too, add `--as <name>`; to stop being {was} there, \
+             `kito server remove {name}` first"
+        )
+    };
+    if let Some(was) = was.as_deref().filter(|was| *was != me) {
+        // A session opened for nothing that is kept ends at once.
+        if server.holds_session() && known.as_ref().is_none_or(|known| known.token != server.token) {
+            let _ = Client::remote(&server.remote(&name, ""), false)
+                .and_then(|mut client| client.call::<Value>("server.sign_out", json!({})));
+        }
+        return Err(another(was));
+    }
+    // A repository the server refuses leaves nothing behind.
+    if let Some(repo) = &repo {
+        Client::remote(&server.remote(&name, repo), true).map_err(fail)?;
+    }
+    Servers::change(|servers| {
+        // Looked at again, held: another command may have kept one meanwhile.
+        match servers.servers.get(&name) {
+            Some(other) if !other.same_place(&server) => {
+                return Err(format!(
+                    "`{name}` was given to another server of yours meanwhile ({})",
+                    other.place()
+                ))
+            }
+            Some(other)
+                if other.user.as_deref().is_some_and(|user| user != me && Some(user) != was.as_deref()) =>
+            {
+                return Err(another(other.user.as_deref().unwrap_or("?")))
+            }
+            _ => {}
+        }
+        servers.servers.insert(name.clone(), server.clone());
+        servers.current = Some(name.clone());
+        Ok(())
+    })?;
+    if name != asked_name {
+        eprintln!(
+            "kito: `{asked_name}` is the name of another server of yours: this one is kept as `{name}` (`--as` gives \
+             another)"
+        );
+    }
+    if let Some(repo) = repo {
+        return clone_into(cli, server.remote(&name, &repo), dir, chosen);
+    }
+    let repos: Vec<String> = Client::remote(&server.remote(&name, ""), false)
+        .and_then(|mut client| client.call("server.repos", json!({})))
+        .map_err(fail)?;
+    if cli.json {
+        print_json(&json!({
+            "server": name,
+            "address": server.place(),
+            "user": me,
+            "current": true,
+            "repos": repos,
+        }));
+        return Ok(());
+    }
+    println!("{}Connected to {} as {me}: `{name}` is your current server.", paint::mark(), server.place());
+    print_trust(&server.remote(&name, ""));
+    match repos.as_slice() {
+        [] => println!("You may use no repository there yet."),
+        repos => println!("The repositories you may use there: {}.", repos.join(", ")),
+    }
+    let example = repos.first().map(String::as_str).unwrap_or("<repository>");
+    println!("{}", paint::hints(&format!("`kito clone {example}` makes a directory of one.")));
+    Ok(())
+}
+
+/// How the server is known to be the one meant, in a line.
+fn print_trust(remote: &Remote) {
+    match (&remote.fingerprint, remote.authority, remote.plain) {
+        (Some(print), ..) => println!(
+            "The connection is encrypted, and the server is known by its certificate ({print}): one that \
+             presents another is refused."
+        ),
+        (None, true, _) => println!("The connection is encrypted, and the server is known by its name."),
+        (None, false, true) => println!("The connection is NOT encrypted (--plain)."),
+        _ => {}
+    }
+}
+
+/// Whether what `kito clone` is given is an address rather than a
+/// repository's name: `kito clone kito.example.com/shop` is `kito connect`.
+fn is_address(given: &str) -> bool {
+    given.contains('/') || given.contains("://")
+}
+
+/// `kito clone <repo> [dir]`: a directory of a repository of the server
+/// asked (ADR 0023).
+fn cmd_clone(cli: &Cli, repo: &str, dir: Option<PathBuf>, server: Option<&str>, chosen: &Chosen) -> Outcome {
+    if is_address(repo) {
+        if server.is_some() {
+            return Err(format!("{repo} is an address: --server is for the name of a repository"));
+        }
+        let dir = dir.map(|dir| dir.to_string_lossy().into_owned());
+        return cmd_connect(cli, repo, dir.as_deref(), None, &Ways::default(), chosen);
+    }
+    let remote = server_of(cli, server)?;
+    clone_into(cli, Remote { repo: repo.to_owned(), ..remote }, dir, chosen)
+}
+
+/// Makes `dir` (default: one named as the repository) a directory of the
+/// remote's repository: it names the server, and the main lane's files
+/// come into it. Files it has already are left as they are.
+fn clone_into(cli: &Cli, remote: Remote, dir: Option<PathBuf>, chosen: &Chosen) -> Outcome {
+    let repo = remote.repo.clone();
+    let dir = dir.unwrap_or_else(|| PathBuf::from(&repo));
     if dir.join(".kito").join("format").is_file() {
         return Err(format!("{} is a repository of its own: connect another directory", dir.display()));
     }
     // Asked first: a connection the server refuses leaves nothing behind.
-    let mut client = Client::remote(&remote, true).map_err(fail)?;
+    let mut client = reached(&remote, true)?;
     let me: Value = client.call("server.whoami", json!({})).map_err(fail)?;
     std::fs::create_dir_all(&dir).map_err(fail)?;
-    remote.save(&dir).map_err(fail)?;
+    match &remote.name {
+        Some(name) => Remote::save_named(&dir, name, &repo).map_err(fail)?,
+        // A server of a directory still connected the old way.
+        None => remote.save(&dir).map_err(fail)?,
+    }
     let dir = dir.canonical().map_err(fail)?;
-    // Connected again, with a new token for one: the daemon it had holds
-    // what it was started with, and the one started now has this.
+    // Connected again: the daemon it had holds what it was started with,
+    // and the one started now has this.
     let _ = stop_daemon(&dir);
     // The main lane's files come first, so that the directory is the
     // project; then what Claude Code needs, added to what the project has.
@@ -3553,6 +3941,7 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
             "dir": dir,
             "repo": repo,
             "server": remote.place(),
+            "name": remote.name,
             "user": me["user"],
             "files": main.as_ref().ok().map(|main| main["files"].clone()),
             "claude": setup.as_ref().map(claude::Setup::json),
@@ -3565,15 +3954,7 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
             remote.place(),
             me["user"].as_str().unwrap_or("?")
         );
-        match (&remote.fingerprint, remote.authority, remote.plain) {
-            (Some(print), ..) => println!(
-                "The connection is encrypted, and the server is known by its certificate ({print}): one that \
-                 presents another is refused."
-            ),
-            (None, true, _) => println!("The connection is encrypted, and the server is known by its name."),
-            (None, false, true) => println!("The connection is NOT encrypted (--plain)."),
-            _ => {}
-        }
+        print_trust(&remote);
         match &main {
             Ok(main) => println!(
                 "The main lane is in it ({}), kept as the server has it: to change something, open a lane.",
@@ -3593,6 +3974,123 @@ fn cmd_connect(cli: &Cli, remote: Remote, repo: &str, dir: &Option<PathBuf>, cho
         }
     }
     Ok(())
+}
+
+/// `kito server`: the person's servers (ADR 0023).
+fn cmd_server(cli: &Cli, command: Option<&ServerCmd>) -> Outcome {
+    match command {
+        None | Some(ServerCmd::List) => {
+            let servers = my_servers()?;
+            let current = servers.current.as_deref();
+            if cli.json {
+                // Never a token: how one signs in, not with what.
+                let listed: Vec<Value> = servers
+                    .servers
+                    .iter()
+                    .map(|(name, server)| {
+                        json!({
+                            "name": name,
+                            "address": server.address,
+                            "command": (!server.command.is_empty()).then_some(&server.command),
+                            "user": server.user,
+                            "sign_in": server.sign_in,
+                            "current": current == Some(name.as_str()),
+                        })
+                    })
+                    .collect();
+                print_json(&json!({ "current": current, "servers": listed }));
+                return Ok(());
+            }
+            if servers.servers.is_empty() {
+                println!("{}", paint::hints("No server yet: `kito connect <server>` adds one."));
+                return Ok(());
+            }
+            let width = servers.servers.keys().map(String::len).max().unwrap_or(0);
+            let places = servers.servers.values().map(|server| server.place().len()).max().unwrap_or(0);
+            for (name, server) in &servers.servers {
+                let mark = if current == Some(name.as_str()) { "*" } else { " " };
+                let who = match (&server.user, &server.sign_in, server.command.is_empty()) {
+                    (Some(user), Some(method), _) => format!("as {user}, signed in with {method}"),
+                    (Some(user), None, _) => format!("as {user}"),
+                    (None, _, false) => "as whoever SSH says".to_owned(),
+                    (None, ..) => "not asked yet".to_owned(),
+                };
+                println!("{mark} {name:<width$}  {:<places$}  {who}", server.place());
+            }
+            Ok(())
+        }
+        Some(ServerCmd::Use { name }) => {
+            Servers::change(|servers| {
+                match servers.servers.contains_key(name) {
+                true => {
+                    servers.current = Some(name.clone());
+                    Ok(())
+                }
+                false => Err(format!(
+                    "`{name}` is not one of your servers (`kito server list` says which are): `kito connect` to it \
+                     first"
+                )),
+            }
+            })?;
+            if cli.json {
+                print_json(&json!({ "current": name }));
+            } else {
+                println!("`{name}` is your current server.");
+            }
+            Ok(())
+        }
+        Some(ServerCmd::Remove { name }) => {
+            let servers = my_servers()?;
+            let server = servers.servers.get(name).ok_or_else(|| {
+                format!("`{name}` is not one of your servers (`kito server list` says which are)")
+            })?;
+            // A session is ended there, as far as the server answers; a
+            // token is the person's, and stays theirs.
+            let ended = match server.holds_session() {
+                true => Some(
+                    Client::remote(&server.remote(name, ""), false)
+                        .and_then(|mut client| client.call::<Value>("server.sign_out", json!({})))
+                        .map_err(fail),
+                ),
+                false => None,
+            };
+            // A person's token, said before it is forgotten: Kito keeps it
+            // nowhere else, a directory moved to the new form included.
+            let token_forgotten = !server.holds_session() && server.token.is_some();
+            if token_forgotten && !cli.json {
+                println!(
+                    "`{name}` holds your token there, which Kito keeps nowhere else: it is forgotten with it, and \
+                     only an admin of that server can give you another."
+                );
+            }
+            Servers::change(|servers| {
+                servers.servers.remove(name);
+                if servers.current.as_deref() == Some(name.as_str()) {
+                    servers.current = None;
+                }
+                Ok(())
+            })?;
+            let session_ended = matches!(&ended, Some(Ok(said)) if said["ended"] == true);
+            if cli.json {
+                print_json(&json!({
+                    "removed": name,
+                    "session_ended": session_ended,
+                    "token_forgotten": token_forgotten,
+                }));
+                return Ok(());
+            }
+            println!("`{name}` is forgotten: directories connected to it reach it no longer.");
+            match ended {
+                Some(Ok(_)) if session_ended => println!("Your session there ended."),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    println!("Your session there could not be ended ({e}): it ends when it runs out.")
+                }
+                None => {}
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `7d`, `12h`, `2w` before now, or a day (`2026-11-01`), in milliseconds since 1970.
@@ -3644,8 +4142,7 @@ fn asked_everywhere(
     let remote = Remote::load(&root).ok_or(
         "--everywhere is for a directory connected to a server: it asks every repository you may use there",
     )?;
-    let repos: Vec<String> =
-        Client::remote(&remote, false).map_err(fail)?.call("server.repos", json!({})).map_err(fail)?;
+    let repos: Vec<String> = reached(&remote, false)?.call("server.repos", json!({})).map_err(fail)?;
     let mut answers = Vec::new();
     for repo in repos {
         let there = Remote { repo: repo.clone(), ..remote.clone() };
@@ -3929,19 +4426,19 @@ fn cmd_task(cli: &Cli, command: Option<&TaskCmd>) -> Outcome {
     Ok(())
 }
 
-/// The server this directory is connected to, asked as its person: about
-/// the repository (`repo`), or about the server.
-fn server_here(cli: &Cli, repo: bool) -> Result<(Remote, Client), String> {
+/// The server this directory is connected to, asked as its person about
+/// the directory's repository.
+fn server_here(cli: &Cli) -> Result<(Remote, Client), String> {
     let root = root_of(cli)?;
     let remote = Remote::load(&root)
         .ok_or("this directory is a repository of its own: who may use it is for a server to say")?;
-    let client = Client::remote(&remote, repo).map_err(fail)?;
+    let client = reached(&remote, true)?;
     Ok((remote, client))
 }
 
 /// `kito members` (ADR 0014).
 fn cmd_members(cli: &Cli) -> Outcome {
-    let (remote, mut client) = server_here(cli, true)?;
+    let (remote, mut client) = server_here(cli)?;
     let said: Value = client.call("server.members", json!({})).map_err(fail)?;
     if cli.json {
         print_json(&said);
@@ -3961,7 +4458,7 @@ fn cmd_members(cli: &Cli) -> Outcome {
 
 /// `kito grant <name> <role>` and `kito revoke <name>`.
 fn cmd_grant(cli: &Cli, name: &str, role: Option<&String>) -> Outcome {
-    let (remote, mut client) = server_here(cli, true)?;
+    let (remote, mut client) = server_here(cli)?;
     let said: Value = client.call("server.grant", json!({ "user": name, "role": role })).map_err(fail)?;
     if cli.json {
         print_json(&said);
@@ -3976,10 +4473,6 @@ fn cmd_grant(cli: &Cli, name: &str, role: Option<&String>) -> Outcome {
     Ok(())
 }
 
-/// What a session's token starts with, as the server makes them: told
-/// apart from the token of a person.
-const SESSION_PREFIX: &str = "kitos_";
-
 /// How a person signs in, as the server said it (`token`, `logins`): with
 /// a token, as who a way to sign in says they are, or both.
 fn signs_in(said: &Value) -> Vec<String> {
@@ -3990,8 +4483,8 @@ fn signs_in(said: &Value) -> Vec<String> {
 
 /// `kito people`: the server's people, for its admins; and how one signs
 /// in oneself, for anybody.
-fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
-    let (remote, mut client) = server_here(cli, false)?;
+fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>, server: Option<&str>) -> Outcome {
+    let (remote, mut client) = server_asked(cli, server)?;
     let said: Value = match command {
         None => client.call("server.people", json!({})),
         Some(PeopleCmd::Add { name, role, email, identity }) => client.call(
@@ -4086,9 +4579,9 @@ fn cmd_people(cli: &Cli, command: Option<&PeopleCmd>) -> Outcome {
 
 /// `kito people token [<name>] [--remove | --alone]`: a new token, or
 /// none; with `--alone`, a new token and nothing else to sign in with. A
-/// new one of the person's own is written in this directory when a token
-/// is what it connects with, so that it keeps working; it is printed
-/// either way, this once.
+/// new one of the person's own is kept with their servers when a token is
+/// what they connect with, so that every directory of that server goes on
+/// with it (ADR 0023); it is printed either way, this once.
 fn people_token(
     cli: &Cli,
     mut remote: Remote,
@@ -4096,7 +4589,6 @@ fn people_token(
     name: Option<&str>,
     (remove, alone): (bool, bool),
 ) -> Outcome {
-    let root = root_of(cli)?;
     // Whether the person named is who asks: asked before the token
     // changes, of a connection that may have been opened with it.
     let own = match name {
@@ -4111,17 +4603,34 @@ fn people_token(
     let mut said: Value = client.call("server.people_token", asked).map_err(fail)?;
     let person = said["user"].as_str().unwrap_or("?").to_owned();
     let token = said["token"].as_str().map(str::to_owned);
-    // What this directory connects with: a person's token, or a session
+    // What the person connects with: a token of theirs, or a session
     // (which goes on as it is) or SSH.
     let held = remote.token.as_deref().filter(|_| remote.server.is_some() && remote.sign_in.is_none());
-    let by_token = held.is_some_and(|held| !held.starts_with(SESSION_PREFIX));
+    let by_token = held.is_some_and(|held| !held.starts_with(kitod::servers::SESSION_PREFIX));
+    // A directory this runs in, connected to the server asked.
+    let here =
+        root_of(cli).ok().filter(|root| Remote::load(root).is_some_and(|it| it.place() == remote.place()));
     let kept = match (&token, own && by_token) {
         (Some(token), true) => {
             remote.token = Some(token.clone());
-            let kept = remote.save(&root).map_err(fail);
+            let kept = match (&remote.name, &here) {
+                (Some(name), _) => Servers::change(|servers| match servers.servers.get_mut(name) {
+                    Some(entry) => {
+                        entry.token = Some(token.clone());
+                        Ok(())
+                    }
+                    None => Err(format!("`{name}` is no longer one of your servers")),
+                }),
+                // A directory still connected the old way keeps its own.
+                (None, Some(root)) => remote.save(root).map_err(fail),
+                (None, None) => Err("nothing keeps the connection".to_owned()),
+            };
             // The directory's daemon holds the token it started with: the
-            // next command starts one that has this one.
-            let _ = stop_daemon(&root);
+            // next command starts one that has this one. The daemons of
+            // other directories take it when they connect again.
+            if let Some(root) = &here {
+                let _ = stop_daemon(root);
+            }
             Some(kept)
         }
         _ => None,
@@ -4145,7 +4654,7 @@ fn people_token(
             false => println!("Their sessions ended, and {connected}."),
         }
         if own && by_token {
-            println!("This directory was connected with it: `kito sign-in <method>` connects it again.");
+            println!("You connected with it: `kito sign-in <method>` signs you in again.");
         }
         return Ok(());
     };
@@ -4154,18 +4663,21 @@ fn people_token(
         false => println!("{person}'s new token on {place}, shown this once:\n{token}"),
     }
     // Who else needs it, in a line.
+    let server = remote.name.as_deref().map_or_else(|| place.clone(), |name| format!("`{name}`"));
     match (own, kept) {
+        (true, Some(Ok(()))) if remote.name.is_some() => {
+            println!("It is kept with your servers: every directory connected to {server} uses it already.")
+        }
         (true, Some(Ok(()))) => println!(
             "This directory has it. The other directories connected with the one you had need it too: `kito \
              connect` them again with it."
         ),
-        (true, Some(Err(why))) => println!(
-            "It could not be written in this directory ({why}): `kito connect` it again with it, and the \
-             other directories connected with the one you had."
-        ),
+        (true, Some(Err(why))) => {
+            println!("It could not be kept ({why}): `kito connect` to {place} again with it.")
+        }
         (true, None) => println!(
-            "This directory goes on as it is connected. The directories connected with a token you had need \
-             this one: `kito connect` them again with it."
+            "You go on as you are connected to {server}. What was connected with a token you had needs this \
+             one: `kito connect` it again with it."
         ),
         (false, _) => println!(
             "A token they had no longer works, and their sessions ended: the directories connected with it \
@@ -4226,8 +4738,10 @@ fn hears_which(version: Option<&str>) -> bool {
 }
 
 /// `kito audit` (ADR 0017): the server's, for its admins.
+#[allow(clippy::too_many_arguments)]
 fn cmd_audit(
     cli: &Cli,
+    server: Option<&str>,
     requests: bool,
     who: &Option<String>,
     kind: &Option<String>,
@@ -4235,7 +4749,7 @@ fn cmd_audit(
     limit: usize,
     verify: bool,
 ) -> Outcome {
-    let (remote, mut client) = server_here(cli, false)?;
+    let (remote, mut client) = server_asked(cli, server)?;
     if verify {
         let said: Value = client.call("server.audit_verify", json!({})).map_err(fail)?;
         if cli.json {
@@ -4279,8 +4793,8 @@ fn cmd_audit(
 }
 
 /// `kito backup [now]`: the server's backups, for its admins.
-fn cmd_backup(cli: &Cli, what: Option<&str>) -> Outcome {
-    let (remote, mut client) = server_here(cli, false)?;
+fn cmd_backup(cli: &Cli, what: Option<&str>, server: Option<&str>) -> Outcome {
+    let (remote, mut client) = server_asked(cli, server)?;
     let said: Value = match what {
         None | Some("list") => client.call("server.backups", json!({})).map_err(fail)?,
         Some("now") => client.call("server.backup_now", json!({})).map_err(fail)?,
@@ -4326,6 +4840,9 @@ fn cmd_backup(cli: &Cli, what: Option<&str>) -> Outcome {
 /// files of its main lane; written to `out`. Answers how many files.
 fn pack_kito_repository(root: &Path, out: &Path, key: &[u8; 32]) -> Result<usize, String> {
     let mut client = Client::connect_or_start(root).map_err(fail)?;
+    // What is saved in the directory is recorded first: nothing is in
+    // neither history.
+    let _: Value = client.call("sync", json!({})).map_err(fail)?;
     let listed: Value = client.call("lane_files", json!({})).map_err(fail)?;
     let mut files: Vec<PathBuf> = listed["files"]
         .as_array()
@@ -4385,8 +4902,13 @@ fn upload(
 }
 
 /// `kito repos …` (ADR 0018): the server's repositories, for its admins.
-fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
-    let (remote, mut client) = server_here(cli, false)?;
+fn cmd_repos_manage(cli: &Cli, command: &ReposCmd, server: Option<&str>) -> Outcome {
+    let (remote, mut client) = server_asked(cli, server)?;
+    // The repository this runs in, sent whole: connected to it once the
+    // server has it, unless it is only to be sent (ADR 0023).
+    let mut in_place: Option<PathBuf> = None;
+    // Its permanent lanes, which go with it.
+    let mut permanent: Vec<String> = Vec::new();
     let said: Value = match command {
         ReposCmd::All => {
             let all: Value = client.call("server.repos_all", json!({})).map_err(fail)?;
@@ -4419,14 +4941,53 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
             }
             return Ok(());
         }
-        ReposCmd::Add { name, from, token_file, push } => match (from, push) {
+        ReposCmd::Add { name, from, token_file, push, keep_local } => match (from, push) {
             (Some(_), Some(_)) => {
                 return Err("a repository comes from a git address or from a directory here, not both".into())
             }
             (None, Some(dir)) => {
-                let dir = std::path::absolute(dir).map_err(|e| e.to_string())?;
+                let mut dir = std::path::absolute(dir).map_err(|e| e.to_string())?;
+                let is_local = |dir: &Path| dir.join(".kito").join("format").is_file();
+                // A directory inside a repository of this machine, and no
+                // repository itself: that repository.
+                if !is_local(&dir) && !dir.join(".git").exists() {
+                    if let Some(root) = find_root(&dir).filter(|root| is_local(root)) {
+                        dir = root;
+                    }
+                }
+                let local = is_local(&dir);
+                let here = root_of(cli).ok().filter(|_| local);
+                if here.is_some() && here == dir.canonical().ok() && !keep_local {
+                    // Refused before anything is sent: a lane's working
+                    // copy is not left behind without a word.
+                    let lanes: Vec<LaneInfo> = Client::connect_or_start(&dir)
+                        .and_then(|mut client| client.call("lanes", json!({ "all": false })))
+                        .map_err(fail)?;
+                    let open: Vec<&str> = lanes
+                        .iter()
+                        .filter(|lane| lane.state != "closed" && lane.name.is_none())
+                        .map(|lane| lane.id.as_str())
+                        .collect();
+                    permanent = lanes.iter().filter_map(|lane| lane.name.clone()).collect();
+                    if !open.is_empty() {
+                        return Err(format!(
+                            "this repository has open lanes ({}), whose working copies would stay behind when \
+                             it is connected to the server: close or integrate them first, or only send it \
+                             with --keep-local",
+                            open.join(", ")
+                        ));
+                    }
+                    if remote.name.is_none() {
+                        return Err(
+                            "the server is not one of yours: `kito connect` to it first, or only send \
+                                    the repository with --keep-local"
+                                .into(),
+                        );
+                    }
+                    in_place = here;
+                }
                 let staged = std::env::temp_dir().join(format!("kito-push-{}", std::process::id()));
-                let done = if dir.join(".kito").join("format").is_file() {
+                let done = if local {
                     let key = kitod::archive::random_key()?;
                     let count = pack_kito_repository(&dir, &staged, &key)?;
                     eprintln!("kito: {count} files of {} packed", dir.display());
@@ -4492,15 +5053,47 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
             client.call("server.repo_rename", json!({ "from": from, "to": to })).map_err(fail)?
         }
     };
+    let mut said = said;
+    let name = said["name"].as_str().unwrap_or("?").to_owned();
+    if let Some(root) = &in_place {
+        let aside = connect_in_place(root, &remote, &name)?;
+        if cli.json {
+            said["connected"] = json!(root);
+            said["kept"] = json!(aside);
+            said["permanent_lanes"] = json!(permanent);
+            print_json(&said);
+            return Ok(());
+        }
+        println!(
+            "{}`{name}` is on {}, and you maintain it. This directory is connected to it now, as `kito clone` \
+             makes one.",
+            paint::mark(),
+            remote.place()
+        );
+        println!("Its local history is kept, as it was, in {}.", aside.display());
+        if !permanent.is_empty() {
+            println!(
+                "Its permanent lanes ({}) are in the repository on the server; their working copies here are in \
+                 the history kept.",
+                permanent.join(", ")
+            );
+        }
+        return Ok(());
+    }
     if cli.json {
         print_json(&said);
         return Ok(());
     }
-    let name = said["name"].as_str().unwrap_or("?");
+    // How to get a directory of it, from anywhere.
+    let clone = match &remote.name {
+        Some(server) if Servers::load().current.as_deref() != Some(server.as_str()) => {
+            format!("kito clone {name} --server {server}")
+        }
+        _ => format!("kito clone {name}"),
+    };
     match command {
         ReposCmd::Add { .. } => println!(
-            "`{name}` is on {}, and you maintain it: `kito connect {}/{name}` in a new directory, `kito grant` to give it.",
-            remote.place(),
+            "`{name}` is on {}, and you maintain it: `{clone}` makes a directory of it, `kito grant` there gives it.",
             remote.place()
         ),
         ReposCmd::Archive { .. } => println!("`{name}` is archived: nobody reaches it, and it is deleted in 30 days."),
@@ -4515,12 +5108,67 @@ fn cmd_repos_manage(cli: &Cli, command: &ReposCmd) -> Outcome {
     Ok(())
 }
 
-fn cmd_repos(cli: &Cli) -> Outcome {
-    let root = root_of(cli)?;
-    let remote = Remote::load(&root)
-        .ok_or("this directory is a repository of its own: `kito repos` is for one connected to a server")?;
-    let repos: Vec<String> =
-        Client::remote(&remote, false).map_err(fail)?.call("server.repos", json!({})).map_err(fail)?;
+/// Connects the repository `root`, which the server has now as `repo`,
+/// to it, in place (ADR 0023). Its daemon stops; `.kito` is set aside
+/// whole as `.kito-local-<UTC date-time>`, never deleted; the directory is
+/// then connected as `kito clone` connects one, into the files it has,
+/// which are left as they are. What fails after `.kito` was set aside
+/// puts it back. Answers where it was set aside.
+fn connect_in_place(root: &Path, remote: &Remote, repo: &str) -> Result<PathBuf, String> {
+    let place = remote.place();
+    let server = remote.name.clone().unwrap_or_else(|| place.clone());
+    let failed = |why: String| {
+        format!(
+            "`{repo}` is on {place}, but this directory was not connected to it ({why}). It is as it was: \
+             `kito clone {repo}` makes another directory of it"
+        )
+    };
+    stop_daemon(root).map_err(failed)?;
+    // Nothing is moved from under a daemon that still answers.
+    if Client::connect(root).is_ok() {
+        return Err(failed("its daemon did not stop, so nothing was moved".to_owned()));
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    // `2026-11-23 10:15:00` as a name every system takes: `2026-11-23T101500Z`.
+    let stamp = utc(now as u64).replacen(' ', "T", 1).replace(':', "") + "Z";
+    let kito = root.join(kito_store::STORE_DIR);
+    let aside = (1..)
+        .map(|n| match n {
+            1 => root.join(format!("{}{stamp}", kitod::servers::LOCAL_BACKUP_PREFIX)),
+            n => root.join(format!("{}{stamp}-{n}", kitod::servers::LOCAL_BACKUP_PREFIX)),
+        })
+        .find(|path| !path.exists())
+        .unwrap_or_default();
+    std::fs::rename(&kito, &aside).map_err(|e| failed(format!("{}: {e}", kito.display())))?;
+    let connected = (|| -> Result<(), String> {
+        Remote::save_named(root, &server, repo).map_err(fail)?;
+        let mut client = Client::connect_or_start(root).map_err(fail)?;
+        let _: Value = client.call("attach", json!({ "lane": "main" })).map_err(fail)?;
+        Ok(())
+    })();
+    let Err(why) = connected else {
+        return Ok(aside);
+    };
+    // What is in `.kito` now was made here since: the store goes back.
+    let _ = stop_daemon(root);
+    let back = std::fs::remove_dir_all(&kito)
+        .or_else(|e| if kito.exists() { Err(e) } else { Ok(()) })
+        .and_then(|()| std::fs::rename(&aside, &kito));
+    match back {
+        Ok(()) => Err(failed(why)),
+        Err(e) => Err(format!(
+            "`{repo}` is on {place}, but this directory was not connected to it ({why}), and its history could \
+             not be put back ({e}): it is whole in {}; move it back to {} by hand. `kito clone {repo}` makes \
+             another directory of the repository",
+            aside.display(),
+            kito.display()
+        )),
+    }
+}
+
+fn cmd_repos(cli: &Cli, server: Option<&str>) -> Outcome {
+    let remote = server_of(cli, server)?;
+    let repos: Vec<String> = reached(&remote, false)?.call("server.repos", json!({})).map_err(fail)?;
     if cli.json {
         print_json(&json!({ "server": remote.place(), "repos": repos, "connected": remote.repo }));
         return Ok(());
@@ -5589,6 +6237,9 @@ fn run() -> ExitCode {
             }
         };
     }
+    // A hook only reads; any other command moves a directory connected
+    // before 0.40 to the form that names its server.
+    name_its_server(&cli);
     // An assistant set up by its plugin: the exit code is the plugin's.
     if let Cmd::Assistant { command } = &cli.command {
         let done = cmd_assistant(&cli, command);
@@ -5644,11 +6295,11 @@ fn run() -> ExitCode {
         Cmd::Members => cmd_members(&cli),
         Cmd::Grant { name, role } => cmd_grant(&cli, name, Some(role)),
         Cmd::Revoke { name } => cmd_grant(&cli, name, None),
-        Cmd::People { command } => cmd_people(&cli, command.as_ref()),
-        Cmd::Audit { requests, who, kind, since, limit, verify } => {
-            cmd_audit(&cli, *requests, who, kind, since, *limit, *verify)
+        Cmd::People { command, server } => cmd_people(&cli, command.as_ref(), server.as_deref()),
+        Cmd::Audit { server, requests, who, kind, since, limit, verify } => {
+            cmd_audit(&cli, server.as_deref(), *requests, who, kind, since, *limit, *verify)
         }
-        Cmd::Backup { what } => cmd_backup(&cli, what.as_deref()),
+        Cmd::Backup { what, server } => cmd_backup(&cli, what.as_deref(), server.as_deref()),
         Cmd::Log { target, limit, lane, verbose } => cmd_log(&cli, target, *limit, lane, *verbose),
         Cmd::Checkpoint { label } => cmd_checkpoint(&cli, label),
         Cmd::ExportGit => cmd_export(&cli),
@@ -5676,6 +6327,7 @@ fn run() -> ExitCode {
             server,
             name,
             dir,
+            as_name,
             token,
             sign_in,
             fingerprint,
@@ -5686,17 +6338,24 @@ fn run() -> ExitCode {
             no_assistants,
         } => {
             let chosen = Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants };
-            // Who the server is comes first: nobody signs in to another.
-            address_of(server, name.as_deref(), dir.clone()).and_then(|(server, name, dir)| {
-                remote_for(&server, &name, token, sign_in)
-                    .and_then(|remote| trusted(remote, fingerprint, *authority, *plain))
-                    .and_then(|remote| signed_in(remote, sign_in))
-                    .and_then(|remote| cmd_connect(&cli, remote, &name, &dir, &chosen))
-            })
+            let ways = Ways {
+                as_name: as_name.clone(),
+                token: token.clone(),
+                sign_in: sign_in.clone(),
+                fingerprint: fingerprint.clone(),
+                authority: *authority,
+                plain: *plain,
+            };
+            cmd_connect(&cli, server, name.as_deref(), dir.clone(), &ways, &chosen)
         }
-        Cmd::SignIn { method } => cmd_sign_in(&cli, method),
-        Cmd::Repos { command: None } => cmd_repos(&cli),
-        Cmd::Repos { command: Some(command) } => cmd_repos_manage(&cli, command),
+        Cmd::Clone { name, dir, server, no_claude, assistants, no_assistants } => {
+            let chosen = Chosen { no_claude: *no_claude, names: assistants.clone(), none: *no_assistants };
+            cmd_clone(&cli, name, dir.clone(), server.as_deref(), &chosen)
+        }
+        Cmd::Server { command } => cmd_server(&cli, command.as_ref()),
+        Cmd::SignIn { method, server } => cmd_sign_in(&cli, method, server.as_deref()),
+        Cmd::Repos { command: None, server } => cmd_repos(&cli, server.as_deref()),
+        Cmd::Repos { command: Some(command), server } => cmd_repos_manage(&cli, command, server.as_deref()),
         Cmd::Watch { lane, count, past } => cmd_watch(&cli, lane, *count, *past),
         Cmd::Who { target } => cmd_who(&cli, target),
         Cmd::Integrate { lanes } => cmd_integrate(&cli, lanes),
@@ -5777,15 +6436,25 @@ mod tests {
         assert_eq!(address("kito.example.com/shop", None).unwrap().0, "kito.example.com:7421");
         assert_eq!(
             address("kito://kito.example.com:9000/shop/", None).unwrap(),
-            ("kito.example.com:9000".into(), "shop".into(), None)
+            ("kito.example.com:9000".into(), Some("shop".into()), None)
         );
         assert_eq!(address("[::1]:7421/shop", None).unwrap().0, "[::1]:7421");
         assert_eq!(address("host/shop", Some("here")).unwrap().2, Some(std::path::PathBuf::from("here")));
-        assert_eq!(address("host:7421", Some("shop")).unwrap(), ("host:7421".into(), "shop".into(), None));
-        assert_eq!(address("ssh://ada@host/srv/kito", Some("shop")).unwrap().1, "shop");
-        assert!(address("host:7421", None).unwrap_err().contains("say the repository too"));
+        assert_eq!(
+            address("host:7421", Some("shop")).unwrap(),
+            ("host:7421".into(), Some("shop".into()), None)
+        );
+        assert_eq!(address("ssh://ada@host/srv/kito", Some("shop")).unwrap().1.as_deref(), Some("shop"));
+        // The server alone: no repository, no directory.
+        assert_eq!(address("host:7421", None).unwrap(), ("host:7421".into(), None, None));
+        assert_eq!(address("kito://kito.example.com", None).unwrap().0, "kito.example.com:7421");
+        assert_eq!(address("kito.example.com/", None).unwrap(), ("kito.example.com:7421".into(), None, None));
+        assert_eq!(address("ssh://ada@host/srv/kito", None).unwrap().1, None);
         assert!(address("https://kito.example.com/shop", None).unwrap_err().contains("web page"));
         assert!(address("host/a/b", None).is_err() && address("/shop", None).is_err());
+        assert!(super::address_of("host/shop", Some("here"), Some("more".into())).is_err());
+        assert!(super::is_address("kito.example.com/shop") && super::is_address("kito://host"));
+        assert!(!super::is_address("shop"));
         let signs = remote_for("kito.example.com:7421", "shop", &None, &Some("github".into())).unwrap();
         assert_eq!((signs.token, signs.sign_in.as_deref()), (None, Some("github")));
         assert!(remote_for("ssh://ada@host/srv/kito", "shop", &None, &Some("github".into())).is_err());

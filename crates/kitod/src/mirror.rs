@@ -74,13 +74,29 @@ const LOG_LINES: usize = 2000;
 /// The connection of a client daemon to its server.
 pub struct Upstream {
     remote: Remote,
+    /// The directory whose connection this is: read again before each new
+    /// connection, so that a session renewed or a token replaced in the
+    /// person's servers is the one used (ADR 0023).
+    root: Option<PathBuf>,
     client: Option<Client>,
     used: Instant,
 }
 
 impl Upstream {
     pub fn new(remote: &Remote) -> Upstream {
-        Upstream { remote: remote.clone(), client: None, used: Instant::now() }
+        Upstream { remote: remote.clone(), root: None, client: None, used: Instant::now() }
+    }
+
+    /// The connection of the directory `root`, connected as `remote` for now.
+    pub fn of(root: &Path, remote: &Remote) -> Upstream {
+        Upstream { root: Some(root.to_owned()), ..Upstream::new(remote) }
+    }
+
+    fn open(&mut self) -> Result<Client, ClientError> {
+        if let Some(now) = self.root.as_deref().and_then(Remote::load) {
+            self.remote = now;
+        }
+        Client::remote(&self.remote, true)
     }
 
     /// Sends a request to the repository on the server.
@@ -97,7 +113,10 @@ impl Upstream {
         for attempt in 0..2 {
             let client = match &mut self.client {
                 Some(client) => client,
-                None => self.client.insert(Client::remote(&self.remote, true)?),
+                None => {
+                    let client = self.open()?;
+                    self.client.insert(client)
+                }
             };
             match client.call_value(method, params.clone()) {
                 Ok(value) => {

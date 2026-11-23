@@ -59,3 +59,5 @@ Compatibility with existing data, migration, what becomes harder.
   (accepted)
 - [0022 · The configuration in force is the one that is written](0022-the-configuration-in-force.md)
   (accepted)
+- [0023 · The servers a client knows](0023-servers-a-client-knows.md)
+  (accepted)

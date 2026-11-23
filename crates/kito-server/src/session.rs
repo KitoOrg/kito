@@ -535,6 +535,17 @@ pub fn run(server: &Server, reader: &mut dyn BufRead, writer: &mut dyn Write, kn
                     request.id,
                     json!({ "user": name, "email": user.email, "role": role.map(Role::word) }),
                 ),
+                // The session this connection was opened with ends: a client
+                // that forgets the server (ADR 0023). A token goes on.
+                "server.sign_out" => {
+                    match token.filter(|token| token.starts_with(crate::state::SESSION_PREFIX)) {
+                        Some(session) => match server.end_session(session) {
+                            Ok(()) => Response::ok(request.id, json!({ "ended": true })),
+                            Err(why) => Response::err(request.id, rpc::INTERNAL_ERROR, why),
+                        },
+                        None => Response::ok(request.id, json!({ "ended": false })),
+                    }
+                }
                 // The plugins that run in the directories connected here (ADR 0007).
                 "server.client_plugins" => Response::ok(request.id, json!(server.client_plugins())),
                 // A plugin on a client's machine asks the plugin of the same
