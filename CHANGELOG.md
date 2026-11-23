@@ -66,6 +66,9 @@ connect` and `kito server use` make a server current.
   it nor a `.kito-local-…` history, as it does not read `.kito`.
 - The server answers `server.sign_out`: the session the connection was
   opened with ends.
+- A repository made from a git one has its files as its history has
+  them, byte for byte, also on a machine whose git turns line endings
+  into its own (Windows, by default).
 - `scripts/demo-phase12.sh` keeps its people's servers in a directory of
   its own, each under their name.
 

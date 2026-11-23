@@ -2275,7 +2275,7 @@ fn a_plugin_is_installed_enabled_and_answered_what_it_was_given() {
     // And where the daemon listens, for a plugin with a client of its own.
     let socket = env.lines().find_map(|line| line.strip_prefix("socket: ")).unwrap();
     match cfg!(windows) {
-        true => assert!(socket.starts_with(r"\.\pipe\kito-"), "{env}"),
+        true => assert!(socket.starts_with(r"\\.\pipe\kito-"), "{env}"),
         false => assert!(Path::new(socket).exists(), "{env}"),
     }
     assert_eq!(kito(root, &["hi", "exit", "7"]).status.code(), Some(7));
@@ -3635,7 +3635,9 @@ fn every_assistant_is_added_the_same_way_and_new_projects_get_the_ones_said() {
     // What this machine has, and how each would be set up.
     let listed = good(&base, &["assistant", "list"]);
     assert!(listed.contains("codex    Codex        on this machine (`codex` on the PATH)"), "{listed}");
-    assert!(listed.contains("zcode    ZCode        on this machine (~/.zcode)"), "{listed}");
+    // `~/.zcode`, or `~\.zcode` where that is how a path is written.
+    let zcode = format!("zcode    ZCode        on this machine (~{}.zcode)", std::path::MAIN_SEPARATOR);
+    assert!(listed.contains(&zcode), "{listed}");
     assert!(listed.contains("claude   Claude Code  not found here"), "{listed}");
     assert!(listed.contains("plugin codex, from the registry"), "{listed}");
     assert!(listed.contains("`kito init` asks"), "{listed}");

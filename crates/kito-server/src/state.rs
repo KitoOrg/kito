@@ -1617,8 +1617,11 @@ impl Server {
         // Windows does not take one that starts with `\\?\` (ADR 0002).
         let local = Path::new(from).canonical().ok().filter(|path| path.is_dir());
         let from = local.as_ref().and_then(|path| path.to_str()).unwrap_or(from);
+        // The files as the history has them, byte for byte: a machine whose
+        // git turns line endings into its own (Windows, by default) would
+        // otherwise give the repository files its history does not have.
         let cloned = std::process::Command::new("git")
-            .args(["clone", "--quiet", from])
+            .args(["clone", "--quiet", "-c", "core.autocrlf=false", from])
             .arg(root)
             .output()
             .map_err(|e| format!("git: {e}"))?;
@@ -3147,7 +3150,7 @@ pub(crate) mod tests {
         // server left it, with lanes of its own, and bob uses it.
         let given = FirstFiles::new(&[("README.md", "# the new shop\n")]).unwrap();
         let made = server.add_repo("shop-again", None, Some(&given), false).unwrap();
-        let root = dir.path().join(REPOS_DIR).join("shop");
+        let root = made.with_file_name("shop");
         std::fs::rename(&made, &root).unwrap();
         let mut repo = kitod::Repo::open(&root).unwrap();
         for intent in ["the first change", "the second change"] {
@@ -3193,7 +3196,7 @@ pub(crate) mod tests {
         assert!(server.which_repo("shop", Some(Which::Live)).unwrap_err().contains("no repository `shop`"));
         // Two of one name, as a server from before 0.39.5 may have them.
         let made = server.add_repo("shop-again", None, None, false).unwrap();
-        let root = dir.path().join(REPOS_DIR).join("shop");
+        let root = made.with_file_name("shop");
         std::fs::rename(&made, &root).unwrap();
         // Both are there: neither is guessed at.
         let both = server.which_repo("shop", None).unwrap_err();

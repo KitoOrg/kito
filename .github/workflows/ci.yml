@@ -33,6 +33,11 @@ jobs:
           # rust-analyzer: one test drives the real one.
           components: rustfmt, clippy, rust-analyzer
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Another name starts the cache again: the one before held builds
+          # that no longer went together, and the tests of the
+          # documentation did not compile against them.
+          prefix-key: v1-rust
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Every failure, not only the first crate's. Fewer at a time on
